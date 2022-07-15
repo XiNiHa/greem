@@ -1,4 +1,2 @@
 [workspace]
-members = [
-  "crates/greem"
-]
+members = ["crates/greem", "crates/greem-build", "example"]
