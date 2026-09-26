@@ -37,12 +37,16 @@ The trait declaration also needed `C: 'a` on the Output GAT; generated field mar
 - No SDL codegen, serializer, null propagation or GraphQL validation is implemented.
 - These compile results are not a memory-safety proof, a full executor proof, or a claim that the ticket can close yet.
 
+## Executable completion follow-up
+
+After accepting explicit per-field adapters, the [Result completion probe](completion/README.md) demonstrates a candidate with real completion and delegation bodies. It uses a proposed default `Resolver::parent_error` hook through a fixed generated field witness, completes object errors before scheduling children, and retains original successful indices. This candidate is awaiting a decision; it does not yet integrate the generic scope builder or result arena.
+
 ## Ownership experiments
 
 See [arena probes](arena/README.md) for the runnable companion experiments. A fixed table of OnceLock slots supports borrowed, lazily initialized Plans. Safe nested generation frames execute joined Send futures with parent-borrowed objects and child-before-parent Drop, but change the lifetime/ownership seam and require serialization before those frames unwind (or separately owned results). The direct `Box<[T], &Bump>` proposal is not Send because Bump is not Sync. These are findings for the ownership discussion, not an adopted replacement design.
 
-## Proposed first decision
+## First decision — agreed
 
 Keep the per-field Resolver primitive. Generate the per-object adapter explicitly for each field, instead of installing one open-ended ObjectResolver-to-Resolver blanket. Retain a macro-free route through explicit Resolver implementations (an explicit adapter macro is another possible convenience).
 
-This proposal is awaiting the human discussion required by the wayfinder prototype ticket. Arena ownership and executable Result completion are subsequent decisions within this same ticket.
+Iha Shin accepted this direction in the live discussion. Arena ownership and executable Result completion remain subsequent decisions within this same ticket.

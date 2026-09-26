@@ -13,19 +13,19 @@ fn execute<'a>(generation: Vec<Box<dyn Scope + 'a>>) -> Fut<'a, ()> {
         if !next.is_empty() { execute(next).await; }
     })
 }
-struct Root<'a> { request: &'a str, owned: String, drops: Arc<AtomicUsize> }
-struct Child<'a> { request: &'a str, parent: &'a str, drops: Arc<AtomicUsize> }
+struct Root<'a> { request: &'a str, owned: String, stall: bool, drops: Arc<AtomicUsize> }
+struct Child<'a> { request: &'a str, parent: &'a str, stall: bool, drops: Arc<AtomicUsize> }
 impl Scope for Root<'_> {
     fn run(&self) -> Fut<'_, Vec<Box<dyn Scope + '_>>> {
         Box::pin(async move {
-            let child: Box<dyn Scope + '_> = Box::new(Child { request: self.request, parent: &self.owned, drops: self.drops.clone() });
+            let child: Box<dyn Scope + '_> = Box::new(Child { request: self.request, parent: &self.owned, stall: self.stall, drops: self.drops.clone() });
             vec![child]
         })
     }
 }
 impl Scope for Child<'_> {
     fn run(&self) -> Fut<'_, Vec<Box<dyn Scope + '_>>> {
-        Box::pin(async move { assert_eq!((self.request, self.parent), ("request", "parent")); vec![] })
+        Box::pin(async move { assert_eq!((self.request, self.parent), ("request", "parent")); if self.stall { futures::future::pending::<()>().await; } vec![] })
     }
 }
 impl Drop for Root<'_> { fn drop(&mut self) { assert_eq!(self.drops.fetch_add(1, Ordering::SeqCst), 1); } }
@@ -34,9 +34,17 @@ fn assert_send<T: Send>(_: &T) {}
 fn main() {
     let request = String::from("request");
     let drops = Arc::new(AtomicUsize::new(0));
-    let run = execute(vec![Box::new(Root { request: &request, owned: "parent".to_owned(), drops: drops.clone() })]);
+    let run = execute(vec![Box::new(Root { request: &request, owned: "parent".to_owned(), stall: false, drops: drops.clone() })]);
     assert_send(&run);
     futures::executor::block_on(run);
     assert_eq!(drops.load(Ordering::SeqCst), 2);
-    println!("dyn Scope + joined Send futures + borrowed request and parent + child-before-parent Drop");
+    let cancelled_drops = Arc::new(AtomicUsize::new(0));
+    futures::executor::block_on(async {
+        let mut pending_run = execute(vec![Box::new(Root { request: &request, owned: "parent".to_owned(), stall: true, drops: cancelled_drops.clone() })]);
+        assert_send(&pending_run);
+        assert!(futures::poll!(&mut pending_run).is_pending());
+        drop(pending_run);
+    });
+    assert_eq!(cancelled_drops.load(Ordering::SeqCst), 2);
+    println!("completion + cancellation: dyn Scope + joined Send futures + borrowed request and parent + child-before-parent Drop");
 }
