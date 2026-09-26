@@ -8,7 +8,7 @@ cargo run --offline --manifest-path .scratch/greem-core/prototypes/outputs/compl
 
 Observed on rustc 1.98.0. The runtime is in the library crate; hand-written generated schema and user implementations are in the separate binary crate. This preserves the relevant cross-crate coherence boundary.
 
-## Candidate mechanism (awaiting a decision)
+## Mechanism (accepted in the live discussion)
 
 `Resolver` has a default `parent_error(&self) -> Option<&Error>` returning None. The runtime's reference delegation forwards it; Result delegation returns its own Err or forwards through Ok. Generated object completion chooses one fixed schema field as its witness and calls that fully-qualified method before creating child scopes. The witness does not depend on selected fields; therefore this catches an erroneous object even when only __typename is selected.
 

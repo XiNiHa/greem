@@ -3,12 +3,6 @@
 version = 4
 
 [[package]]
-name = "bumpalo"
-version = "3.20.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
-
-[[package]]
 name = "futures"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -97,14 +91,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "greem-arena-probes"
+name = "greem-integrated-probe"
 version = "0.0.0"
 dependencies = [
- "bumpalo",
  "futures",
  "serde",
  "serde_json",
- "typed-arena",
 ]
 
 [[package]]
@@ -202,12 +194,6 @@ dependencies = [
  "quote",
  "unicode-ident",
 ]
-
-[[package]]
-name = "typed-arena"
-version = "2.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6af6ae20167a9ece4bcb41af5b80f8a1f1df981f6391189ce00fd257af04126a"
 
 [[package]]
 name = "unicode-ident"

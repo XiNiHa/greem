@@ -9,7 +9,7 @@ pub trait Resolver<F: Field, C>: Send + Sync {
     fn resolve<'obj, 'call>(parents: &'call [&'obj Self], args: &'obj F::Args, ctx: &'obj Context<C>)
         -> impl Future<Output=Result<Vec<Self::Output<'obj>>, Error>> + Send + 'call
         where 'obj: 'call;
-    // PROPOSED, not adopted: codegen picks one fixed field as its object witness.
+    // Agreed: codegen picks one fixed field as its object witness.
     // Normal user implementations inherit None. Wrapper delegation forwards it.
     fn parent_error(&self) -> Option<&Error> { None }
 }

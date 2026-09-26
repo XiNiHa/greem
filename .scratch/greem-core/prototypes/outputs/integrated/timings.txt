@@ -1,0 +1,4 @@
+rustc 1.98.0 (88d9e12ae 2026-08-18)
+run: exit=0, elapsed=0.551s
+missing: exit=101, elapsed=0.163s
+wrong: exit=101, elapsed=0.122s

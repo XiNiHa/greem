@@ -39,7 +39,7 @@ The trait declaration also needed `C: 'a` on the Output GAT; generated field mar
 
 ## Executable completion follow-up
 
-After accepting explicit per-field adapters, the [Result completion probe](completion/README.md) demonstrates a candidate with real completion and delegation bodies. It uses a proposed default `Resolver::parent_error` hook through a fixed generated field witness, completes object errors before scheduling children, and retains original successful indices. This candidate is awaiting a decision; it does not yet integrate the generic scope builder or result arena.
+After accepting explicit per-field adapters, the [Result completion probe](completion/README.md) demonstrates a candidate with real completion and delegation bodies. It uses a proposed default `Resolver::parent_error` hook through a fixed generated field witness, completes object errors before scheduling children, and retains original successful indices. Iha Shin accepted this hook. The candidate itself is a narrow probe; the subsequent integrated probe below combines it with scopes.
 
 ## Ownership experiments
 
@@ -50,3 +50,7 @@ See [arena probes](arena/README.md) for the runnable companion experiments. A fi
 Keep the per-field Resolver primitive. Generate the per-object adapter explicitly for each field, instead of installing one open-ended ObjectResolver-to-Resolver blanket. Retain a macro-free route through explicit Resolver implementations (an explicit adapter macro is another possible convenience).
 
 Iha Shin accepted this direction in the live discussion. Arena ownership and executable Result completion remain subsequent decisions within this same ticket.
+
+## Integrated follow-up
+
+The [integrated prototype](integrated/README.md) combines the accepted adapter/error-hook choices with safe generation-frame ownership, actual nested/sub-interface partition, concurrent field/scope joins, borrowed serialization, and cancellation. It leaves two live decisions: repeated-arm scope identity and the callback response API.

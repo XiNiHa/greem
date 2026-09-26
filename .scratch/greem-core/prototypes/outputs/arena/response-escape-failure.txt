@@ -1,0 +1,11 @@
+   Compiling greem-arena-probes v0.0.0 (/Users/xiniha/repos/greem/.scratch/greem-core/prototypes/outputs/arena)
+error: lifetime may not live long enough
+  --> src/bin/response_boundary.rs:42:57
+   |
+42 |         let invalid = execute(roots, vec![], |response| response.data[0]);
+   |                                               --------- ^^^^^^^^^^^^^^^^ returning this value requires that `'1` must outlive `'2`
+   |                                               |       |
+   |                                               |       return type of closure is &'2 str
+   |                                               has type `Response<'1>`
+
+error: could not compile `greem-arena-probes` (bin "response_boundary") due to 1 previous error

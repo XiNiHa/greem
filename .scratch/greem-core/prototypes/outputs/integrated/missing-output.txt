@@ -1,0 +1,38 @@
+   Compiling greem-integrated-probe v0.0.0 (/Users/xiniha/repos/greem/.scratch/greem-core/prototypes/outputs/integrated)
+error[E0277]: the trait bound `Post<'a>: greem_integrated_probe::Resolver<author, App>` is not satisfied
+   --> src/main.rs:184:11
+    |
+184 |         = Vec<Post<'a>>
+    |           ^^^^^^^^^^^^^ unsatisfied trait bound
+    |
+help: the trait `greem_integrated_probe::Resolver<author, App>` is not implemented for `Post<'a>`
+   --> src/main.rs:70:1
+    |
+ 70 | struct Post<'a> {
+    | ^^^^^^^^^^^^^^^
+    = help: the following other types implement trait `greem_integrated_probe::Resolver<F, C>`:
+              `&T` implements `greem_integrated_probe::Resolver<F, C>`
+              `Query<'r>` implements `greem_integrated_probe::Resolver<hits, App>`
+              `Result<T, greem_integrated_probe::Error>` implements `greem_integrated_probe::Resolver<F, C>`
+              `User<'_>` implements `greem_integrated_probe::Resolver<name, C>`
+              `User<'_>` implements `greem_integrated_probe::Resolver<posts, App>`
+    = note: there are multiple different versions of crate `greem_integrated_probe` in the dependency graph
+    = help: you can use `cargo tree` to explore your dependency tree
+note: required for `PostTag` to implement `greem_integrated_probe::Completes<Post<'a>, App>`
+   --> src/main.rs:429:32
+    |
+429 | impl<T: Resolver<author, App>> Completes<T, App> for PostTag {
+    |         ---------------------  ^^^^^^^^^^^^^^^^^     ^^^^^^^
+    |         |
+    |         unsatisfied trait bound introduced here
+    = note: required for `Post<'a>` to implement `greem_integrated_probe::Outputs<PostTag, App>`
+    = note: 2 redundant requirements hidden
+    = note: required for `Vec<Post<'a>>` to implement `greem_integrated_probe::Outputs<greem_integrated_probe::List<PostTag>, App>`
+note: required by a bound in `greem_integrated_probe::Resolver::Output`
+   --> src/lib.rs:11:22
+    |
+ 11 |     type Output<'a>: Outputs<F::Type, C> + Send
+    |                      ^^^^^^^^^^^^^^^^^^^ required by this bound in `Resolver::Output`
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `greem-integrated-probe` (bin "greem-integrated-probe") due to 1 previous error
