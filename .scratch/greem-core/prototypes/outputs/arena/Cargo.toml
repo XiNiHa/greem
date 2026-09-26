@@ -1,0 +1,9 @@
+[package]
+name = "greem-arena-probes"
+version = "0.0.0"
+edition = "2024"
+[workspace]
+[dependencies]
+bumpalo = { version = "=3.20.3", features = ["allocator_api"] }
+futures = "=0.3.34"
+typed-arena = "=2.0.2"
