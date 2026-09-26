@@ -10,7 +10,7 @@ python3 .scratch/greem-core/prototypes/outputs/run.py
 
 This is a deliberately incomplete prototype, not greem's runtime or walking skeleton. The compiler is the experiment: several cases are supposed to fail. `results/summary.txt` records wall time and exit code; each case has its full diagnostic alongside it. Timing is one local rustc invocation (including linking for successful binaries), not a scaling benchmark or cold Cargo build.
 
-## Findings awaiting discussion
+## Initial compiler findings
 
 | Probe | Observed result | Meaning |
 |---|---|---|
@@ -35,7 +35,7 @@ The trait declaration also needed `C: 'a` on the Output GAT; generated field mar
 - The adapter probe checks trait placement and borrowed output types. Its tiny body is sequential and uses simplified resolver error/context/argument signatures; real sugar must join futures and preserve per-position errors.
 - The user enum completion impl proves downstream placement, not a derive implementation or enum partition behavior.
 - No SDL codegen, serializer, null propagation or GraphQL validation is implemented.
-- These compile results are not a memory-safety proof, a full executor proof, or a claim that the ticket can close yet.
+- These isolated compile results are not a memory-safety proof or full executor proof. The later integrated experiment and live decisions, described below, supply the resolution evidence.
 
 ## Executable completion follow-up
 
@@ -49,8 +49,8 @@ See [arena probes](arena/README.md) for the runnable companion experiments. A fi
 
 Keep the per-field Resolver primitive. Generate the per-object adapter explicitly for each field, instead of installing one open-ended ObjectResolver-to-Resolver blanket. Retain a macro-free route through explicit Resolver implementations (an explicit adapter macro is another possible convenience).
 
-Iha Shin accepted this direction in the live discussion. Arena ownership and executable Result completion remain subsequent decisions within this same ticket.
+Iha Shin accepted this direction in the live discussion. The subsequent completion and ownership decisions were accepted and are recorded in the resolved ticket.
 
 ## Integrated follow-up
 
-The [integrated prototype](integrated/README.md) combines the accepted adapter/error-hook choices with safe generation-frame ownership, actual nested/sub-interface partition, concurrent field/scope joins, borrowed serialization, and cancellation. It leaves two live decisions: repeated-arm scope identity and the callback response API.
+The [integrated prototype](integrated/README.md) combines the accepted adapter/error-hook choices with safe generation-frame ownership, actual nested/sub-interface partition, concurrent field/scope joins, borrowed serialization, and cancellation. Iha Shin accepted its repeated-arm scope identity and callback response API. The ticket is resolved; stable storage for dynamically discovered Plans and the depth-limit policy are separate follow-up decisions.

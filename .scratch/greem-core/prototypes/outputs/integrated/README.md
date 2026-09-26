@@ -23,11 +23,11 @@ The cached dependencies are futures, serde, and serde_json. This fixture compile
 - A borrowing `Response: Serialize` is consumed by a higher-ranked callback while every referenced owner is still alive. Only the serialized String escapes; Post destructors run afterward and read their live parent strings.
 - Cancelling while Post resolution is pending drops all three Post values safely, and never calls the serialization callback.
 
-## Two contract choices exposed by integration
+## Two contract choices accepted after integration
 
-**Partition identity:** the two abstract arms ultimately contain the same `Result<User, Error>` Rust type and GraphQL tag, but produce separate scopes of two and one successful objects. The generic implementation does not pretend to establish type equality across arms. Proposed identity includes parent scope, field tree position and representation partition leaf; one resolver invocation per nonempty scope. This awaits the human decision, supported by the separate [partition probes](../partition/README.md).
+**Partition identity:** the two abstract arms ultimately contain the same `Result<User, Error>` Rust type and GraphQL tag, but produce separate scopes of two and one successful objects. The generic implementation does not pretend to establish type equality across arms. Proposed identity includes parent scope, field tree position and representation partition leaf; one resolver invocation per nonempty scope. Iha Shin accepted this contract after reviewing the separate [partition probes](../partition/README.md).
 
-**Response API:** the primitive is a synchronous callback, conceptually `execute_with(..., for<'r> FnOnce(Response<'r>) -> R) -> R`. It runs at the deepest retained generation; `R` cannot borrow the temporary response. A convenience API can return owned serialized bytes/text using serde, without first copying every leaf into an owned response arena. This awaits the human decision. The companion [response-boundary probe](../arena/src/bin/response_boundary.rs) also captures the compiler rejection when a callback tries to return a response borrow.
+**Response API:** the primitive is a synchronous callback, conceptually `execute_with(..., for<'r> FnOnce(Response<'r>) -> R) -> R`. It runs at the deepest retained generation; `R` cannot borrow the temporary response. A convenience API can return owned serialized bytes/text using serde, without first copying every leaf into an owned response arena. Iha Shin accepted this response boundary. The companion [response-boundary probe](../arena/src/bin/response_boundary.rs) also captures the compiler rejection when a callback tries to return a response borrow.
 
 ## Diagnostics and timing
 

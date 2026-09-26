@@ -44,5 +44,5 @@ not by itself recover the original guarantee: generic delegation still splits
 the `A` and `B` calls. Type-name strings or function addresses do not provide the
 safe type-equality witness required to merge typed parent slices.
 
-This is a newly exposed contract choice to put to the human, not an accepted
-change to the map's earlier batching guarantee.
+Iha Shin accepted this correction in the live discussion. The canonical decision
+is recorded in the resolved Outputs encoding ticket.
