@@ -1,0 +1,7 @@
+   Compiling greem-streamed-probe v0.0.0 (/Users/xiniha/repos/greem/.scratch/greem-core/prototypes/streamed)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.28s
+     Running `.scratch/greem-core/prototypes/streamed/target/debug/depth`
+
+thread 'probe-panic' (19217496) panicked at src/bin/depth.rs:113:17:
+intentional deepest resolver panic
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

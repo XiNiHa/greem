@@ -1,0 +1,18 @@
+error[E0597]: `item` does not live long enough
+ --> .scratch/greem-core/prototypes/streamed/borrowed-registry-fails.rs:7:35
+  |
+5 | async fn chain<'request>(registry: Arc<Mutex<Vec<&'request str>>>) {
+  |                -------- lifetime `'request` defined here
+6 |     let item = String::from("owned by this chain's frame");
+  |         ---- binding `item` declared here
+7 |     registry.lock().unwrap().push(&item);
+  |     ---------------               ^^^^^ borrowed value does not live long enough
+  |     |
+  |     argument requires that `item` is borrowed for `'request`
+8 |     std::future::pending::<()>().await;
+9 | }
+  | - `item` dropped here while still borrowed
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0597`.

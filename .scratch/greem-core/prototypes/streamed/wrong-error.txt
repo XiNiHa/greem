@@ -1,0 +1,23 @@
+   Compiling greem-streamed-probe v0.0.0 (/Users/xiniha/repos/greem/.scratch/greem-core/prototypes/streamed)
+error[E0277]: the trait bound `greem_streamed_probe::contract::Text: greem_streamed_probe::contract::Completes<i32, App>` is not satisfied
+   --> src/bin/integrated.rs:236:11
+    |
+236 |         = i32
+    |           ^^^ the trait `greem_streamed_probe::contract::Completes<i32, App>` is not implemented for `greem_streamed_probe::contract::Text`
+    |
+help: the trait `Completes<i32, App>` is not implemented for `greem_streamed_probe::contract::Text`
+      but trait `Completes<Result<_, greem_streamed_probe::contract::Error>, App>` is implemented for it
+   --> src/contract.rs:181:1
+    |
+181 | impl<T: AsRef<str> + Send, C> Completes<Result<T, Error>, C> for Text {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = help: for that trait implementation, expected `Result<_, greem_streamed_probe::contract::Error>`, found `i32`
+    = note: required for `i32` to implement `greem_streamed_probe::contract::Outputs<greem_streamed_probe::contract::Text, App>`
+note: required by a bound in `greem_streamed_probe::contract::Resolver::Output`
+   --> src/contract.rs:25:22
+    |
+ 25 |     type Output<'a>: Outputs<F::Type, C> + Send
+    |                      ^^^^^^^^^^^^^^^^^^^ required by this bound in `Resolver::Output`
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `greem-streamed-probe` (bin "integrated") due to 1 previous error

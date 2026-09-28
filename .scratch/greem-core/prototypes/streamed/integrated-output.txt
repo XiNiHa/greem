@@ -1,0 +1,60 @@
+PASS owned-continuation: earlier items stay borrowed while later turns run
+stream: {"barrier":2,"records":[{"group":0,"index":0,"parent":"typed","value":"Ada:0","deferred":false},{"group":1,"index":0,"parent":"typed","value":"Lin:0","deferred":false}]}
+stream: {"barrier":4,"records":[{"group":0,"index":1,"parent":"typed","value":"Ada:1","deferred":false},{"group":0,"index":2,"parent":"typed","value":"Ada:2","deferred":false}]}
+stream: {"barrier":5,"records":[{"group":100,"index":0,"parent":"typed","value":"Ada:0:detail","deferred":true},{"group":101,"index":0,"parent":"typed","value":"Lin:0:detail","deferred":true},{"group":0,"index":3,"parent":"typed","value":"Ada:3","deferred":false},{"group":1,"index":1,"parent":"typed","value":"Lin:1","deferred":false}]}
+stream: {"barrier":6,"records":[{"group":1,"index":2,"parent":"typed","value":"Lin:2","deferred":false},{"group":1,"index":3,"parent":"typed","value":"Lin:3","deferred":false}]}
+stream: {"barrier":7,"records":[{"group":102,"index":1,"parent":"typed","value":"Ada:1:detail","deferred":true},{"group":103,"index":2,"parent":"typed","value":"Ada:2:detail","deferred":true}]}
+stream: {"barrier":8,"records":[{"group":104,"index":3,"parent":"typed","value":"Ada:3:detail","deferred":true},{"group":105,"index":1,"parent":"typed","value":"Lin:1:detail","deferred":true}]}
+stream: {"barrier":9,"records":[{"group":106,"index":2,"parent":"typed","value":"Lin:2:detail","deferred":true},{"group":107,"index":3,"parent":"typed","value":"Lin:3:detail","deferred":true}]}
+PASS stream: barriers=10 records=16 max_turns=4 depth_below_root=3 pump_while_pending=1 failures=[]
+vec: {"barrier":2,"records":[{"group":0,"index":0,"parent":"typed","value":"Ada:0","deferred":false},{"group":1,"index":0,"parent":"typed","value":"Lin:0","deferred":false}]}
+vec: {"barrier":4,"records":[{"group":0,"index":1,"parent":"typed","value":"Ada:1","deferred":false},{"group":0,"index":2,"parent":"typed","value":"Ada:2","deferred":false}]}
+vec: {"barrier":5,"records":[{"group":100,"index":0,"parent":"typed","value":"Ada:0:detail","deferred":true},{"group":101,"index":0,"parent":"typed","value":"Lin:0:detail","deferred":true},{"group":1,"index":1,"parent":"typed","value":"Lin:1","deferred":false},{"group":1,"index":2,"parent":"typed","value":"Lin:2","deferred":false}]}
+vec: {"barrier":6,"records":[{"group":0,"index":3,"parent":"typed","value":"Ada:3","deferred":false},{"group":1,"index":3,"parent":"typed","value":"Lin:3","deferred":false}]}
+vec: {"barrier":7,"records":[{"group":102,"index":1,"parent":"typed","value":"Ada:1:detail","deferred":true},{"group":103,"index":2,"parent":"typed","value":"Ada:2:detail","deferred":true}]}
+vec: {"barrier":8,"records":[{"group":104,"index":1,"parent":"typed","value":"Lin:1:detail","deferred":true},{"group":105,"index":2,"parent":"typed","value":"Lin:2:detail","deferred":true}]}
+vec: {"barrier":9,"records":[{"group":106,"index":3,"parent":"typed","value":"Ada:3:detail","deferred":true},{"group":107,"index":3,"parent":"typed","value":"Lin:3:detail","deferred":true}]}
+PASS vec: barriers=10 records=16 max_turns=4 depth_below_root=3 pump_while_pending=2 failures=[]
+drained: {"barrier":2,"records":[{"group":0,"index":0,"parent":"typed","value":"Ada:0","deferred":false},{"group":0,"index":1,"parent":"typed","value":"Ada:1","deferred":false},{"group":0,"index":2,"parent":"typed","value":"Ada:2","deferred":false},{"group":0,"index":3,"parent":"typed","value":"Ada:3","deferred":false},{"group":1,"index":0,"parent":"typed","value":"Lin:0","deferred":false},{"group":1,"index":1,"parent":"typed","value":"Lin:1","deferred":false},{"group":1,"index":2,"parent":"typed","value":"Lin:2","deferred":false},{"group":1,"index":3,"parent":"typed","value":"Lin:3","deferred":false}]}
+PASS drained: barriers=3 records=8 max_turns=1 depth_below_root=1 pump_while_pending=0 failures=[]
+zero: {"barrier":3,"records":[{"group":0,"index":0,"parent":"typed","value":"Ada:0","deferred":false},{"group":0,"index":1,"parent":"typed","value":"Ada:1","deferred":false}]}
+zero: {"barrier":4,"records":[{"group":0,"index":2,"parent":"typed","value":"Ada:2","deferred":false},{"group":0,"index":3,"parent":"typed","value":"Ada:3","deferred":false}]}
+zero: {"barrier":5,"records":[{"group":1,"index":0,"parent":"typed","value":"Lin:0","deferred":false},{"group":1,"index":1,"parent":"typed","value":"Lin:1","deferred":false}]}
+zero: {"barrier":6,"records":[{"group":100,"index":0,"parent":"typed","value":"Ada:0:detail","deferred":true},{"group":101,"index":1,"parent":"typed","value":"Ada:1:detail","deferred":true},{"group":1,"index":2,"parent":"typed","value":"Lin:2","deferred":false},{"group":1,"index":3,"parent":"typed","value":"Lin:3","deferred":false}]}
+zero: {"barrier":7,"records":[{"group":102,"index":2,"parent":"typed","value":"Ada:2:detail","deferred":true},{"group":103,"index":3,"parent":"typed","value":"Ada:3:detail","deferred":true}]}
+zero: {"barrier":8,"records":[{"group":104,"index":0,"parent":"typed","value":"Lin:0:detail","deferred":true},{"group":105,"index":1,"parent":"typed","value":"Lin:1:detail","deferred":true}]}
+zero: {"barrier":9,"records":[{"group":106,"index":2,"parent":"typed","value":"Lin:2:detail","deferred":true},{"group":107,"index":3,"parent":"typed","value":"Lin:3:detail","deferred":true}]}
+PASS zero: barriers=10 records=16 max_turns=4 depth_below_root=3 pump_while_pending=2 failures=[]
+eof: {"barrier":2,"records":[{"group":0,"index":0,"parent":"typed","value":"Ada:0","deferred":false},{"group":0,"index":1,"parent":"typed","value":"Ada:1","deferred":false},{"group":0,"index":2,"parent":"typed","value":"Ada:2","deferred":false},{"group":0,"index":3,"parent":"typed","value":"Ada:3","deferred":false},{"group":1,"index":0,"parent":"typed","value":"Lin:0","deferred":false},{"group":1,"index":1,"parent":"typed","value":"Lin:1","deferred":false},{"group":1,"index":2,"parent":"typed","value":"Lin:2","deferred":false},{"group":1,"index":3,"parent":"typed","value":"Lin:3","deferred":false}]}
+eof: {"barrier":5,"records":[{"group":100,"index":0,"parent":"typed","value":"Ada:0:detail","deferred":true},{"group":101,"index":1,"parent":"typed","value":"Ada:1:detail","deferred":true},{"group":102,"index":2,"parent":"typed","value":"Ada:2:detail","deferred":true},{"group":103,"index":3,"parent":"typed","value":"Ada:3:detail","deferred":true},{"group":104,"index":0,"parent":"typed","value":"Lin:0:detail","deferred":true},{"group":105,"index":1,"parent":"typed","value":"Lin:1:detail","deferred":true},{"group":106,"index":2,"parent":"typed","value":"Lin:2:detail","deferred":true},{"group":107,"index":3,"parent":"typed","value":"Lin:3:detail","deferred":true}]}
+PASS eof: barriers=6 records=16 max_turns=1 depth_below_root=3 pump_while_pending=0 failures=[]
+item-error: {"barrier":2,"records":[{"group":0,"index":0,"parent":"typed","value":"Ada:0","deferred":false},{"group":1,"index":0,"parent":"typed","value":"Lin:0","deferred":false}]}
+item-error: {"barrier":5,"records":[{"group":101,"index":0,"parent":"typed","value":"Lin:0:detail","deferred":true},{"group":1,"index":1,"parent":"typed","value":"Lin:1","deferred":false}]}
+item-error: {"barrier":6,"records":[{"group":1,"index":2,"parent":"typed","value":"Lin:2","deferred":false},{"group":1,"index":3,"parent":"typed","value":"Lin:3","deferred":false}]}
+item-error: {"barrier":7,"records":[{"group":1,"index":4,"parent":"typed","value":"Lin:4","deferred":false},{"group":1,"index":5,"parent":"typed","value":"Lin:5","deferred":false}]}
+item-error: {"barrier":8,"records":[{"group":102,"index":1,"parent":"typed","value":"Lin:1:detail","deferred":true}]}
+item-error: {"barrier":9,"records":[{"group":103,"index":2,"parent":"typed","value":"Lin:2:detail","deferred":true},{"group":104,"index":3,"parent":"typed","value":"Lin:3:detail","deferred":true}]}
+item-error: {"barrier":10,"records":[{"group":105,"index":4,"parent":"typed","value":"Lin:4:detail","deferred":true},{"group":106,"index":5,"parent":"typed","value":"Lin:5:detail","deferred":true}]}
+PASS item-error: barriers=11 records=13 max_turns=3 depth_below_root=3 pump_while_pending=1 failures=[(0, "non-null item")]
+halt: {"barrier":2,"records":[{"group":0,"index":0,"parent":"typed","value":"Ada:0","deferred":false},{"group":1,"index":0,"parent":"typed","value":"Lin:0","deferred":false}]}
+halt: {"barrier":5,"records":[{"group":101,"index":0,"parent":"typed","value":"Lin:0:detail","deferred":true},{"group":1,"index":1,"parent":"typed","value":"Lin:1","deferred":false}]}
+halt: {"barrier":6,"records":[{"group":1,"index":2,"parent":"typed","value":"Lin:2","deferred":false},{"group":1,"index":3,"parent":"typed","value":"Lin:3","deferred":false}]}
+halt: {"barrier":7,"records":[{"group":1,"index":4,"parent":"typed","value":"Lin:4","deferred":false},{"group":1,"index":5,"parent":"typed","value":"Lin:5","deferred":false}]}
+halt: {"barrier":8,"records":[{"group":102,"index":1,"parent":"typed","value":"Lin:1:detail","deferred":true}]}
+halt: {"barrier":9,"records":[{"group":103,"index":2,"parent":"typed","value":"Lin:2:detail","deferred":true},{"group":104,"index":3,"parent":"typed","value":"Lin:3:detail","deferred":true}]}
+halt: {"barrier":10,"records":[{"group":105,"index":4,"parent":"typed","value":"Lin:4:detail","deferred":true},{"group":106,"index":5,"parent":"typed","value":"Lin:5:detail","deferred":true}]}
+PASS halt: barriers=11 records=13 max_turns=3 depth_below_root=3 pump_while_pending=2 failures=[(0, "HALT")]
+defer-halt: {"barrier":2,"records":[{"group":0,"index":0,"parent":"typed","value":"Ada:0","deferred":false},{"group":1,"index":0,"parent":"typed","value":"Lin:0","deferred":false}]}
+defer-halt: {"barrier":4,"records":[{"group":0,"index":1,"parent":"typed","value":"Ada:1","deferred":false},{"group":0,"index":2,"parent":"typed","value":"Ada:2","deferred":false}]}
+defer-halt: {"barrier":5,"records":[{"group":100,"index":0,"parent":"typed","value":"Ada:0:detail","deferred":true},{"group":101,"index":0,"parent":"typed","value":"Lin:0:detail","deferred":true},{"group":0,"index":3,"parent":"typed","value":"Ada:3","deferred":false},{"group":0,"index":4,"parent":"typed","value":"Ada:4","deferred":false}]}
+defer-halt: {"barrier":6,"records":[{"group":1,"index":1,"parent":"typed","value":"Lin:1","deferred":false},{"group":0,"index":5,"parent":"typed","value":"Ada:5","deferred":false}]}
+defer-halt: {"barrier":7,"records":[{"group":103,"index":2,"parent":"typed","value":"Ada:2:detail","deferred":true},{"group":1,"index":2,"parent":"typed","value":"Lin:2","deferred":false},{"group":1,"index":3,"parent":"typed","value":"Lin:3","deferred":false}]}
+defer-halt: {"barrier":8,"records":[{"group":104,"index":3,"parent":"typed","value":"Ada:3:detail","deferred":true},{"group":105,"index":4,"parent":"typed","value":"Ada:4:detail","deferred":true},{"group":1,"index":4,"parent":"typed","value":"Lin:4","deferred":false},{"group":1,"index":5,"parent":"typed","value":"Lin:5","deferred":false}]}
+defer-halt: {"barrier":9,"records":[{"group":106,"index":1,"parent":"typed","value":"Lin:1:detail","deferred":true},{"group":107,"index":5,"parent":"typed","value":"Ada:5:detail","deferred":true}]}
+defer-halt: {"barrier":10,"records":[{"group":108,"index":2,"parent":"typed","value":"Lin:2:detail","deferred":true},{"group":109,"index":3,"parent":"typed","value":"Lin:3:detail","deferred":true}]}
+defer-halt: {"barrier":11,"records":[{"group":110,"index":4,"parent":"typed","value":"Lin:4:detail","deferred":true},{"group":111,"index":5,"parent":"typed","value":"Lin:5:detail","deferred":true}]}
+PASS defer-halt: barriers=12 records=23 max_turns=5 depth_below_root=3 pump_while_pending=3 failures=[(102, "deferred HALT")]
+PASS cancel-before: barriers=1 records=0 max_turns=1 depth_below_root=1 pump_while_pending=0 failures=[]
+PASS cancel-after: barriers=3 records=2 max_turns=2 depth_below_root=3 pump_while_pending=28 failures=[]
+PASS resolver-panic: barriers=1 records=0 max_turns=1 depth_below_root=0 pump_while_pending=0 failures=[]
+PASS long: barriers=2005 records=4000 max_turns=5 depth_below_root=3 pump_while_pending=1497 failures=[]

@@ -1,0 +1,6 @@
+PASS normal: depth=32 roots_or_items=1 stack=2097152 data_payloads=1 max_turns=1 every_drop_child_before_parent=true
+PASS normal: depth=64 roots_or_items=1 stack=2097152 data_payloads=1 max_turns=1 every_drop_child_before_parent=true
+PASS cancel: depth=64 roots_or_items=1 stack=2097152 data_payloads=0 max_turns=1 every_drop_child_before_parent=true
+PASS panic: depth=64 roots_or_items=1 stack=2097152 data_payloads=0 max_turns=1 every_drop_child_before_parent=true
+PASS stream: depth=64 roots_or_items=1000 stack=2097152 data_payloads=1000 max_turns=63 every_drop_child_before_parent=true
+PASS mutation: depth=64 roots_or_items=1000 stack=2097152 data_payloads=1 max_turns=0 every_drop_child_before_parent=true

@@ -1,0 +1,4 @@
+{"barrier":0,"fragments":[{"parent":"Ada","item":"Ada's item","deferred":false},{"parent":"Lin","item":"Lin's item","deferred":false}]}
+{"barrier":1,"fragments":[{"parent":"Ada","item":"Ada's item","deferred":true},{"parent":"Lin","item":"Lin's item","deferred":true}]}
+normal destruction: ["child:Ada:Ada's item", "item:Ada:Ada's item", "child:Lin:Lin's item", "item:Lin:Lin's item", "parent:Ada", "parent:Lin"]
+cancelled destruction: ["child:Lin:Lin's item", "item:Lin:Lin's item", "child:Ada:Ada's item", "item:Ada:Ada's item", "parent:Ada", "parent:Lin"]
