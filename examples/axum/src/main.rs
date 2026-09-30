@@ -1,6 +1,7 @@
 //! The walking skeleton's example server: schema compilation from `build.rs`,
 //! per-field resolvers (set-based and per-object sugar), lookbehind hints, and
-//! an axum handler that negotiates `multipart/mixed` for `@defer`/`@stream`.
+//! an axum handler that negotiates `multipart/mixed` for `@defer`/`@stream`
+//! and streams each payload as the execution ships it.
 
 use axum::body::Body;
 use axum::extract::State;
@@ -8,10 +9,12 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
+use futures::{FutureExt, Stream, StreamExt, future, stream};
 use greem::{
-    Args, As, Context, Either, Error, ErrorBehavior, ExecuteOptions, IncrementalDelivery, Planning,
-    Resolver, Roots, Streamed,
+    Args, As, Context, Either, Error, ErrorBehavior, ExecuteOptions, IncrementalDelivery,
+    OwnedPayload, Planning, Resolver, Roots, Streamed,
 };
+use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 
 mod schema {
@@ -193,7 +196,6 @@ impl Resolver<schema::Query::posts, App> for QueryRoot {
     where
         'obj: 'call,
     {
-        use futures::StreamExt;
         let hint = ctx.hint::<PostsHint>();
         ctx.app()
             .log(format!("Query.posts(with_author: {})", hint.with_author));
@@ -202,7 +204,7 @@ impl Resolver<schema::Query::posts, App> for QueryRoot {
             .iter()
             .map(|_| {
                 Streamed::new(
-                    futures::stream::iter(
+                    stream::iter(
                         ctx.app()
                             .posts
                             .iter()
@@ -370,27 +372,22 @@ async fn graphql(
         error_behavior: ErrorBehavior::Propagate,
         incremental,
     };
-    let output = schema
-        .execute_request(
-            Roots {
-                query: QueryRoot,
-                mutation: MutationRoot,
-            },
-            App::seeded(),
-            &request,
-            options,
-        )
-        .await;
-    if output.is_incremental() {
-        let body = greem::http::multipart_body(&output);
+    let mut payloads = Box::pin(execute(schema, request, options));
+    let first = payloads
+        .next()
+        .await
+        .expect("an execution ships at least one payload");
+    if first.has_next.is_some() {
+        let parts = stream::once(future::ready(first))
+            .chain(payloads)
+            .map(|payload| Ok::<_, Infallible>(greem::http::multipart_part(&payload)));
         return (
             [(header::CONTENT_TYPE, greem::http::MULTIPART_CONTENT_TYPE)],
-            Body::from(body),
+            Body::from_stream(parts),
         )
             .into_response();
     }
-    let payload = output.first();
-    let status = if payload.kind == greem::PayloadKind::RequestError {
+    let status = if first.kind == greem::PayloadKind::RequestError {
         StatusCode::BAD_REQUEST
     } else {
         StatusCode::OK
@@ -398,9 +395,40 @@ async fn graphql(
     (
         status,
         [(header::CONTENT_TYPE, "application/json")],
-        Body::from(payload.json.clone()),
+        Body::from(first.json),
     )
         .into_response()
+}
+
+/// One request as a stream of serialized payloads. Polling the stream is what
+/// drives the execution: a payload is yielded as soon as the sink receives it,
+/// and dropping the stream (the client went away) cancels the rest.
+fn execute(
+    schema: Arc<Schema>,
+    request: greem::http::Request,
+    options: ExecuteOptions,
+) -> impl Stream<Item = OwnedPayload> + Send + 'static {
+    let (tx, rx) = futures::channel::mpsc::unbounded();
+    let execution = async move {
+        schema
+            .execute_request_with(
+                Roots {
+                    query: QueryRoot,
+                    mutation: MutationRoot,
+                },
+                App::seeded(),
+                &request,
+                options,
+                move |payload| {
+                    let _ = tx.unbounded_send(OwnedPayload::from(&payload));
+                },
+            )
+            .await
+    };
+    stream::select(
+        rx,
+        execution.into_stream().filter_map(|()| future::ready(None)),
+    )
 }
 
 #[tokio::main]
@@ -419,11 +447,7 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    async fn post(
-        router: Router,
-        accept: &str,
-        body: serde_json::Value,
-    ) -> (StatusCode, String, String) {
+    async fn send(router: Router, accept: &str, body: serde_json::Value) -> Response {
         let request = axum::http::Request::builder()
             .method("POST")
             .uri("/graphql")
@@ -431,7 +455,15 @@ mod tests {
             .header(header::ACCEPT, accept)
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();
-        let response = router.oneshot(request).await.unwrap();
+        router.oneshot(request).await.unwrap()
+    }
+
+    async fn post(
+        router: Router,
+        accept: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, String, String) {
+        let response = send(router, accept, body).await;
         let status = response.status();
         let content_type = response
             .headers()
@@ -533,6 +565,32 @@ mod tests {
             deferred[0]["data"],
             serde_json::json!({"posts": [{"title": "Hello"}, {"title": "Again"}]})
         );
+    }
+
+    #[tokio::test]
+    async fn each_payload_is_its_own_delimited_chunk() {
+        let router = router(Arc::new(build_schema()));
+        let response = send(
+            router,
+            "multipart/mixed",
+            serde_json::json!({"query": "{ users { name ... @defer { posts { title } } } posts(first: 3) @stream(initialCount: 1) { title } }"}),
+        )
+        .await;
+        let mut body = response.into_body();
+        let mut chunks = Vec::new();
+        while let Some(frame) = body.frame().await {
+            let data = frame.unwrap().into_data().unwrap();
+            chunks.push(String::from_utf8(data.to_vec()).unwrap());
+        }
+        let (last, rest) = chunks.split_last().unwrap();
+        assert!(!rest.is_empty());
+        assert!(rest[0].starts_with("\r\n---\r\n"), "{:?}", rest[0]);
+        for chunk in rest {
+            assert!(chunk.ends_with("\r\n---\r\n"), "{chunk:?}");
+            assert!(chunk.contains("\"hasNext\":true"), "{chunk:?}");
+        }
+        assert!(last.ends_with("\r\n-----\r\n"), "{last:?}");
+        assert!(last.contains("\"hasNext\":false"), "{last:?}");
     }
 
     #[tokio::test]

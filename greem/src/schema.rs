@@ -160,12 +160,7 @@ pub struct RequestErrors(pub Vec<GraphQLError>);
 
 impl RequestErrors {
     pub fn into_payload(self) -> OwnedPayload {
-        let payload = Payload::request_error(self.0);
-        OwnedPayload {
-            kind: PayloadKind::RequestError,
-            has_next: None,
-            json: serde_json::to_vec(&payload).expect("serialize request errors"),
-        }
+        OwnedPayload::from(&Payload::request_error(self.0))
     }
 }
 
@@ -187,6 +182,16 @@ pub struct OwnedPayload {
 impl OwnedPayload {
     pub fn as_str(&self) -> &str {
         std::str::from_utf8(&self.json).expect("payload JSON is UTF-8")
+    }
+}
+
+impl From<&Payload<'_>> for OwnedPayload {
+    fn from(payload: &Payload<'_>) -> Self {
+        OwnedPayload {
+            kind: payload.kind(),
+            has_next: payload.has_next(),
+            json: serde_json::to_vec(payload).expect("serialize payload"),
+        }
     }
 }
 
@@ -469,17 +474,48 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
     {
         let mut output = ExecutionOutput::default();
         self.execute_with(roots, ctx, op, options, |payload| {
-            output.payloads.push(OwnedPayload {
-                kind: payload.kind(),
-                has_next: payload.has_next(),
-                json: serde_json::to_vec(&payload).expect("serialize payload"),
-            });
+            output.payloads.push(OwnedPayload::from(&payload));
         })
         .await;
         output
     }
 
-    /// The text path: parse, validate and execute a whole request.
+    /// The text path: parse, validate and execute a whole request, handing
+    /// every payload to `sink` like `execute_with`.
+    pub async fn execute_request_with(
+        &self,
+        roots: Roots<Q, M>,
+        ctx: C,
+        request: &crate::http::Request,
+        options: ExecuteOptions,
+        mut sink: impl for<'p> FnMut(Payload<'p>) + Send,
+    ) where
+        Q: Outputs<I::Query, C> + Send + Sync,
+        M: Outputs<I::Mutation, C> + Send + Sync,
+    {
+        let Some(query) = &request.query else {
+            sink(Payload::request_error(vec![GraphQLError::request(
+                "request has no query",
+                Vec::new(),
+            )]));
+            return;
+        };
+        let document = match self.parse(query) {
+            Ok(document) => document,
+            Err(errors) => {
+                sink(Payload::request_error(errors.0));
+                return;
+            }
+        };
+        let op = Operation {
+            document: &document,
+            operation_name: request.operation_name.as_deref(),
+            variables: request.variables.clone().unwrap_or(serde_json::Value::Null),
+        };
+        self.execute_with(roots, ctx, op, options, sink).await
+    }
+
+    /// The text path, returning every payload as owned JSON.
     pub async fn execute_request(
         &self,
         roots: Roots<Q, M>,
@@ -491,31 +527,12 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
         Q: Outputs<I::Query, C> + Send + Sync,
         M: Outputs<I::Mutation, C> + Send + Sync,
     {
-        let Some(query) = &request.query else {
-            return ExecutionOutput {
-                payloads: vec![
-                    RequestErrors(vec![GraphQLError::request(
-                        "request has no query",
-                        Vec::new(),
-                    )])
-                    .into_payload(),
-                ],
-            };
-        };
-        let document = match self.parse(query) {
-            Ok(document) => document,
-            Err(errors) => {
-                return ExecutionOutput {
-                    payloads: vec![errors.into_payload()],
-                };
-            }
-        };
-        let op = Operation {
-            document: &document,
-            operation_name: request.operation_name.as_deref(),
-            variables: request.variables.clone().unwrap_or(serde_json::Value::Null),
-        };
-        self.execute(roots, ctx, op, options).await
+        let mut output = ExecutionOutput::default();
+        self.execute_request_with(roots, ctx, request, options, |payload| {
+            output.payloads.push(OwnedPayload::from(&payload));
+        })
+        .await;
+        output
     }
 }
 
