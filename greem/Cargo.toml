@@ -1,0 +1,25 @@
+[package]
+name = "greem"
+description = "Schema-first, breadth-first async GraphQL server framework"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["macros"]
+macros = ["dep:greem-macros"]
+reference-executor = []
+
+[dependencies]
+apollo-compiler.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+self_cell.workspace = true
+indexmap.workspace = true
+greem-macros = { workspace = true, optional = true }
+
+[dev-dependencies]
+futures = { workspace = true, features = ["executor"] }

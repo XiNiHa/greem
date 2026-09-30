@@ -1,0 +1,31 @@
+"""A UUID served by the built-in codec."""
+scalar UUID
+
+interface Node {
+  id: ID!
+}
+
+type Query {
+  users: [User!]!
+  user(id: ID!): User
+  node(id: ID!): Node
+  posts(first: Int = 10): [Post!]!
+}
+
+type User implements Node {
+  id: ID!
+  uuid: UUID!
+  name: String!
+  email: String
+  posts: [Post!]!
+}
+
+type Post implements Node {
+  id: ID!
+  title: String!
+  author: User!
+}
+
+type Mutation {
+  rename(id: ID!, name: String!): User
+}

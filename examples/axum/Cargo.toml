@@ -1,0 +1,19 @@
+[package]
+name = "greem-example-axum"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+greem = { workspace = true }
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+serde_json.workspace = true
+futures.workspace = true
+uuid = { version = "1", features = ["v4"] }
+http-body-util = "0.1"
+tower = "0.5"
+
+[build-dependencies]
+greem-build = { workspace = true }

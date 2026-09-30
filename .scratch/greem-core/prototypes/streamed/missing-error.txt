@@ -1,0 +1,63 @@
+   Compiling greem-streamed-probe v0.0.0 (/Users/xiniha/repos/greem/.scratch/greem-core/prototypes/streamed)
+error[E0277]: the trait bound `Item<'a>: greem_streamed_probe::contract::Resolver<Name, App>` is not satisfied
+   --> src/bin/integrated.rs:156:11
+    |
+156 |         = Streamed<BoxStream<'a, Result<Item<'a>, Error>>>
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+    |
+help: the trait `Resolver<Name, App>` is not implemented for `Item<'a>`
+      but trait `Resolver<Details, App>` is implemented for `Item<'_>`
+   --> src/bin/integrated.rs:289:1
+    |
+289 | impl Resolver<Details, App> for Item<'_> {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = help: for that trait implementation, expected `Details`, found `Name`
+note: required for `ItemTag` to implement `greem_streamed_probe::contract::Completes<Item<'a>, App>`
+   --> src/bin/integrated.rs:481:67
+    |
+481 | impl<C: Send + Sync, T: Resolver<Name, C> + Resolver<Details, C>> Completes<T, C> for ItemTag {
+    |                         -----------------                         ^^^^^^^^^^^^^^^     ^^^^^^^
+    |                         |
+    |                         unsatisfied trait bound introduced here
+    = note: required for `Item<'a>` to implement `greem_streamed_probe::contract::Outputs<ItemTag, App>`
+    = note: 2 redundant requirements hidden
+    = note: required for `Streamed<Pin<Box<dyn Stream<Item = Result<..., ...>> + Send>>, ...>` to implement `greem_streamed_probe::contract::Outputs<greem_streamed_probe::contract::List<ItemTag>, App>`
+note: required by a bound in `greem_streamed_probe::contract::Resolver::Output`
+   --> src/contract.rs:25:22
+    |
+ 25 |     type Output<'a>: Outputs<F::Type, C> + Send
+    |                      ^^^^^^^^^^^^^^^^^^^ required by this bound in `Resolver::Output`
+    = note: the full name for the type has been written to '/Users/xiniha/repos/greem/.scratch/greem-core/prototypes/streamed/target/debug/deps/integrated-e37a0031c42c117d.long-type-9129011059731367895.txt'
+    = note: consider using `--verbose` to print the full type name to the console
+
+error[E0277]: the trait bound `Item<'a>: greem_streamed_probe::contract::Resolver<Name, App>` is not satisfied
+   --> src/bin/integrated.rs:192:11
+    |
+192 |         = Vec<Item<'a>>
+    |           ^^^^^^^^^^^^^ unsatisfied trait bound
+    |
+help: the trait `Resolver<Name, App>` is not implemented for `Item<'a>`
+      but trait `Resolver<Details, App>` is implemented for `Item<'_>`
+   --> src/bin/integrated.rs:289:1
+    |
+289 | impl Resolver<Details, App> for Item<'_> {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = help: for that trait implementation, expected `Details`, found `Name`
+note: required for `ItemTag` to implement `greem_streamed_probe::contract::Completes<Item<'a>, App>`
+   --> src/bin/integrated.rs:481:67
+    |
+481 | impl<C: Send + Sync, T: Resolver<Name, C> + Resolver<Details, C>> Completes<T, C> for ItemTag {
+    |                         -----------------                         ^^^^^^^^^^^^^^^     ^^^^^^^
+    |                         |
+    |                         unsatisfied trait bound introduced here
+    = note: required for `Item<'a>` to implement `greem_streamed_probe::contract::Outputs<ItemTag, App>`
+    = note: 2 redundant requirements hidden
+    = note: required for `Vec<Item<'a>>` to implement `greem_streamed_probe::contract::Outputs<greem_streamed_probe::contract::List<ItemTag>, App>`
+note: required by a bound in `greem_streamed_probe::contract::Resolver::Output`
+   --> src/contract.rs:25:22
+    |
+ 25 |     type Output<'a>: Outputs<F::Type, C> + Send
+    |                      ^^^^^^^^^^^^^^^^^^^ required by this bound in `Resolver::Output`
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `greem-streamed-probe` (bin "integrated") due to 2 previous errors

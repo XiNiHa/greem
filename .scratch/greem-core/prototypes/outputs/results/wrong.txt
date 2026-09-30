@@ -1,0 +1,26 @@
+error[E0277]: the trait bound `probe_runtime::Text: probe_runtime::Completes<i32, C>` is not satisfied
+  --> /Users/xiniha/repos/greem/.scratch/greem-core/prototypes/outputs/src/types.rs:19:37
+   |
+19 |     #[cfg(wrong)] type Output<'a> = i32 where C: 'a;
+   |                                     ^^^ the trait `probe_runtime::Completes<i32, C>` is not implemented for `probe_runtime::Text`
+   |
+help: `probe_runtime::Text` implements trait `probe_runtime::Completes<T, C>`
+  --> /Users/xiniha/repos/greem/.scratch/greem-core/prototypes/outputs/src/runtime.rs:39:1
+   |
+39 | impl<C> Completes<String, C> for Text {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `probe_runtime::Completes<String, C>`
+40 | impl<C> Completes<&str, C> for Text {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `probe_runtime::Completes<&str, C>`
+...
+44 | impl<T, C> Completes<Result<T, String>, C> for Text where T: Outputs<Text, C> {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `probe_runtime::Completes<Result<T, String>, C>`
+   = note: required for `i32` to implement `probe_runtime::Outputs<probe_runtime::Text, C>`
+note: required by a bound in `probe_runtime::Resolver::Output`
+  --> /Users/xiniha/repos/greem/.scratch/greem-core/prototypes/outputs/src/runtime.rs:10:22
+   |
+10 |     type Output<'a>: Outputs<F::Type, C> + Send where Self: 'a, C: 'a;
+   |                      ^^^^^^^^^^^^^^^^^^^ required by this bound in `Resolver::Output`
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0277`.

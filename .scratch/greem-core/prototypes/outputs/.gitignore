@@ -1,0 +1,4 @@
+results/*
+!results/*.txt
+results/*.long-type-*.txt
+arena/target/

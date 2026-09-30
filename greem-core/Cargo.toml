@@ -1,0 +1,11 @@
+[package]
+name = "greem-core"
+description = "Pieces shared by greem-build and greem-macros, such as the GraphQL-name-to-Rust-identifier mapping"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+proc-macro2 = "1"

@@ -1,0 +1,7 @@
+   Compiling greem-streamed-probe v0.0.0 (/Users/xiniha/repos/greem/.scratch/greem-core/prototypes/streamed)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.47s
+     Running `.scratch/greem-core/prototypes/streamed/target/debug/integrated`
+
+thread 'main' (19220628) panicked at src/bin/integrated.rs:257:17:
+intentional resolver panic
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

@@ -1,0 +1,22 @@
+[package]
+name = "greem-macros"
+description = "Procedural macros for greem"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full", "visit-mut"] }
+quote = "1"
+proc-macro2 = "1"
+greem-core.workspace = true
+
+[dev-dependencies]
+greem = { workspace = true }
+futures = { version = "0.3", features = ["executor"] }
+serde_json = { workspace = true }

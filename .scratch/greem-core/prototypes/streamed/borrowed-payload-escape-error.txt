@@ -1,0 +1,29 @@
+   Compiling greem-streamed-probe v0.0.0 (/Users/xiniha/repos/greem/.scratch/greem-core/prototypes/streamed)
+warning: unused import: `task::noop_waker`
+ --> src/bin/borrowed.rs:6:5
+  |
+6 |     task::noop_waker,
+  |     ^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `future::Future`
+  --> src/bin/borrowed.rs:11:5
+   |
+11 |     future::Future,
+   |     ^^^^^^^^^^^^^^
+
+error[E0521]: borrowed data escapes outside of closure
+   --> src/bin/borrowed.rs:352:13
+    |
+342 |         let mut escaped: Option<&str> = None;
+    |             ----------- `escaped` declared here, outside of the closure body
+...
+351 |         futures::executor::block_on(execute(root, |payload| {
+    |                                                    ------- `payload` is a reference that is only valid in the closure body
+352 |             escaped = Some(payload.records[0].value);
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `payload` escapes the closure body here
+
+For more information about this error, try `rustc --explain E0521`.
+warning: `greem-streamed-probe` (bin "borrowed") generated 2 warnings
+error: could not compile `greem-streamed-probe` (bin "borrowed") due to 1 previous error; 2 warnings emitted

@@ -1,0 +1,19 @@
+[package]
+name = "greem-compliance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+greem = { workspace = true, features = ["reference-executor"] }
+greem-reference = { workspace = true }
+futures = { workspace = true, features = ["executor"] }
+futures-util = "0.3"
+serde_json = { workspace = true, features = ["unbounded_depth"] }
+serde = { workspace = true }
+uuid = { version = "1", features = ["v4"] }
+proptest = "1"
+
+[build-dependencies]
+greem-build = { workspace = true }

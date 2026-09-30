@@ -1,0 +1,88 @@
+error[E0277]: the trait bound `User: probe_runtime::Outputs<UserTag, ()>` is not satisfied
+  --> /Users/xiniha/repos/greem/.scratch/greem-core/prototypes/outputs/src/types.rs:27:23
+   |
+27 |     type Output<'a> = User;
+   |                       ^^^^ unsatisfied trait bound
+   |
+help: the trait `Resolver<name, ()>` is not implemented for `User`
+      but trait `Resolver<posts, ()>` is implemented for it
+  --> /Users/xiniha/repos/greem/.scratch/greem-core/prototypes/outputs/src/types.rs:22:1
+   |
+22 | impl Resolver<posts, ()> for User {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: for that trait implementation, expected `posts`, found `name`
+note: required for `UserTag` to implement `probe_runtime::Completes<User, ()>`
+  --> /Users/xiniha/repos/greem/.scratch/greem-core/prototypes/outputs/src/types.rs:8:52
+   |
+ 8 | impl<T: Resolver<name, C> + Resolver<posts, C>, C> Completes<T, C> for UserTag {}
+   |         -----------------                          ^^^^^^^^^^^^^^^     ^^^^^^^
+   |         |
+   |         unsatisfied trait bound introduced here
+   = note: required for `User` to implement `probe_runtime::Outputs<UserTag, ()>`
+note: required by a bound in `probe_runtime::Resolver::Output`
+  --> /Users/xiniha/repos/greem/.scratch/greem-core/prototypes/outputs/src/runtime.rs:10:22
+   |
+10 |     type Output<'a>: Outputs<F::Type, C> + Send where Self: 'a, C: 'a;
+   |                      ^^^^^^^^^^^^^^^^^^^ required by this bound in `Resolver::Output`
+
+error[E0277]: the trait bound `User: probe_runtime::Outputs<UserTag, ()>` is not satisfied
+  --> /Users/xiniha/repos/greem/.scratch/greem-core/prototypes/outputs/src/types.rs:45:16
+   |
+45 |     boundary::<User>();
+   |                ^^^^ unsatisfied trait bound
+   |
+help: the trait `Resolver<name, ()>` is not implemented for `User`
+      but trait `Resolver<posts, ()>` is implemented for it
+  --> /Users/xiniha/repos/greem/.scratch/greem-core/prototypes/outputs/src/types.rs:22:1
+   |
+22 | impl Resolver<posts, ()> for User {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: for that trait implementation, expected `posts`, found `name`
+note: required for `UserTag` to implement `probe_runtime::Completes<User, ()>`
+  --> /Users/xiniha/repos/greem/.scratch/greem-core/prototypes/outputs/src/types.rs:8:52
+   |
+ 8 | impl<T: Resolver<name, C> + Resolver<posts, C>, C> Completes<T, C> for UserTag {}
+   |         -----------------                          ^^^^^^^^^^^^^^^     ^^^^^^^
+   |         |
+   |         unsatisfied trait bound introduced here
+   = note: required for `User` to implement `probe_runtime::Outputs<UserTag, ()>`
+note: required by a bound in `boundary`
+  --> /Users/xiniha/repos/greem/.scratch/greem-core/prototypes/outputs/src/types.rs:42:16
+   |
+42 | fn boundary<T: Outputs<UserTag, ()>>() {}
+   |                ^^^^^^^^^^^^^^^^^^^^ required by this bound in `boundary`
+
+error[E0277]: no resolver for GraphQL field `name` with context `()`
+  --> /Users/xiniha/repos/greem/.scratch/greem-core/prototypes/outputs/src/types.rs:47:14
+   |
+47 |     nested::<Vec<Option<Vec<Option<Either<As<ResourceTag, As<UserTag, User>>, As<PostTag, Post>>>>>>>();
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `Resolver<name, ()>` is not implemented for `User`
+      but trait `Resolver<posts, ()>` is implemented for it
+  --> /Users/xiniha/repos/greem/.scratch/greem-core/prototypes/outputs/src/types.rs:22:1
+   |
+22 | impl Resolver<posts, ()> for User {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: for that trait implementation, expected `posts`, found `name`
+note: required for `UserTag` to implement `probe_runtime::Completes<User, ()>`
+  --> /Users/xiniha/repos/greem/.scratch/greem-core/prototypes/outputs/src/types.rs:8:52
+   |
+ 8 | impl<T: Resolver<name, C> + Resolver<posts, C>, C> Completes<T, C> for UserTag {}
+   |         -----------------                          ^^^^^^^^^^^^^^^     ^^^^^^^
+   |         |
+   |         unsatisfied trait bound introduced here
+   = note: required for `User` to implement `probe_runtime::Outputs<UserTag, ()>`
+   = note: 14 redundant requirements hidden
+   = note: required for `Vec<Option<Vec<Option<Either<As<ResourceTag, As<..., ...>>, ...>>>>>` to implement `Outputs<List<Nullable<List<Nullable<NodeTag>>>>, ()>`
+note: required by a bound in `nested`
+  --> /Users/xiniha/repos/greem/.scratch/greem-core/prototypes/outputs/src/types.rs:43:14
+   |
+43 | fn nested<T: Outputs<List<Nullable<List<Nullable<NodeTag>>>>, ()>>() {}
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `nested`
+   = note: the full name for the type has been written to '/Users/xiniha/repos/greem/.scratch/greem-core/prototypes/outputs/results/missing.long-type-17039629522732878921.txt'
+   = note: consider using `--verbose` to print the full type name to the console
+
+error: aborting due to 3 previous errors
+
+For more information about this error, try `rustc --explain E0277`.

@@ -1,0 +1,161 @@
+"""The property schema: richer than the axum example, walked by the generators."""
+scalar UUID
+scalar JSON
+
+enum Role {
+  ADMIN
+  MEMBER
+}
+
+interface Node {
+  id: ID!
+}
+
+interface Resource implements Node {
+  id: ID!
+  owner: User
+}
+
+type Query {
+  users(first: Int = 10): [User!]!
+  user(id: ID!): User
+  node(id: ID!): Node
+  nodes(ids: [ID!]!): [Node]!
+  search(term: String): [SearchResult!]!
+  matrix: [[Int]!]
+  echo(input: UserPatch!): UserPatchOut!
+  json(value: JSON): JSON
+  """The length of the `not` chain: exercises a recursive input object."""
+  nest(filter: Filter!): Int!
+  """1, 2, 3 as a lazy stream; item `fail` (0-based) is an error."""
+  numbers(fail: Int): [Int]!
+  """`count` lazy items, every one an error, for memory evidence."""
+  noisy(count: Int!): [Int]!
+  """An error item, then a source that never yields again."""
+  stuck: [Int!]!
+  """NaN, which Float cannot represent, then a source that never yields again."""
+  floats: [Float]!
+  """The same source at a non-null item type."""
+  strictFloats: [Float!]!
+  """Every user, as a nullable list of non-null items."""
+  team: [User!]
+  """`value`, or JSON null, at a non-null custom scalar."""
+  strictJson(value: JSON): JSON!
+  """JSON null, then a source that never yields again."""
+  jsons: [JSON]!
+  """The same source at a non-null item type."""
+  strictJsons: [JSON!]!
+  """The number of items in the bag."""
+  count(bag: Bag!): Int!
+}
+
+"""Non-null lists with defaults: a nullable variable may fill them, an explicit null may not."""
+input Bag {
+  values: [Int]! = []
+  blobs: [JSON]! = []
+}
+
+"""An enum named like the primitive; here only to compile."""
+enum str {
+  a
+}
+
+"""Values named like the enum helpers; here only to compile."""
+enum Helpers {
+  VALUES
+  name
+  from_name
+  gen
+}
+
+"""Legal names that collide with generated items; here only to compile."""
+type Schema {
+  a: Int
+}
+
+type A_B {
+  c(x: Int): Int
+}
+
+type A {
+  B_c(x: Int): Int
+}
+
+type Schema_ {
+  a: Int
+}
+
+"""Fields and types named after std items; here only to compile."""
+type Shadows {
+  str: String
+  Result(x: Int): Int
+  Vec(x: Int): Int
+  Option(x: Int): Int
+  Box(x: Int): Int
+}
+
+type Option {
+  a: Int
+}
+
+type Vec {
+  a: Int
+}
+
+type Result {
+  a: Int
+}
+
+type User implements Node {
+  id: ID!
+  uuid: UUID!
+  name: String!
+  email: String
+  role: Role!
+  """Reports whether `Query.users` saw this selection under a deferred fragment."""
+  tag: String!
+  posts(first: Int = 10): [Post!]!
+  drafts: [Post!]!
+  friends: [User]!
+  score: Float
+}
+
+type Post implements Node & Resource {
+  id: ID!
+  title: String!
+  owner: User
+  author: User!
+  tags: [String!]!
+}
+
+union SearchResult = User | Post
+
+input Filter {
+  term: String
+  not: Filter
+  all: [Filter!]
+}
+
+input UserPatch {
+  name: String
+  email: String
+  role: Role = MEMBER
+}
+
+type UserPatchOut {
+  name: String
+  email: String
+  role: Role!
+}
+
+type Mutation {
+  rename(id: ID!, name: String!): User
+  patch(id: ID!, patch: UserPatch!): User
+  fail: String!
+  """Echoes `id`: a custom scalar argument behind a side effect."""
+  stamp(id: UUID!, tags: [UUID!], extra: StampInput): UUID!
+}
+
+input StampInput {
+  other: UUID
+}
