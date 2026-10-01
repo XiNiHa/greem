@@ -1,7 +1,0 @@
-   Compiling greem-streamed-probe v0.0.0 (/Users/xiniha/repos/greem/.scratch/greem-core/prototypes/streamed)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.39s
-     Running `.scratch/greem-core/prototypes/streamed/target/debug/borrowed`
-
-thread 'main' (19194722) panicked at src/bin/borrowed.rs:402:17:
-intentional sink panic
-note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

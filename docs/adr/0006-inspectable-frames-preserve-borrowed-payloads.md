@@ -10,4 +10,4 @@ Encoding each chain into owned JSON fragments before assembling a payload also w
 
 The earlier literal `FuturesUnordered<BoxFuture>` ownership sketch is replaced by inspectable chains with ordinary resolver futures inside them. Frames require stable heap storage and an unsafe dependency implementation; handwritten runtime/generated code uses safe interfaces. Streams enter owned continuations through consuming internal completion, while generated object batches project borrowed child sets. Stream turns and mutation roots remain siblings, preserving the depth policy in [Parked chains bound execution depth](0005-parked-chains-bound-execution-depth.md).
 
-The evidence and precise amendments live in [Does a Streamed output survive retained generation frames?](../../.scratch/greem-core/issues/18-streamed-output-prototype.md). This does not establish a production arena, full GraphQL error semantics, or the walking skeleton.
+The evidence and precise amendments live in [Does a Streamed output survive retained generation frames?](https://github.com/XiNiHa/greem/issues/20). This does not establish a production arena, full GraphQL error semantics, or the walking skeleton.
