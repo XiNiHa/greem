@@ -3,7 +3,7 @@
 # THROWAWAY: streamed-output ownership probes
 
 Status: **partial; the requested borrowed-payload alternative compiles and runs**. This is an
-asset for [Does a Streamed output survive retained generation frames?](../../issues/18-streamed-output-prototype.md),
+asset for [Does a Streamed output survive retained generation frames?](https://github.com/XiNiHa/greem/issues/20),
 not the completed stream prototype or the walking skeleton. Neither ownership
 alternative has been adopted as a map decision yet.
 
