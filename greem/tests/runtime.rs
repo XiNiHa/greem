@@ -592,6 +592,11 @@ fn failed_root_is_reported_once_at_its_position() {
 }
 
 #[test]
+fn sdl_is_the_generated_schema() {
+    assert_eq!(build_schema().sdl(), schema::__private::SDL);
+}
+
+#[test]
 fn a_module_generated_by_another_version_is_rejected() {
     struct Stale;
     impl greem::__private::SchemaInfo for Stale {

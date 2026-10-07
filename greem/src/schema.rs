@@ -211,8 +211,10 @@ impl ExecutionOutput {
 }
 
 impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
-    pub fn apollo(&self) -> &Arc<Valid<ApolloSchema>> {
-        &self.schema
+    /// The schema this runtime serves: the merged SDL from greem-build, with
+    /// any `@defer` and `@stream` definitions it supplied.
+    pub fn sdl(&self) -> &'static str {
+        I::SDL
     }
 
     pub fn max_depth(&self) -> u32 {
