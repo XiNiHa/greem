@@ -24,8 +24,8 @@ pub use error::{Error, GraphQLError, InputError, Location, PathSegment, SchemaEr
 pub use exec::payload::{Payload, PayloadKind};
 pub use exec::state::{ErrorBehavior, ExecuteOptions, IncrementalDelivery};
 pub use resolver::{
-    Args, As, Either, Field, List, NoMutation, NoMutationType, Nullable, Outputs, Resolver, Shape,
-    Streamed,
+    Args, As, Either, Field, Items, List, NoMutation, NoMutationType, Nullable, Outputs, Resolver,
+    Shape, Streamed,
 };
 pub use schema::{
     ExecutionOutput, Operation, OwnedPayload, RequestErrors, Roots, Schema, SchemaBuilder,

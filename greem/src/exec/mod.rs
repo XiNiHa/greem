@@ -1,6 +1,7 @@
 pub mod barrier;
 pub mod column;
 pub mod complete;
+pub mod list;
 pub mod payload;
 #[cfg(feature = "reference-executor")]
 pub mod reference;

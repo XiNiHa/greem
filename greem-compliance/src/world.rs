@@ -696,7 +696,7 @@ resolver!(
     User,
     schema::User::posts,
     "User.posts",
-    Result<Vec<Post>, Error>,
+    Result<Box<[Post]>, Error>,
     |parents, args, ctx| {
         let world = ctx.app();
         parents
@@ -851,7 +851,7 @@ resolver!(
     Post,
     schema::Post::tags,
     "Post.tags",
-    Vec<String>,
+    std::sync::Arc<[String]>,
     |parents, _args, _ctx| {
         parents
             .iter()

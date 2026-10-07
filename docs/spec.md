@@ -54,16 +54,22 @@ impl Resolver<schema::User::posts, App> for User {
   generations. Object types are `Send + Sync` (the `Resolver` supertraits):
   every field future of a scope borrows the same objects and is `Send`, so the
   borrowed objects must be `Sync`. `Outputs` has one impl, bridging to the sealed tag-side `Completes<T, C>` that codegen emits per
-  type. `&T` and `Result<T, Error>` outputs delegate at the `Resolver` level;
-  `Option`, `Vec`, slices, `Streamed<S>` and the scalars complete through greem's
-  own tags (`Nullable<Ty>`, `List<Ty>`, `scalars::*`).
+  type. `&T`, `Box<T>`, `Arc<T>` and `Result<T, Error>` objects delegate at the
+  `Resolver` level; `Option`, lists, `Streamed<S>` and the scalars complete
+  through greem's own tags (`Nullable<Ty>`, `List<Ty>`, `scalars::*`).
+- List outputs: owned `Vec<T>`, `Box<[T]>` and `Arc<[T]>` (whose items are
+  cloned out); borrowed `&[T]`, `&Vec<T>`, `&Box<[T]>` and `&Arc<[T]>`; and
+  `Items<I>` for any other collection that iterates by value and by reference.
+  One internal adapter (`exec/list.rs`) backs a single `List<Ty>` impl, and
+  `Result<X, Error>` wraps any list output, `Streamed` included.
 - Abstract positions: `As<types::User, T>` and `Either<A, B>`, one partition leaf
   per arm; repeated arms are separate scopes.
 - An object fails as a whole only when returned as `Result<T, Error>`
-  (forwarded through `&T`). It is marked once, at its own position (a failed
-  root is `data: null` with the error at the empty path), before any child
-  scope exists. The `parent_error` hook that carries this is sealed, so every
-  field's impl on one type agrees and codegen asks the first.
+  (forwarded through `&T`, `Box<T>` and `Arc<T>`). It is marked once, at its
+  own position (a failed root is `data: null` with the error at the empty
+  path), before any child scope exists. The `parent_error` hook that carries
+  this is sealed, so every field's impl on one type agrees and codegen asks the
+  first.
 - `hints` declares accepted hint types; `plan` runs post-order at tree build
   and writes hints upward (`Planning::hint`, to the nearest accepting field
   above the writer, never the writer's own slot).

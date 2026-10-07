@@ -24,22 +24,23 @@ mod schema {
 use schema::types;
 
 /// The application context: the "database" plus a fetch log the tests read.
+/// Rows sit behind `Arc` the way a cache hands them out, and resolvers return
+/// those `Arc`s as objects; leaf outputs borrow from the rows.
 pub struct App {
-    users: Vec<UserRow>,
-    posts: Vec<PostRow>,
+    users: Vec<Arc<User>>,
+    posts: Vec<Arc<Post>>,
     log: Mutex<Vec<String>>,
 }
 
 #[derive(Clone)]
-pub struct UserRow {
+pub struct User {
     id: u32,
     uuid: uuid::Uuid,
     name: String,
     email: Option<String>,
 }
 
-#[derive(Clone)]
-pub struct PostRow {
+pub struct Post {
     id: u32,
     author: u32,
     title: String,
@@ -49,35 +50,35 @@ impl App {
     fn seeded() -> Self {
         App {
             users: vec![
-                UserRow {
+                Arc::new(User {
                     id: 1,
                     uuid: uuid::Uuid::from_u128(1),
                     name: "Ann".into(),
                     email: Some("ann@example.com".into()),
-                },
-                UserRow {
+                }),
+                Arc::new(User {
                     id: 2,
                     uuid: uuid::Uuid::from_u128(2),
                     name: "Bob".into(),
                     email: None,
-                },
+                }),
             ],
             posts: vec![
-                PostRow {
+                Arc::new(Post {
                     id: 10,
                     author: 1,
                     title: "Hello".into(),
-                },
-                PostRow {
+                }),
+                Arc::new(Post {
                     id: 11,
                     author: 1,
                     title: "Again".into(),
-                },
-                PostRow {
+                }),
+                Arc::new(Post {
                     id: 20,
                     author: 2,
                     title: "Hi".into(),
-                },
+                }),
             ],
             log: Mutex::new(Vec::new()),
         }
@@ -97,17 +98,11 @@ pub struct PostsHint {
 pub struct QueryRoot;
 pub struct MutationRoot;
 
-/// Rows fetched from the context; leaf outputs borrow from them.
-#[derive(Clone)]
-pub struct User(UserRow);
-#[derive(Clone)]
-pub struct Post(PostRow);
-
 // ---- Query: hand-written set-based resolvers -------------------------------
 
 impl Resolver<schema::Query::users, App> for QueryRoot {
     type Output<'obj>
-        = Vec<User>
+        = Vec<Arc<User>>
     where
         Self: 'obj;
     async fn resolve<'obj, 'call>(
@@ -119,16 +114,13 @@ impl Resolver<schema::Query::users, App> for QueryRoot {
         'obj: 'call,
     {
         ctx.app().log("Query.users");
-        Ok(parents
-            .iter()
-            .map(|_| ctx.app().users.iter().cloned().map(User).collect())
-            .collect())
+        Ok(parents.iter().map(|_| ctx.app().users.clone()).collect())
     }
 }
 
 impl Resolver<schema::Query::user, App> for QueryRoot {
     type Output<'obj>
-        = Option<User>
+        = Option<Arc<User>>
     where
         Self: 'obj;
     async fn resolve<'obj, 'call>(
@@ -148,7 +140,6 @@ impl Resolver<schema::Query::user, App> for QueryRoot {
                     .iter()
                     .find(|u| u.id.to_string() == args.id)
                     .cloned()
-                    .map(User)
             })
             .collect())
     }
@@ -156,7 +147,7 @@ impl Resolver<schema::Query::user, App> for QueryRoot {
 
 impl Resolver<schema::Query::node, App> for QueryRoot {
     type Output<'obj>
-        = Option<Either<As<types::User, User>, As<types::Post, Post>>>
+        = Option<Either<As<types::User, Arc<User>>, As<types::Post, Arc<Post>>>>
     where
         Self: 'obj;
     async fn resolve<'obj, 'call>(
@@ -172,12 +163,12 @@ impl Resolver<schema::Query::node, App> for QueryRoot {
             .iter()
             .map(|_| {
                 if let Some(user) = app.users.iter().find(|u| u.id.to_string() == args.id) {
-                    return Some(Either::A(As::new(User(user.clone()))));
+                    return Some(Either::A(As::new(user.clone())));
                 }
                 app.posts
                     .iter()
                     .find(|p| p.id.to_string() == args.id)
-                    .map(|p| Either::B(As::new(Post(p.clone()))))
+                    .map(|p| Either::B(As::new(p.clone())))
             })
             .collect())
     }
@@ -185,7 +176,7 @@ impl Resolver<schema::Query::node, App> for QueryRoot {
 
 impl Resolver<schema::Query::posts, App> for QueryRoot {
     type Output<'obj>
-        = Streamed<futures::stream::BoxStream<'obj, Result<Post, Error>>>
+        = Streamed<futures::stream::BoxStream<'obj, Result<Arc<Post>, Error>>>
     where
         Self: 'obj;
     async fn resolve<'obj, 'call>(
@@ -204,14 +195,7 @@ impl Resolver<schema::Query::posts, App> for QueryRoot {
             .iter()
             .map(|_| {
                 Streamed::new(
-                    stream::iter(
-                        ctx.app()
-                            .posts
-                            .iter()
-                            .take(first)
-                            .map(|p| Ok(Post(p.clone()))),
-                    )
-                    .boxed(),
+                    stream::iter(ctx.app().posts.iter().take(first).map(|p| Ok(p.clone()))).boxed(),
                 )
             })
             .collect())
@@ -227,19 +211,19 @@ impl Resolver<schema::Query::posts, App> for QueryRoot {
 #[greem::object(context = App)]
 impl User {
     async fn id(&self) -> String {
-        self.0.id.to_string()
+        self.id.to_string()
     }
 
     fn uuid(&self) -> &uuid::Uuid {
-        &self.0.uuid
+        &self.uuid
     }
 
     async fn name(&self) -> &str {
-        &self.0.name
+        &self.name
     }
 
     fn email(&self) -> Option<&str> {
-        self.0.email.as_deref()
+        self.email.as_deref()
     }
 
     /// Set-based: one call per scope, hinted by `Post.author`.
@@ -247,7 +231,7 @@ impl User {
         parents: &[&Self],
         _args: &Args<schema::User::posts>,
         ctx: &Context<App>,
-    ) -> Vec<Vec<Post>> {
+    ) -> Vec<Vec<Arc<Post>>> {
         let with_author = ctx.hint::<PostsHint>().with_author;
         ctx.app().log(format!(
             "User.posts x{} (with_author: {with_author})",
@@ -259,9 +243,8 @@ impl User {
                 ctx.app()
                     .posts
                     .iter()
-                    .filter(|p| p.author == u.0.id)
+                    .filter(|p| p.author == u.id)
                     .cloned()
-                    .map(Post)
                     .collect()
             })
             .collect()
@@ -278,25 +261,24 @@ impl User {
 #[greem::object(context = App)]
 impl Post {
     fn id(&self) -> String {
-        self.0.id.to_string()
+        self.id.to_string()
     }
 
     fn title(&self) -> &str {
-        &self.0.title
+        &self.title
     }
 
     fn author(
         &self,
         _args: &Args<schema::Post::author>,
         ctx: &Context<App>,
-    ) -> Result<User, Error> {
+    ) -> Result<Arc<User>, Error> {
         ctx.app().log("Post.author");
         ctx.app()
             .users
             .iter()
-            .find(|u| u.id == self.0.author)
+            .find(|u| u.id == self.author)
             .cloned()
-            .map(User)
             .ok_or_else(|| Error::new("author missing"))
     }
 
@@ -310,7 +292,7 @@ impl Post {
 
 impl Resolver<schema::Mutation::rename, App> for MutationRoot {
     type Output<'obj>
-        = Option<User>
+        = Option<Arc<User>>
     where
         Self: 'obj;
     async fn resolve<'obj, 'call>(
@@ -329,9 +311,9 @@ impl Resolver<schema::Mutation::rename, App> for MutationRoot {
                     .iter()
                     .find(|u| u.id.to_string() == args.id)
                     .map(|u| {
-                        User(UserRow {
+                        Arc::new(User {
                             name: args.name.clone(),
-                            ..u.clone()
+                            ..User::clone(u)
                         })
                     })
             })

@@ -5,6 +5,7 @@
 use crate::context::{Context, HintAddr};
 use crate::error::{Error, GraphQLError, PathSegment};
 use crate::exec::column::{Column, Inner, Slot, Turn};
+use crate::exec::list::ListOutput;
 use crate::exec::scope::{
     Batch, DeferredSet, DeferredSetState, FieldFuture, Frame, ObjectMeta, Scope, ScopeMeta,
 };
@@ -18,6 +19,7 @@ use crate::tree::{Abort, FieldKind, NodeId};
 use crate::value::{ToLeaf, Value};
 use futures::Stream;
 use futures::StreamExt;
+use std::borrow::Borrow;
 use std::marker::PhantomData;
 #[cfg(feature = "reference-executor")]
 use {
@@ -955,66 +957,70 @@ where
     }
 }
 
-impl<T, Ty, C> Completes<Vec<T>, C> for List<Ty>
+impl<L, Ty, C> Completes<L, C> for List<Ty>
 where
-    T: Outputs<Ty, C> + Send,
+    L: ListOutput,
+    L::Item: Outputs<Ty, C> + Send,
     Ty: 'static,
     C: Send + Sync,
 {
     fn walk<'a>(w: &mut Walker<'_, C>, node: NodeId, leaf: &LeafPath) -> Result<(), Abort>
     where
-        Vec<T>: 'a,
+        L: 'a,
         C: 'a,
     {
-        T::__walk(w, node, leaf)
+        <L::Item as Outputs<Ty, C>>::__walk(w, node, leaf)
     }
 
     fn first_error(
-        value: &Vec<T>,
+        value: &L,
         indices: &mut Vec<u32>,
         wanted: &dyn Fn(&[u32]) -> bool,
     ) -> Option<Error> {
-        first_item_error(value.iter(), indices, |item, indices| {
-            <T as Outputs<Ty, C>>::__first_error(item, indices, wanted)
+        first_item_error(value.items(), indices, |item, indices| {
+            <L::Item as Outputs<Ty, C>>::__first_error(item.borrow(), indices, wanted)
         })
     }
 
-    fn complete<'a>(values: Vec<Vec<T>>, positions: Vec<Pos>, cc: &mut Completion<'a, '_, C>)
+    fn complete<'a>(values: Vec<L>, positions: Vec<Pos>, cc: &mut Completion<'a, '_, C>)
     where
-        Vec<T>: 'a,
+        L: 'a,
         C: 'a,
     {
         if cc.level == 0 && cc.streamed() {
             let sources = values
                 .into_iter()
-                .map(|items| Streamed::new(futures::stream::iter(items.into_iter().map(Ok))))
+                .map(|list| {
+                    let items: Vec<L::Item> = list.into_items().collect();
+                    Streamed::new(futures::stream::iter(items.into_iter().map(Ok)))
+                })
                 .collect();
-            cc.stream::<T, Ty, _>(sources, positions);
+            cc.stream::<L::Item, Ty, _>(sources, positions);
             return;
         }
         let mut items = Vec::new();
         let mut item_pos = Vec::new();
         for (list, pos) in values.into_iter().zip(&positions) {
-            let positions = cc.list(pos, list.len());
-            items.extend(list);
-            item_pos.extend(positions);
+            let start = items.len();
+            items.extend(list.into_items());
+            item_pos.extend(cc.list(pos, items.len() - start));
         }
         if !items.is_empty() {
-            cc.descend(|cc| T::__complete(items, item_pos, cc));
+            cc.descend(|cc| <L::Item as Outputs<Ty, C>>::__complete(items, item_pos, cc));
         }
     }
 
     #[cfg(feature = "reference-executor")]
-    fn reference<'v, 's: 'v>(value: Vec<T>, rc: &RefCompletion<'s, C>) -> BoxFuture<'v, RefValue>
+    fn reference<'v, 's: 'v>(value: L, rc: &RefCompletion<'s, C>) -> BoxFuture<'v, RefValue>
     where
-        Vec<T>: 'v,
+        L: 'v,
         C: 'v,
     {
         let nullable = rc.item_nullable();
         let mut rc = rc.clone();
         let items: Vec<_> = value
-            .into_iter()
-            .map(|item| T::__reference(item, &rc.item()))
+            .into_items()
+            .map(|item| <L::Item as Outputs<Ty, C>>::__reference(item, &rc.item()))
             .collect();
         Box::pin(async move {
             let mut out = Vec::with_capacity(items.len());
@@ -1026,37 +1032,36 @@ where
     }
 }
 
-impl<T, Ty, C> Completes<Result<Vec<T>, Error>, C> for List<Ty>
+impl<X, Ty, C> Completes<Result<X, Error>, C> for List<Ty>
 where
-    T: Outputs<Ty, C> + Send,
-    Ty: 'static,
+    List<Ty>: Completes<X, C>,
     C: Send + Sync,
 {
     fn walk<'a>(w: &mut Walker<'_, C>, node: NodeId, leaf: &LeafPath) -> Result<(), Abort>
     where
-        Result<Vec<T>, Error>: 'a,
+        Result<X, Error>: 'a,
         C: 'a,
     {
-        T::__walk(w, node, leaf)
+        <List<Ty> as Completes<X, C>>::walk(w, node, leaf)
     }
 
     fn first_error(
-        value: &Result<Vec<T>, Error>,
+        value: &Result<X, Error>,
         indices: &mut Vec<u32>,
         wanted: &dyn Fn(&[u32]) -> bool,
     ) -> Option<Error> {
         match value {
-            Ok(value) => <List<Ty> as Completes<Vec<T>, C>>::first_error(value, indices, wanted),
+            Ok(value) => <List<Ty> as Completes<X, C>>::first_error(value, indices, wanted),
             Err(error) => wanted(indices).then(|| error.clone()),
         }
     }
 
     fn complete<'a>(
-        values: Vec<Result<Vec<T>, Error>>,
+        values: Vec<Result<X, Error>>,
         positions: Vec<Pos>,
         cc: &mut Completion<'a, '_, C>,
     ) where
-        Result<Vec<T>, Error>: 'a,
+        Result<X, Error>: 'a,
         C: 'a,
     {
         let mut ok = Vec::new();
@@ -1071,115 +1076,23 @@ where
             }
         }
         if !ok.is_empty() {
-            <List<Ty> as Completes<Vec<T>, C>>::complete(ok, ok_pos, cc);
+            <List<Ty> as Completes<X, C>>::complete(ok, ok_pos, cc);
         }
     }
 
     #[cfg(feature = "reference-executor")]
     fn reference<'v, 's: 'v>(
-        value: Result<Vec<T>, Error>,
+        value: Result<X, Error>,
         rc: &RefCompletion<'s, C>,
     ) -> BoxFuture<'v, RefValue>
     where
-        Result<Vec<T>, Error>: 'v,
+        Result<X, Error>: 'v,
         C: 'v,
     {
         match value {
-            Ok(value) => <List<Ty> as Completes<Vec<T>, C>>::reference(value, rc),
+            Ok(value) => <List<Ty> as Completes<X, C>>::reference(value, rc),
             Err(error) => rc.error(error),
         }
-    }
-}
-
-impl<'x, T, Ty, C> Completes<&'x [T], C> for List<Ty>
-where
-    &'x T: Outputs<Ty, C> + Send,
-    T: Sync,
-    Ty: 'static,
-    C: Send + Sync,
-{
-    fn walk<'a>(w: &mut Walker<'_, C>, node: NodeId, leaf: &LeafPath) -> Result<(), Abort>
-    where
-        &'x [T]: 'a,
-        C: 'a,
-    {
-        <&'x T as Outputs<Ty, C>>::__walk(w, node, leaf)
-    }
-
-    fn first_error(
-        value: &&'x [T],
-        indices: &mut Vec<u32>,
-        wanted: &dyn Fn(&[u32]) -> bool,
-    ) -> Option<Error> {
-        first_item_error(value.iter(), indices, |item, indices| {
-            <&'x T as Outputs<Ty, C>>::__first_error(item, indices, wanted)
-        })
-    }
-
-    fn complete<'a>(values: Vec<&'x [T]>, positions: Vec<Pos>, cc: &mut Completion<'a, '_, C>)
-    where
-        &'x [T]: 'a,
-        C: 'a,
-    {
-        let values: Vec<Vec<&'x T>> = values
-            .into_iter()
-            .map(|items| items.iter().collect())
-            .collect();
-        <List<Ty> as Completes<Vec<&'x T>, C>>::complete(values, positions, cc);
-    }
-
-    #[cfg(feature = "reference-executor")]
-    fn reference<'v, 's: 'v>(value: &'x [T], rc: &RefCompletion<'s, C>) -> BoxFuture<'v, RefValue>
-    where
-        &'x [T]: 'v,
-        C: 'v,
-    {
-        <List<Ty> as Completes<Vec<&'x T>, C>>::reference(value.iter().collect(), rc)
-    }
-}
-
-impl<'x, T, Ty, C> Completes<&'x Vec<T>, C> for List<Ty>
-where
-    &'x T: Outputs<Ty, C> + Send,
-    T: Sync,
-    Ty: 'static,
-    C: Send + Sync,
-{
-    fn walk<'a>(w: &mut Walker<'_, C>, node: NodeId, leaf: &LeafPath) -> Result<(), Abort>
-    where
-        &'x Vec<T>: 'a,
-        C: 'a,
-    {
-        <&'x T as Outputs<Ty, C>>::__walk(w, node, leaf)
-    }
-
-    fn first_error(
-        value: &&'x Vec<T>,
-        indices: &mut Vec<u32>,
-        wanted: &dyn Fn(&[u32]) -> bool,
-    ) -> Option<Error> {
-        <List<Ty> as Completes<&'x [T], C>>::first_error(&value.as_slice(), indices, wanted)
-    }
-
-    fn complete<'a>(values: Vec<&'x Vec<T>>, positions: Vec<Pos>, cc: &mut Completion<'a, '_, C>)
-    where
-        &'x Vec<T>: 'a,
-        C: 'a,
-    {
-        let values: Vec<&'x [T]> = values.into_iter().map(|v| v.as_slice()).collect();
-        <List<Ty> as Completes<&'x [T], C>>::complete(values, positions, cc);
-    }
-
-    #[cfg(feature = "reference-executor")]
-    fn reference<'v, 's: 'v>(
-        value: &'x Vec<T>,
-        rc: &RefCompletion<'s, C>,
-    ) -> BoxFuture<'v, RefValue>
-    where
-        &'x Vec<T>: 'v,
-        C: 'v,
-    {
-        <List<Ty> as Completes<&'x [T], C>>::reference(value.as_slice(), rc)
     }
 }
 

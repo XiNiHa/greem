@@ -3,13 +3,13 @@
 
 use futures::executor::block_on;
 use greem::{
-    Args, As, Context, Error, ErrorBehavior, ExecuteOptions, IncrementalDelivery, Operation,
+    Args, As, Context, Error, ErrorBehavior, ExecuteOptions, IncrementalDelivery, Items, Operation,
     Resolver, Roots, Streamed,
 };
 use greem_test_app::app::{App, MutationRoot, QueryRoot, User, build_schema, users};
 use greem_test_app::schema;
 use serde_json::{Value, json};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 fn run(
     app: App,
@@ -522,6 +522,203 @@ fn stream_lazy() {
     ));
     let v: Value = serde_json::from_slice(&output.payloads[0].json).unwrap();
     assert_eq!(v["data"]["users"][1]["name"], json!("Bob"));
+}
+
+// Objects behind `Arc` and `Box`, and owned list containers other than `Vec`.
+struct OwnedShapes {
+    fail_users: bool,
+}
+
+/// A collection greem knows nothing about, returned through `Items`.
+struct Sequence<T>(Vec<T>);
+
+impl<T> IntoIterator for Sequence<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'r, T> IntoIterator for &'r Sequence<T> {
+    type Item = &'r T;
+    type IntoIter = std::slice::Iter<'r, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+type ArcUsers = futures::stream::Iter<std::vec::IntoIter<Result<Arc<User>, Error>>>;
+type SharedRows = Items<Sequence<Arc<[Option<i32>]>>>;
+
+#[greem::object(schema = crate::schema, type = "Query", context = App)]
+impl OwnedShapes {
+    fn users(&self) -> Result<Streamed<ArcUsers>, Error> {
+        if self.fail_users {
+            return Err(Error::new("users failed"));
+        }
+        let items: Vec<_> = users().into_iter().map(|u| Ok(Arc::new(u))).collect();
+        Ok(Streamed::new(futures::stream::iter(items)))
+    }
+
+    fn user(&self) -> Option<Box<User>> {
+        users().pop().map(Box::new)
+    }
+
+    fn node(&self) -> Option<As<schema::types::User, Arc<User>>> {
+        users().into_iter().next().map(|u| As::new(Arc::new(u)))
+    }
+
+    fn search(&self) -> Box<[As<schema::types::User, Box<User>>]> {
+        users().into_iter().map(|u| As::new(Box::new(u))).collect()
+    }
+
+    fn ints(&self) -> Option<SharedRows> {
+        Some(Items(Sequence(vec![
+            Arc::from(vec![Some(1), None]),
+            Arc::from(Vec::new()),
+        ])))
+    }
+}
+
+#[test]
+fn owned_output_shapes() {
+    let schema = schema::Schema::<App>::builder()
+        .query::<OwnedShapes>()
+        .mutation::<MutationRoot>()
+        .build()
+        .unwrap();
+    let run = |fail_users: bool, query: &str, options: ExecuteOptions| -> Vec<Value> {
+        let document = schema.parse(query).unwrap();
+        let output = block_on(schema.execute(
+            Roots {
+                query: OwnedShapes { fail_users },
+                mutation: MutationRoot,
+            },
+            App::default(),
+            Operation {
+                document: &document,
+                operation_name: None,
+                variables: Value::Null,
+            },
+            options,
+        ));
+        output
+            .payloads
+            .iter()
+            .map(|p| serde_json::from_slice(&p.json).unwrap())
+            .collect()
+    };
+
+    let p = run(
+        false,
+        r#"{ users { name } user(id: "2") { name } node(id: "1") { ... on User { name } } search { ... on User { id } } ints }"#,
+        ExecuteOptions::default(),
+    );
+    assert_eq!(
+        p[0]["data"],
+        json!({
+            "users": [{"name": "Ann"}, {"name": "Bob"}],
+            "user": {"name": "Bob"},
+            "node": {"name": "Ann"},
+            "search": [{"id": "1"}, {"id": "2"}],
+            "ints": [[1, null], []],
+        })
+    );
+
+    let p = run(
+        false,
+        "{ users @stream(initialCount: 1) { name } }",
+        ExecuteOptions {
+            incremental: IncrementalDelivery::Enabled,
+            ..Default::default()
+        },
+    );
+    assert_eq!(p[0]["data"], json!({"users": [{"name": "Ann"}]}));
+    let items: Vec<Value> = p[1..]
+        .iter()
+        .flat_map(|p| p["incremental"].as_array().cloned().unwrap_or_default())
+        .flat_map(|e| e["items"].as_array().cloned().unwrap())
+        .collect();
+    assert_eq!(items, vec![json!({"name": "Bob"})]);
+    assert_eq!(p.last().unwrap()["hasNext"], json!(false));
+
+    let p = run(true, "{ users { name } }", ExecuteOptions::default());
+    assert_eq!(p[0]["data"], Value::Null);
+    assert_eq!(p[0]["errors"][0]["message"], json!("users failed"));
+    assert_eq!(p[0]["errors"][0]["path"], json!(["users"]));
+}
+
+// List containers borrowed from the parent object.
+struct BorrowedShapes {
+    users: Arc<[User]>,
+    ints: BoxedRows,
+}
+
+type BoxedRows = Box<[Box<[Option<i32>]>]>;
+
+#[greem::object(schema = crate::schema, type = "Query", context = App)]
+impl BorrowedShapes {
+    fn users(&self) -> &Arc<[User]> {
+        &self.users
+    }
+
+    fn user(&self) -> Option<&User> {
+        self.users.last()
+    }
+
+    fn node(&self) -> Option<As<schema::types::User, &User>> {
+        None
+    }
+
+    fn search(&self) -> Vec<As<schema::types::User, &User>> {
+        Vec::new()
+    }
+
+    fn ints(&self) -> Option<&BoxedRows> {
+        Some(&self.ints)
+    }
+}
+
+#[test]
+fn borrowed_output_shapes() {
+    let schema = schema::Schema::<App>::builder()
+        .query::<BorrowedShapes>()
+        .mutation::<MutationRoot>()
+        .build()
+        .unwrap();
+    let document = schema
+        .parse("{ users { name posts(first: 1) { title } } ints }")
+        .unwrap();
+    let output = block_on(schema.execute(
+        Roots {
+            query: BorrowedShapes {
+                users: users().into(),
+                ints: vec![vec![Some(1), None].into(), Box::default()].into(),
+            },
+            mutation: MutationRoot,
+        },
+        App::default(),
+        Operation {
+            document: &document,
+            operation_name: None,
+            variables: Value::Null,
+        },
+        ExecuteOptions::default(),
+    ));
+    let v: Value = serde_json::from_slice(&output.payloads[0].json).unwrap();
+    assert_eq!(
+        v["data"],
+        json!({
+            "users": [
+                {"name": "Ann", "posts": [{"title": "Ann post 0"}]},
+                {"name": "Bob", "posts": [{"title": "Bob post 0"}]},
+            ],
+            "ints": [[1, null], []],
+        })
+    );
 }
 
 #[test]

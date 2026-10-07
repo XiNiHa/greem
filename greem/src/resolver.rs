@@ -63,7 +63,7 @@ pub trait Resolver<F: Field, C = ()>: Send + Sync {
         'obj: 'call;
 
     /// Framework hook: an object that failed as a whole. Sealed, since `Seal`
-    /// cannot be named outside greem: only the `&T` and `Result<T, Error>`
+    /// cannot be named outside greem: only the pointer and `Result<T, Error>`
     /// delegations override it, so every field's impl on one type agrees and
     /// codegen asks any one of them. Users fail an object by returning it as
     /// `Result<T, Error>`.
@@ -79,37 +79,43 @@ pub trait Resolver<F: Field, C = ()>: Send + Sync {
     fn plan(_planning: &mut Planning<'_, F, C>) {}
 }
 
-impl<T: Resolver<F, C>, F: Field, C: Send + Sync> Resolver<F, C> for &T {
-    type Output<'obj>
-        = T::Output<'obj>
-    where
-        Self: 'obj,
-        C: 'obj;
+/// An object behind a pointer resolves as its pointee.
+macro_rules! pointer_resolver {
+    ($($ptr:ty),*) => {$(
+        impl<T: Resolver<F, C>, F: Field, C: Send + Sync> Resolver<F, C> for $ptr {
+            type Output<'obj>
+                = T::Output<'obj>
+            where
+                Self: 'obj,
+                C: 'obj;
 
-    async fn resolve<'obj, 'call>(
-        parents: &'call [&'obj Self],
-        args: &'obj Args<F>,
-        ctx: &'obj Context<'obj, C>,
-    ) -> Result<Vec<Self::Output<'obj>>, Error>
-    where
-        'obj: 'call,
-    {
-        let inner: Vec<&'obj T> = parents.iter().map(|p| **p).collect();
-        T::resolve(&inner, args, ctx).await
-    }
+            async fn resolve<'obj, 'call>(
+                parents: &'call [&'obj Self],
+                args: &'obj Args<F>,
+                ctx: &'obj Context<'obj, C>,
+            ) -> Result<Vec<Self::Output<'obj>>, Error>
+            where
+                'obj: 'call,
+            {
+                let inner: Vec<&'obj T> = parents.iter().map(|p| &***p).collect();
+                T::resolve(&inner, args, ctx).await
+            }
 
-    fn parent_error(&self, seal: sealed::Seal) -> Option<&Error> {
-        T::parent_error(self, seal)
-    }
+            fn parent_error(&self, seal: sealed::Seal) -> Option<&Error> {
+                T::parent_error(self, seal)
+            }
 
-    fn hints(registry: &mut HintRegistry<'_>) {
-        T::hints(registry)
-    }
+            fn hints(registry: &mut HintRegistry<'_>) {
+                T::hints(registry)
+            }
 
-    fn plan(planning: &mut Planning<'_, F, C>) {
-        T::plan(planning)
-    }
+            fn plan(planning: &mut Planning<'_, F, C>) {
+                T::plan(planning)
+            }
+        }
+    )*};
 }
+pointer_resolver!(&T, Box<T>, std::sync::Arc<T>);
 
 impl<T: Resolver<F, C>, F: Field, C: Send + Sync> Resolver<F, C> for Result<T, Error> {
     type Output<'obj>
@@ -318,6 +324,10 @@ impl<S: Stream> Streamed<S> {
         Self(source, PhantomData)
     }
 }
+
+/// Any collection that iterates both by value and by reference, as a list
+/// output: for containers greem has no list impl for.
+pub struct Items<I>(pub I);
 
 /// Tag for a nullable position wrapping the tag of its inner type.
 pub struct Nullable<Ty>(PhantomData<Ty>);
