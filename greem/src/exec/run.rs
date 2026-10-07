@@ -19,7 +19,7 @@ pub(crate) struct Loop {
 pub(crate) fn advance(root: &mut Scope<'_>, shared: &Shared) -> bool {
     let mut changed = false;
     {
-        let mut groups = shared.groups.lock().unwrap();
+        let mut groups = shared.groups();
         for group in &mut groups.list {
             if group.state == GroupState::Unreleased && group.announced {
                 group.state = GroupState::Released;
@@ -50,7 +50,7 @@ pub(crate) fn advance(root: &mut Scope<'_>, shared: &Shared) -> bool {
     root.clear_fresh();
     // Retired turns and finished scopes dropped their group references above;
     // terminal groups nobody references any more give their slots back.
-    shared.groups.lock().unwrap().sweep();
+    shared.groups().sweep();
     changed
 }
 
@@ -59,7 +59,7 @@ pub(crate) fn advance(root: &mut Scope<'_>, shared: &Shared) -> bool {
 fn advance_scope(scope: &mut Scope<'_>, shared: &Shared, changed: &mut bool) {
     // Every object here belongs to a dead group: nothing it produces can be
     // delivered, so its pending futures are never polled again.
-    if scope.activity != Activity::Quiescent && scope.all_dead(shared) {
+    if scope.activity != Activity::Quiescent && scope.all_dead(&shared.groups()) {
         scope.activity = Activity::Quiescent;
         return;
     }
@@ -67,7 +67,7 @@ fn advance_scope(scope: &mut Scope<'_>, shared: &Shared, changed: &mut bool) {
     advance_scope_inner(scope, shared, &mut local);
     if local {
         *changed = true;
-    } else if scope.is_finished() {
+    } else if scope.is_finished(&shared.groups()) {
         scope.activity = Activity::Quiescent;
     }
 }
@@ -86,19 +86,19 @@ fn advance_scope_inner(scope: &mut Scope<'_>, shared: &Shared, changed: &mut boo
             }
         }
         for turn in column.turns.iter_mut().skip(1) {
-            if turn.shipped
-                && !turn.retired
-                && turn
-                    .children
+            if turn.shipped && !turn.retired && {
+                let groups = shared.groups();
+                turn.children
                     .iter()
-                    .all(|c| c.with_dependent(|_, s| s.is_finished()))
-            {
+                    .all(|c| c.with_dependent(|_, s| s.is_finished(&groups)))
+            } {
+                // Retiring drops scopes, which lock the table themselves.
                 turn.retire();
             }
         }
         if let Some(mut driver) = column.stream.take() {
             let released = {
-                let groups = shared.groups.lock().unwrap();
+                let groups = shared.groups();
                 driver
                     .groups()
                     .iter()
@@ -123,7 +123,7 @@ fn advance_scope_inner(scope: &mut Scope<'_>, shared: &Shared, changed: &mut boo
             DeferredSetState::Dropped => continue,
         }
         let (all_dead, ready) = {
-            let mut groups = shared.groups.lock().unwrap();
+            let mut groups = shared.groups();
             // A group whose `after` dependency failed or was dropped is
             // dropped too; one already announced was failed by the barrier.
             for &g in &deferred.groups {
@@ -141,26 +141,27 @@ fn advance_scope_inner(scope: &mut Scope<'_>, shared: &Shared, changed: &mut boo
                 }
             }
             let all_dead = deferred.groups.iter().all(|&g| groups.is_dead(g));
-            let ready = deferred.groups.iter().all(|&g| {
-                let after_done = match groups.get(g).kind {
-                    GroupKind::Defer {
-                        after: Some(after), ..
-                    } => groups.get(after).state == GroupState::Completed,
-                    _ => true,
-                };
-                groups.is_dead(g) || (groups.is_released(g) && after_done)
-            });
+            if all_dead {
+                // Abandoned deferred work: make its groups terminal so they reclaim.
+                for &g in &deferred.groups {
+                    if groups.get(g).state == GroupState::Unreleased {
+                        groups.get_mut(g).state = GroupState::Dropped;
+                    }
+                }
+            }
+            let ready = !all_dead
+                && deferred.groups.iter().all(|&g| {
+                    let after_done = match groups.get(g).kind {
+                        GroupKind::Defer {
+                            after: Some(after), ..
+                        } => groups.get(after).state == GroupState::Completed,
+                        _ => true,
+                    };
+                    groups.is_dead(g) || (groups.is_released(g) && after_done)
+                });
             (all_dead, ready)
         };
         if all_dead {
-            // Abandoned deferred work: make its groups terminal so they reclaim.
-            let mut groups = shared.groups.lock().unwrap();
-            for &g in &deferred.groups {
-                if groups.get(g).state == GroupState::Unreleased {
-                    groups.get_mut(g).state = GroupState::Dropped;
-                }
-            }
-            drop(groups);
             deferred.state = DeferredSetState::Dropped;
             continue;
         }

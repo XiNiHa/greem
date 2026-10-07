@@ -287,7 +287,7 @@ impl<'a, C: Send + Sync + 'a> Completion<'a, '_, C> {
         let key = field.key.clone();
         let mut objects = Vec::with_capacity(values.len());
         {
-            let mut groups = self.cx.shared.groups.lock().unwrap();
+            let mut groups = self.cx.shared.groups();
             for pos in &positions {
                 let parent = &self.cx.meta.objects[pos.object as usize];
                 let mut path = parent.path.clone();
@@ -395,7 +395,7 @@ impl<'a, C: Send + Sync + 'a> Completion<'a, '_, C> {
         let field = &self.cx.header.fields[self.field as usize];
         let streamed = field.stream.clone();
         let groups: Vec<GroupId> = {
-            let mut table = self.cx.shared.groups.lock().unwrap();
+            let mut table = self.cx.shared.groups();
             positions
                 .iter()
                 .map(|pos| match &streamed {
@@ -452,8 +452,7 @@ pub struct ObjectBatch<'a, T, Ty, C> {
 
 impl<T, Ty, C> Drop for ObjectBatch<'_, T, Ty, C> {
     fn drop(&mut self) {
-        // Ignore poisoning: this may run while unwinding from a resolver panic.
-        if let Ok(mut groups) = self.shared.groups.lock() {
+        if let Some(mut groups) = self.shared.groups_for_drop() {
             for object in &self.meta.objects {
                 groups.release_ref(object.group);
                 for &(_, g) in &object.pending {
@@ -604,9 +603,12 @@ where
         let n = parents.len();
         let generation = cx.meta.generation;
         let mut column = new_column(index, F::SHAPE, FieldKind::Normal, n, F::Type::OBJECTS);
-        let live: Vec<u32> = (0..n as u32)
-            .filter(|&i| !cx.shared.is_dead(cx.groups[i as usize]))
-            .collect();
+        let live: Vec<u32> = {
+            let groups = cx.shared.groups();
+            (0..n as u32)
+                .filter(|&i| !groups.is_dead(cx.groups[i as usize]))
+                .collect()
+        };
         if live.is_empty() {
             return column;
         }

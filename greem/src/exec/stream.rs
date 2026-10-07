@@ -1,7 +1,7 @@
 use crate::error::{Error, GraphQLError, PathSegment};
 use crate::exec::column::{Column, Turn, TurnRange};
 use crate::exec::complete::{Completion, FieldsCx, Pos};
-use crate::exec::state::{ErrorBehavior, GroupId};
+use crate::exec::state::{ErrorBehavior, GroupId, Groups};
 use crate::plan::Leaf as LeafPath;
 use crate::resolver::{Outputs, Shape};
 use futures::future::BoxFuture;
@@ -22,7 +22,7 @@ pub trait StreamDriver<'a>: Send {
     /// All sources ended and nothing is buffered.
     fn is_done(&self) -> bool;
     /// The parent whose stream group is `group` still has a live source or buffered items.
-    fn is_live_for(&self, group: GroupId) -> bool;
+    fn is_live_for(&self, group: GroupId, groups: &Groups) -> bool;
     fn groups(&self) -> &[GroupId];
     /// Whether `groups` are this driver's own stream groups. A lazily drained
     /// list holds its parents' groups instead, which are not its to announce,
@@ -98,7 +98,7 @@ impl<'a, T, Ty, C> StreamState<'a, T, Ty, C> {
     ) -> Self {
         let n = sources.len();
         {
-            let mut table = cx.shared.groups.lock().unwrap();
+            let mut table = cx.shared.groups();
             for &g in &groups {
                 table.retain(g);
             }
@@ -152,7 +152,7 @@ impl<T: Outputs<Ty, C>, Ty, C> StreamState<'_, T, Ty, C> {
 
 impl<T, Ty, C> Drop for StreamState<'_, T, Ty, C> {
     fn drop(&mut self) {
-        if let Ok(mut table) = self.cx.shared.groups.lock() {
+        if let Some(mut table) = self.cx.shared.groups_for_drop() {
             for &g in &self.groups {
                 table.release_ref(g);
             }
@@ -402,13 +402,12 @@ where
         self.sources.iter().all(Option::is_none) && self.buffer.is_empty()
     }
 
-    fn is_live_for(&self, group: GroupId) -> bool {
+    fn is_live_for(&self, group: GroupId, groups: &Groups) -> bool {
         // A live source may still produce items whose deferred field sets
         // belong to a group the parent object carries; that group cannot
         // complete before the stream does.
         // A stream delivered under `group` (a descendant) cannot hold it back:
         // it is only announced once `group` ships.
-        let groups = self.cx.shared.groups.lock().unwrap();
         self.groups.iter().enumerate().any(|(p, &g)| {
             let live = self.sources[p].is_some() || self.buffer.iter().any(|(q, _)| *q == p);
             let parent = &self.cx.meta.objects[self.positions[p].object as usize];

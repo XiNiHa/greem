@@ -526,7 +526,7 @@ where
     let mut pending = Vec::new();
     let shared_sets;
     {
-        let mut groups = shared.groups.lock().unwrap();
+        let mut groups = shared.groups();
         for &usage in &header.introduced {
             let usage_def = &table.usages[usage as usize];
             let parent_group = match usage_def.parent {

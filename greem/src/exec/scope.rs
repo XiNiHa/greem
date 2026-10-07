@@ -1,6 +1,6 @@
 use crate::error::PathSegment;
 use crate::exec::column::Column;
-use crate::exec::state::{GroupId, GroupState, Shared};
+use crate::exec::state::{GroupId, GroupState, Groups, Shared};
 use crate::plan::PlanId;
 use crate::tree::UsageId;
 use futures::future::BoxFuture;
@@ -112,7 +112,7 @@ pub struct Scope<'a> {
 
 impl Drop for Scope<'_> {
     fn drop(&mut self) {
-        if let Ok(mut table) = self.shared.groups.lock() {
+        if let Some(mut table) = self.shared.groups_for_drop() {
             for &g in self
                 .groups
                 .iter()
@@ -135,7 +135,7 @@ impl<'a> Scope<'a> {
     ) -> Self {
         let n = meta.objects.len();
         {
-            let mut table = shared.groups.lock().unwrap();
+            let mut table = shared.groups();
             for &g in groups
                 .iter()
                 .chain(deferred.iter().flat_map(|d| d.groups.iter()))
@@ -237,14 +237,17 @@ impl<'a> Scope<'a> {
     }
 
     /// The subtree of one column has no unfinished work for `group`.
-    pub fn column_live_for(&self, field: u32, group: GroupId) -> bool {
+    pub fn column_live_for(&self, field: u32, group: GroupId, groups: &Groups) -> bool {
         match self.column(field) {
             Some(column) => {
-                column.stream.as_ref().is_some_and(|d| d.is_live_for(group))
+                column
+                    .stream
+                    .as_ref()
+                    .is_some_and(|d| d.is_live_for(group, groups))
                     || column.turns.iter().any(|turn| {
                         turn.children
                             .iter()
-                            .any(|c| c.with_dependent(|_, s| s.is_live_for(group)))
+                            .any(|c| c.with_dependent(|_, s| s.is_live_for(group, groups)))
                     })
             }
             None => true,
@@ -317,7 +320,7 @@ impl<'a> Scope<'a> {
 
     /// True when nothing under this scope can still run: every future is
     /// done, every stream ended, and no deferred set is waiting.
-    pub fn is_finished(&self) -> bool {
+    pub fn is_finished(&self, groups: &Groups) -> bool {
         if self.activity == Activity::Quiescent {
             return true;
         }
@@ -333,7 +336,7 @@ impl<'a> Scope<'a> {
                     .iter()
                     .skip(1)
                     .any(|turn| !turn.retired && !turn.shipped)
-                    || !self.groups_settled(driver.groups()))
+                    || !all_settled(groups, driver.groups()))
             {
                 return false;
             }
@@ -341,42 +344,25 @@ impl<'a> Scope<'a> {
                 if turn
                     .children
                     .iter()
-                    .any(|c| c.with_dependent(|_, s| !s.is_finished()))
+                    .any(|c| c.with_dependent(|_, s| !s.is_finished(groups)))
                 {
                     return false;
                 }
             }
         }
         // A released deferred scope whose group has not shipped still has to be
-        // read by a later barrier, so the subtree is not finished yet. The
-        // recursion runs before the lock is taken: the mutex is not reentrant.
+        // read by a later barrier, so the subtree is not finished yet.
         self.deferred.iter().all(|d| match &d.state {
             DeferredSetState::Waiting(_) => false,
-            DeferredSetState::Running(s) => s.is_finished() && self.groups_terminal(&d.groups),
+            DeferredSetState::Running(s) => {
+                s.is_finished(groups) && all_terminal(groups, &d.groups)
+            }
             DeferredSetState::Dropped => true,
         })
     }
 
-    /// Every group completed or can no longer deliver anything.
-    fn groups_settled(&self, groups: &[GroupId]) -> bool {
-        let table = self.shared.groups.lock().unwrap();
-        groups
-            .iter()
-            .all(|&g| table.get(g).state == GroupState::Completed || table.is_dead(g))
-    }
-
-    fn groups_terminal(&self, groups: &[GroupId]) -> bool {
-        let table = self.shared.groups.lock().unwrap();
-        groups.iter().all(|&g| {
-            matches!(
-                table.get(g).state,
-                GroupState::Completed | GroupState::Failed | GroupState::Dropped
-            )
-        })
-    }
-
     /// True when the objects of `group` under this scope have unfinished work.
-    pub fn is_live_for(&self, group: GroupId) -> bool {
+    pub fn is_live_for(&self, group: GroupId, groups: &Groups) -> bool {
         if self.activity == Activity::Quiescent {
             return false;
         }
@@ -396,7 +382,7 @@ impl<'a> Scope<'a> {
         }
         for column in self.columns() {
             if let Some(driver) = &column.stream
-                && driver.is_live_for(group)
+                && driver.is_live_for(group, groups)
             {
                 return true;
             }
@@ -407,7 +393,7 @@ impl<'a> Scope<'a> {
                 if turn
                     .children
                     .iter()
-                    .any(|c| c.with_dependent(|_, s| s.is_live_for(group)))
+                    .any(|c| c.with_dependent(|_, s| s.is_live_for(group, groups)))
                 {
                     return true;
                 }
@@ -415,14 +401,13 @@ impl<'a> Scope<'a> {
         }
         self.deferred.iter().any(|d| match &d.state {
             DeferredSetState::Waiting(_) => d.groups.contains(&group),
-            DeferredSetState::Running(scope) => scope.is_live_for(group),
+            DeferredSetState::Running(scope) => scope.is_live_for(group, groups),
             DeferredSetState::Dropped => false,
         })
     }
 
     /// Every object of this scope, and every deferred set under it, is dead.
-    pub fn all_dead(&self, shared: &Shared) -> bool {
-        let groups = shared.groups.lock().unwrap();
+    pub fn all_dead(&self, groups: &Groups) -> bool {
         self.groups
             .iter()
             .chain(self.deferred.iter().flat_map(|d| d.groups.iter()))
@@ -446,4 +431,20 @@ impl<'a> Scope<'a> {
             }
         }
     }
+}
+
+/// Every group completed or can no longer deliver anything.
+fn all_settled(table: &Groups, groups: &[GroupId]) -> bool {
+    groups
+        .iter()
+        .all(|&g| table.get(g).state == GroupState::Completed || table.is_dead(g))
+}
+
+fn all_terminal(table: &Groups, groups: &[GroupId]) -> bool {
+    groups.iter().all(|&g| {
+        matches!(
+            table.get(g).state,
+            GroupState::Completed | GroupState::Failed | GroupState::Dropped
+        )
+    })
 }

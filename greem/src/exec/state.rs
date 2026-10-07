@@ -1,7 +1,7 @@
 use crate::error::{GraphQLError, PathSegment};
 use crate::plan::PlanTable;
 use crate::tree::{NodeId, UsageId};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 pub type GroupId = u32;
 
@@ -328,8 +328,24 @@ pub struct Shared {
 }
 
 impl Shared {
+    pub fn groups(&self) -> MutexGuard<'_, Groups> {
+        self.groups_for_drop().expect("group table poisoned")
+    }
+
+    /// For `Drop` impls: `None` once a panic poisoned the table, so unwinding
+    /// never panics twice. Execution never spawns and user code cannot reach
+    /// the table, so the lock is never contended: failing to take it means
+    /// this thread already holds it.
+    pub fn groups_for_drop(&self) -> Option<MutexGuard<'_, Groups>> {
+        match self.groups.try_lock() {
+            Ok(groups) => Some(groups),
+            Err(TryLockError::Poisoned(_)) => None,
+            Err(TryLockError::WouldBlock) => panic!("group table locked re-entrantly"),
+        }
+    }
+
     pub fn is_dead(&self, group: GroupId) -> bool {
-        self.groups.lock().unwrap().is_dead(group)
+        self.groups().is_dead(group)
     }
 
     /// Under `Halt`: marks the group and keeps the first error recorded for
@@ -338,7 +354,7 @@ impl Shared {
         if self.behavior != ErrorBehavior::Halt {
             return;
         }
-        let mut groups = self.groups.lock().unwrap();
+        let mut groups = self.groups();
         let group = groups.get_mut(group);
         group.halted = true;
         if group.failure.is_none() {
