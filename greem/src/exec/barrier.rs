@@ -1,10 +1,11 @@
 //! The barrier after each generation: settle what finished, ship it as one
 //! payload, announce what that payload releases.
 
-use crate::error::{GraphQLError, PathSegment};
+use crate::error::{Error, GraphQLError, PathSegment};
 use crate::exec::column::{Slot, TurnRange};
 use crate::exec::payload::{
-    CompletedEntry, Data, EntrySource, IncrementalEntry, PayloadKind, PendingEntry, Step,
+    CompletedEntry, Data, EntrySource, ErasedRoot, IncrementalEntry, Payload, PayloadKind,
+    PendingEntry, Step,
 };
 use crate::exec::run::Loop;
 use crate::exec::scope::{Activity, FieldState, Scope};
@@ -72,6 +73,7 @@ fn with_scope_at_mut<R>(
     }
 }
 
+#[derive(Default)]
 pub(crate) struct Entries {
     pub pending: Vec<PendingEntry>,
     pub incremental: Vec<IncrementalEntry>,
@@ -387,6 +389,70 @@ pub(crate) struct BarrierOutput {
     pub has_next: Option<bool>,
 }
 
+impl BarrierOutput {
+    pub fn into_payload(self, root: &dyn ErasedRoot) -> Payload<'_> {
+        Payload {
+            root: Some(root),
+            kind: self.kind,
+            data: self.data,
+            errors: self.errors,
+            pending: self.entries.pending,
+            incremental: self.entries.incremental,
+            completed: self.entries.completed,
+            has_next: self.has_next,
+        }
+    }
+}
+
+/// What ships when nothing can make progress, which only an executor bug
+/// causes. The response ends either way: `data: null` before the initial
+/// payload, otherwise a failed `completed` entry for every announced group
+/// still open.
+pub(crate) fn stalled(groups: &mut Groups, initial_shipped: bool) -> BarrierOutput {
+    let error = GraphQLError::from_error(
+        &Error::framework("execution stalled", "EXECUTION_STALLED"),
+        Vec::new(),
+        Vec::new(),
+    );
+    if !initial_shipped {
+        return BarrierOutput {
+            kind: PayloadKind::Initial,
+            data: Data::Null,
+            errors: vec![error],
+            entries: Entries::default(),
+            has_next: None,
+        };
+    }
+    let mut open: Vec<GroupId> = groups
+        .iter()
+        .filter(|(_, g)| {
+            matches!(g.kind, GroupKind::Defer { .. } | GroupKind::Stream { .. })
+                && matches!(
+                    g.state,
+                    GroupState::Announced | GroupState::Released | GroupState::Halted(_)
+                )
+        })
+        .map(|(id, _)| id)
+        .collect();
+    open.sort_by_key(|&g| groups.get(g).wire_id);
+    let mut entries = Entries::default();
+    for g in open {
+        let id = groups.assign_wire_id(g).to_string();
+        groups.get_mut(g).state = GroupState::Failed(Some(error.clone()));
+        entries.completed.push(CompletedEntry {
+            id,
+            errors: vec![error.clone()],
+        });
+    }
+    BarrierOutput {
+        kind: PayloadKind::Subsequent,
+        data: Data::Absent,
+        errors: Vec::new(),
+        entries,
+        has_next: Some(false),
+    }
+}
+
 /// Runs the barrier after a generation. Returns the payload's pieces; the
 /// caller builds the borrowed `Payload` and calls the sink.
 pub(crate) fn barrier(
@@ -399,11 +465,7 @@ pub(crate) fn barrier(
         root,
         shared,
         groups: &mut groups,
-        out: Entries {
-            pending: Vec::new(),
-            incremental: Vec::new(),
-            completed: Vec::new(),
-        },
+        out: Entries::default(),
         initial: None,
         shipped: Vec::new(),
         ready_shared: Vec::new(),
@@ -971,5 +1033,91 @@ impl Barrier<'_, '_> {
             entries: self.out,
             has_next: Some(has_next),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn defer() -> GroupKind {
+        GroupKind::Defer {
+            usage: 0,
+            label: None,
+            path: Vec::new(),
+            after: None,
+        }
+    }
+
+    fn stream() -> GroupKind {
+        GroupKind::Stream {
+            node: 0,
+            label: None,
+            path: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_stall_fails_every_announced_group_still_open() {
+        let mut groups = Groups::new();
+        fn announced(groups: &mut Groups, kind: GroupKind, state: GroupState) -> GroupId {
+            let g = groups.alloc(kind, 0);
+            groups.assign_wire_id(g);
+            groups.get_mut(g).state = state;
+            g
+        }
+        let released = announced(&mut groups, defer(), GroupState::Released);
+        let completed = announced(&mut groups, stream(), GroupState::Completed);
+        let halted = announced(
+            &mut groups,
+            stream(),
+            GroupState::Halted(GraphQLError::from_error(
+                &Error::new("halted"),
+                Vec::new(),
+                Vec::new(),
+            )),
+        );
+        let pending = announced(&mut groups, defer(), GroupState::Announced);
+        let unannounced = groups.alloc(defer(), 0);
+        let shared = groups.alloc(
+            GroupKind::Shared {
+                members: vec![released],
+            },
+            0,
+        );
+        groups.get_mut(shared).state = GroupState::Released;
+
+        let output = stalled(&mut groups, true);
+        assert_eq!(output.kind, PayloadKind::Subsequent);
+        assert_eq!(output.has_next, Some(false));
+        let failed: Vec<&str> = output
+            .entries
+            .completed
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect();
+        assert_eq!(failed, ["0", "2", "3"]);
+        for entry in &output.entries.completed {
+            assert_eq!(entry.errors[0].message, "execution stalled");
+        }
+        for g in [released, halted, pending] {
+            assert!(matches!(groups.get(g).state, GroupState::Failed(Some(_))));
+        }
+        assert!(matches!(groups.get(completed).state, GroupState::Completed));
+        assert!(matches!(
+            groups.get(unannounced).state,
+            GroupState::Unreleased
+        ));
+        assert!(matches!(groups.get(shared).state, GroupState::Released));
+    }
+
+    #[test]
+    fn a_stall_before_the_initial_payload_nulls_the_data() {
+        let output = stalled(&mut Groups::new(), false);
+        assert_eq!(output.kind, PayloadKind::Initial);
+        assert!(matches!(output.data, Data::Null));
+        assert_eq!(output.has_next, None);
+        assert_eq!(output.errors.len(), 1);
+        assert_eq!(output.errors[0].message, "execution stalled");
     }
 }

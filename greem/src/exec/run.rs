@@ -1,8 +1,8 @@
 //! The generation loop: poll the whole tree one generation, run the barrier
 //! (null pass, payload, release), advance, repeat.
 
-use crate::exec::barrier::{BarrierOutput, barrier};
-use crate::exec::payload::{Data, Payload, PayloadKind};
+use crate::exec::barrier::{barrier, stalled};
+use crate::exec::payload::Payload;
 use crate::exec::scope::{Activity, DeferredSetState, FieldState, Scope};
 use crate::exec::state::{GroupKind, GroupState, Shared};
 use std::sync::atomic::Ordering;
@@ -209,45 +209,19 @@ pub(crate) async fn run_loop<'a>(
         })
         .await;
         state.generation += 1;
-        let pieces = barrier(root, shared, &mut state);
-        if let Some(BarrierOutput {
-            kind,
-            data,
-            errors,
-            entries,
-            has_next,
-        }) = pieces
-        {
-            let payload = Payload {
-                root: Some(&*root as &dyn crate::exec::payload::ErasedRoot),
-                kind,
-                data,
-                errors,
-                pending: entries.pending,
-                incremental: entries.incremental,
-                completed: entries.completed,
-                has_next,
-            };
-            sink(payload);
+        if let Some(output) = barrier(root, shared, &mut state) {
+            sink(output.into_payload(&*root));
         }
         if state.done {
             break;
         }
         let changed = advance(root, shared);
-        if !progress && !changed && !root.has_live_streams() {
-            // Nothing can make progress: emit a terminal payload so the client is not left hanging.
-            if state.initial_shipped {
-                sink(Payload {
-                    root: Some(&*root as &dyn crate::exec::payload::ErasedRoot),
-                    kind: PayloadKind::Subsequent,
-                    data: Data::Absent,
-                    errors: Vec::new(),
-                    pending: Vec::new(),
-                    incremental: Vec::new(),
-                    completed: Vec::new(),
-                    has_next: Some(false),
-                });
-            }
+        let stuck = !progress && !changed && !root.has_live_streams();
+        debug_assert!(!stuck, "execution stalled: nothing can make progress");
+        if stuck {
+            // End the response anyway so the client is not left hanging.
+            let output = stalled(&mut shared.groups(), state.initial_shipped);
+            sink(output.into_payload(&*root));
             break;
         }
     }

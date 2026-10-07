@@ -205,6 +205,8 @@ impl ExecutionOutput {
         self.payloads.first().is_some_and(|p| p.has_next.is_some())
     }
 
+    /// The initial payload, or the request error. Every execution that runs
+    /// to completion ships at least one payload.
     pub fn first(&self) -> &OwnedPayload {
         &self.payloads[0]
     }
