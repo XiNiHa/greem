@@ -43,13 +43,10 @@ impl Error {
     }
 }
 
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl<E: std::error::Error + Send + Sync + 'static> From<E> for Error {
+/// Lets `?` turn any displayable error into a message. `Error` itself is not
+/// `Display` or `std::error::Error`, which would overlap with this impl; see
+/// docs/adr/0007-execution-errors-convert-from-any-display.md.
+impl<E: fmt::Display> From<E> for Error {
     fn from(error: E) -> Self {
         Self::new(error.to_string())
     }
@@ -163,3 +160,28 @@ impl fmt::Display for SchemaError {
 }
 
 impl std::error::Error for SchemaError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn convert<E>(error: E) -> Result<(), Error>
+    where
+        Error: From<E>,
+    {
+        Ok(Err::<(), E>(error)?)
+    }
+
+    #[test]
+    fn question_mark_converts_errors_that_are_not_std_errors() {
+        let boxed: Box<dyn std::error::Error + Send + Sync> = "boxed".into();
+        assert_eq!(convert(boxed).unwrap_err().message(), "boxed");
+        assert_eq!(convert(String::from("text")).unwrap_err().message(), "text");
+        assert_eq!(
+            convert(InputError::new("bad").at("id"))
+                .unwrap_err()
+                .message(),
+            "id: bad"
+        );
+    }
+}
