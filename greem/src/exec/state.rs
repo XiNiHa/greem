@@ -56,16 +56,23 @@ pub enum GroupKind {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum GroupState {
     /// Created but its parent payload has not shipped yet.
     Unreleased,
+    /// Its `pending` entry is in the payload being shipped; released once the
+    /// sink returns.
+    Announced,
     /// Its scopes may run; not yet complete.
     Released,
+    /// HALT recorded this error for it: the next barrier fails it without
+    /// waiting for its pending work.
+    Halted(GraphQLError),
     /// Its final payload has shipped.
     Completed,
     /// Failed (boundary propagation or HALT); its `completed` entry shipped.
-    Failed,
+    /// The fragments that depend on it fail with the same error.
+    Failed(Option<GraphQLError>),
     /// Dropped before running: parent position nulled or ancestor failed.
     Dropped,
 }
@@ -76,37 +83,29 @@ pub struct Group {
     pub parent: Option<GroupId>,
     pub state: GroupState,
     pub wire_id: Option<u32>,
-    pub halted: bool,
-    pub failure: Option<GraphQLError>,
-    /// For streams: whether a `pending` entry was sent for it.
-    pub announced: bool,
     /// Live references from objects, scopes, drivers and child groups; a
     /// terminal group with none is reclaimed at the next barrier.
     pub refs: u32,
-    pub freed: bool,
 }
 
 #[derive(Default, Debug)]
 pub struct Groups {
-    pub list: Vec<Group>,
-    pub next_wire: u32,
+    /// `None` is a reclaimed slot, reused by the next allocation.
+    list: Vec<Option<Group>>,
+    next_wire: u32,
     free: Vec<GroupId>,
 }
 
 impl Groups {
     pub fn new() -> Self {
         let mut groups = Groups::default();
-        groups.list.push(Group {
+        groups.list.push(Some(Group {
             kind: GroupKind::Initial,
             parent: None,
             state: GroupState::Released,
             wire_id: None,
-            halted: false,
-            failure: None,
-            announced: true,
             refs: 0,
-            freed: false,
-        });
+        }));
         groups
     }
 
@@ -128,19 +127,15 @@ impl Groups {
             parent: Some(parent),
             state: GroupState::Unreleased,
             wire_id: None,
-            halted: false,
-            failure: None,
-            announced: false,
             refs: 0,
-            freed: false,
         };
         let id = match self.free.pop() {
             Some(id) => {
-                self.list[id as usize] = group;
+                self.list[id as usize] = Some(group);
                 id
             }
             None => {
-                self.list.push(group);
+                self.list.push(Some(group));
                 (self.list.len() - 1) as GroupId
             }
         };
@@ -152,12 +147,12 @@ impl Groups {
     }
 
     pub fn retain(&mut self, id: GroupId) {
-        self.list[id as usize].refs += 1;
+        self.get_mut(id).refs += 1;
     }
 
     /// Drops one reference; "release" alone means a group's activation.
     pub fn release_ref(&mut self, id: GroupId) {
-        let group = &mut self.list[id as usize];
+        let group = self.get_mut(id);
         group.refs = group.refs.saturating_sub(1);
     }
 
@@ -169,50 +164,43 @@ impl Groups {
         loop {
             let mut freed_any = false;
             for id in 1..self.list.len() {
-                let group = &self.list[id];
+                let Some(group) = &self.list[id] else {
+                    continue;
+                };
                 let terminal = matches!(
                     group.state,
-                    GroupState::Completed | GroupState::Failed | GroupState::Dropped
+                    GroupState::Completed | GroupState::Failed(_) | GroupState::Dropped
                 );
-                if group.freed || group.refs != 0 || !(terminal || self.is_dead(id as GroupId)) {
+                if group.refs != 0 || !(terminal || self.is_dead(id as GroupId)) {
                     continue;
                 }
                 // A shared field set outlives its objects while a member
                 // fragment has yet to complete: that member reads its outcome.
                 if let GroupKind::Shared { members } = &group.kind
                     && members.iter().any(|&m| {
-                        let member = &self.list[m as usize];
-                        matches!(member.state, GroupState::Unreleased | GroupState::Released)
-                            && !self.is_dead(m)
+                        matches!(
+                            self.get(m).state,
+                            GroupState::Unreleased | GroupState::Announced | GroupState::Released
+                        ) && !self.is_dead(m)
                     })
                 {
                     continue;
                 }
-                let parent = group.parent;
-                let after = match &group.kind {
-                    GroupKind::Defer { after, .. } => *after,
-                    _ => None,
-                };
-                let members = match &group.kind {
-                    GroupKind::Shared { members } => members.clone(),
-                    _ => Vec::new(),
-                };
-                let group = &mut self.list[id];
-                group.freed = true;
-                if group.state == GroupState::Unreleased {
-                    group.state = GroupState::Dropped;
-                }
-                group.kind = GroupKind::Initial;
-                group.failure = None;
+                let group = self.list[id].take().expect("live group");
                 self.free.push(id as GroupId);
-                if let Some(parent) = parent {
+                if let Some(parent) = group.parent {
                     self.release_ref(parent);
                 }
-                if let Some(after) = after {
-                    self.release_ref(after);
-                }
-                for member in members {
-                    self.release_ref(member);
+                match group.kind {
+                    GroupKind::Defer {
+                        after: Some(after), ..
+                    } => self.release_ref(after),
+                    GroupKind::Shared { members } => {
+                        for member in members {
+                            self.release_ref(member);
+                        }
+                    }
+                    _ => {}
                 }
                 freed_any = true;
             }
@@ -223,18 +211,53 @@ impl Groups {
     }
 
     pub fn get(&self, id: GroupId) -> &Group {
-        &self.list[id as usize]
+        self.list[id as usize].as_ref().expect("live group")
     }
 
     pub fn get_mut(&mut self, id: GroupId) -> &mut Group {
-        &mut self.list[id as usize]
+        self.list[id as usize].as_mut().expect("live group")
+    }
+
+    /// The live groups, by id.
+    pub fn iter(&self) -> impl Iterator<Item = (GroupId, &Group)> {
+        self.list
+            .iter()
+            .enumerate()
+            .filter_map(|(id, group)| Some((id as GroupId, group.as_ref()?)))
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (GroupId, &mut Group)> {
+        self.list
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(id, group)| Some((id as GroupId, group.as_mut()?)))
+    }
+
+    /// The ids of the live groups, for loops that change groups as they go.
+    pub fn ids(&self) -> Vec<GroupId> {
+        self.iter().map(|(id, _)| id).collect()
+    }
+
+    /// Fails a halted group with the error that halted it, which stays on
+    /// the group for the fragments that depend on it, and returns that error.
+    pub fn fail_halted(&mut self, id: GroupId) -> GraphQLError {
+        let group = self.get_mut(id);
+        let GroupState::Halted(error) = &group.state else {
+            unreachable!("group {id} is not halted")
+        };
+        let error = error.clone();
+        group.state = GroupState::Failed(Some(error.clone()));
+        error
     }
 
     /// A group whose work must stop: halted, failed or dropped, itself or by an ancestor.
     pub fn is_dead(&self, mut id: GroupId) -> bool {
         loop {
-            let group = &self.list[id as usize];
-            if group.halted || matches!(group.state, GroupState::Failed | GroupState::Dropped) {
+            let group = self.get(id);
+            if matches!(
+                group.state,
+                GroupState::Halted(_) | GroupState::Failed(_) | GroupState::Dropped
+            ) {
                 return true;
             }
             match group.parent {
@@ -250,7 +273,7 @@ impl Groups {
             if id == ancestor {
                 return true;
             }
-            match self.list[id as usize].parent {
+            match self.get(id).parent {
                 Some(parent) => id = parent,
                 None => return false,
             }
@@ -259,14 +282,11 @@ impl Groups {
 
     /// The shared field sets `member` takes part in.
     pub fn sharing(&self, member: GroupId) -> Vec<GroupId> {
-        self.list
-            .iter()
-            .enumerate()
+        self.iter()
             .filter(|(_, group)| {
-                !group.freed
-                    && matches!(&group.kind, GroupKind::Shared { members } if members.contains(&member))
+                matches!(&group.kind, GroupKind::Shared { members } if members.contains(&member))
             })
-            .map(|(id, _)| id as GroupId)
+            .map(|(id, _)| id)
             .collect()
     }
 
@@ -295,19 +315,18 @@ impl Groups {
 
     pub fn is_released(&self, id: GroupId) -> bool {
         matches!(
-            self.list[id as usize].state,
-            GroupState::Released | GroupState::Completed
+            self.get(id).state,
+            GroupState::Released | GroupState::Halted(_) | GroupState::Completed
         )
     }
 
     pub fn assign_wire_id(&mut self, id: GroupId) -> u32 {
-        let group = &mut self.list[id as usize];
-        if let Some(wire) = group.wire_id {
+        if let Some(wire) = self.get(id).wire_id {
             return wire;
         }
         let wire = self.next_wire;
         self.next_wire += 1;
-        self.list[id as usize].wire_id = Some(wire);
+        self.get_mut(id).wire_id = Some(wire);
         wire
     }
 }
@@ -348,7 +367,7 @@ impl Shared {
         self.groups().is_dead(group)
     }
 
-    /// Under `Halt`: marks the group and keeps the first error recorded for
+    /// Under `Halt`: halts a running group with the first error recorded for
     /// it, which the barrier ships even if the column holding it never completes.
     pub fn halt(&self, group: GroupId, error: impl FnOnce() -> GraphQLError) {
         if self.behavior != ErrorBehavior::Halt {
@@ -356,9 +375,8 @@ impl Shared {
         }
         let mut groups = self.groups();
         let group = groups.get_mut(group);
-        group.halted = true;
-        if group.failure.is_none() {
-            group.failure = Some(error());
+        if matches!(group.state, GroupState::Released) {
+            group.state = GroupState::Halted(error());
         }
         self.halted
             .store(true, std::sync::atomic::Ordering::Relaxed);

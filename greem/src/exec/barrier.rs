@@ -195,10 +195,12 @@ fn ship_roots(
 /// Drops every shared field set none of whose member fragments can still
 /// deliver it.
 fn drop_orphaned_shared(groups: &mut Groups) {
-    for g in 0..groups.list.len() as GroupId {
+    for g in groups.ids() {
         let group = groups.get(g);
-        let waiting = matches!(group.state, GroupState::Released | GroupState::Unreleased);
-        if group.freed || !waiting {
+        if !matches!(
+            group.state,
+            GroupState::Unreleased | GroupState::Released | GroupState::Halted(_)
+        ) {
             continue;
         }
         let GroupKind::Shared { members } = &group.kind else {
@@ -214,9 +216,10 @@ fn drop_orphaned_shared(groups: &mut Groups) {
 /// dependency) failed or was dropped: the client was told to expect it, so it
 /// completes with that fragment's error. Repeats for chains of dependents.
 fn fail_dependents(groups: &mut Groups, out: &mut Entries) {
+    let ids = groups.ids();
     loop {
         let mut failed = false;
-        for g in 0..groups.list.len() as GroupId {
+        for &g in &ids {
             let group = groups.get(g);
             let GroupKind::Defer {
                 after: Some(after), ..
@@ -224,21 +227,19 @@ fn fail_dependents(groups: &mut Groups, out: &mut Entries) {
             else {
                 continue;
             };
-            let waiting = matches!(group.state, GroupState::Released | GroupState::Unreleased);
-            if group.freed || !group.announced || !waiting {
-                continue;
-            }
             if !matches!(
-                groups.get(after).state,
-                GroupState::Failed | GroupState::Dropped
+                group.state,
+                GroupState::Announced | GroupState::Released | GroupState::Halted(_)
             ) {
                 continue;
             }
-            let failure = groups.get(after).failure.clone();
+            let failure = match &groups.get(after).state {
+                GroupState::Failed(failure) => failure.clone(),
+                GroupState::Dropped => None,
+                _ => continue,
+            };
             let id = groups.assign_wire_id(g).to_string();
-            let group = groups.get_mut(g);
-            group.state = GroupState::Failed;
-            group.failure = failure.clone();
+            groups.get_mut(g).state = GroupState::Failed(failure.clone());
             out.completed.push(CompletedEntry {
                 id,
                 errors: failure.into_iter().collect(),
@@ -272,7 +273,7 @@ fn announce_children(
                 .collect();
             for g in pending_groups {
                 let group = groups.get(g);
-                if group.state != GroupState::Unreleased || group.announced || groups.is_dead(g) {
+                if !matches!(group.state, GroupState::Unreleased) || groups.is_dead(g) {
                     continue;
                 }
                 if !group.parent.is_some_and(|p| shipped.contains(&p)) {
@@ -290,7 +291,7 @@ fn announce_children(
                 } = group.kind
                     && matches!(
                         groups.get(after).state,
-                        GroupState::Failed | GroupState::Dropped
+                        GroupState::Failed(_) | GroupState::Dropped
                     )
                 {
                     groups.get_mut(g).state = GroupState::Dropped;
@@ -302,7 +303,7 @@ fn announce_children(
                     _ => continue,
                 };
                 let id = groups.assign_wire_id(g);
-                groups.get_mut(g).announced = true;
+                groups.get_mut(g).state = GroupState::Announced;
                 out.pending.push(PendingEntry {
                     id: id.to_string(),
                     path,
@@ -319,8 +320,7 @@ fn announce_children(
             for (p, g) in parent_groups {
                 let group = groups.get(g);
                 if !matches!(group.kind, GroupKind::Stream { .. })
-                    || group.announced
-                    || group.state != GroupState::Unreleased
+                    || !matches!(group.state, GroupState::Unreleased)
                 {
                     continue;
                 }
@@ -351,7 +351,7 @@ fn announce_children(
                     _ => unreachable!(),
                 };
                 let id = groups.assign_wire_id(g);
-                groups.get_mut(g).announced = true;
+                groups.get_mut(g).state = GroupState::Announced;
                 out.pending.push(PendingEntry {
                     id: id.to_string(),
                     path,
@@ -460,7 +460,7 @@ impl Barrier<'_, '_> {
         if !done {
             return;
         }
-        let mut stop = self.groups.get(0).halted;
+        let mut stop = matches!(self.groups.get(0).state, GroupState::Halted(_));
         if self.shared.behavior == ErrorBehavior::Propagate {
             let table = &self.shared.table;
             let meta = root.meta;
@@ -480,15 +480,12 @@ impl Barrier<'_, '_> {
     fn candidates(&self) -> Vec<GroupId> {
         let mut candidates: Vec<(Option<u32>, GroupId)> = self
             .groups
-            .list
             .iter()
-            .enumerate()
             .filter(|(_, g)| {
-                !g.freed
-                    && g.state == GroupState::Released
+                matches!(g.state, GroupState::Released | GroupState::Halted(_))
                     && !matches!(g.kind, GroupKind::Stream { .. })
             })
-            .map(|(i, g)| (g.wire_id, i as GroupId))
+            .map(|(id, g)| (g.wire_id, id))
             .collect();
         candidates.sort_by_key(|(wire, id)| (wire.is_some(), *wire, *id));
         candidates.into_iter().map(|(_, id)| id).collect()
@@ -513,7 +510,7 @@ impl Barrier<'_, '_> {
     }
 
     fn readiness(&self, g: GroupId, is_initial: bool) -> Readiness {
-        let halted = self.groups.get(g).halted;
+        let halted = matches!(self.groups.get(g).state, GroupState::Halted(_));
         let sharing = if is_initial {
             Vec::new()
         } else {
@@ -526,14 +523,16 @@ impl Barrier<'_, '_> {
         if matches!(
             self.groups.get(g).kind,
             GroupKind::Defer { after: Some(after), .. }
-                if self.groups.get(after).state != GroupState::Completed
+                if !matches!(self.groups.get(after).state, GroupState::Completed)
         ) {
             return Readiness::Wait;
         }
         let shared_failure = sharing
             .iter()
-            .find(|&&s| self.groups.get(s).state == GroupState::Failed)
-            .map(|&s| self.groups.get(s).failure.clone());
+            .find_map(|&s| match &self.groups.get(s).state {
+                GroupState::Failed(failure) => Some(failure.clone()),
+                _ => None,
+            });
         if let Some(failure) = shared_failure {
             return Readiness::SharedFailed(failure);
         }
@@ -548,7 +547,7 @@ impl Barrier<'_, '_> {
             !self.ready_shared.contains(s)
                 && matches!(
                     self.groups.get(*s).state,
-                    GroupState::Released | GroupState::Unreleased
+                    GroupState::Unreleased | GroupState::Released | GroupState::Halted(_)
                 )
         }) {
             return Readiness::Wait;
@@ -568,9 +567,7 @@ impl Barrier<'_, '_> {
 
     fn fail_with_shared(&mut self, g: GroupId, failure: Option<GraphQLError>) {
         let id = self.groups.assign_wire_id(g).to_string();
-        let group = self.groups.get_mut(g);
-        group.state = GroupState::Failed;
-        group.failure = failure.clone();
+        self.groups.get_mut(g).state = GroupState::Failed(failure.clone());
         self.out.completed.push(CompletedEntry {
             id,
             errors: failure.into_iter().collect(),
@@ -583,12 +580,13 @@ impl Barrier<'_, '_> {
         if halted {
             // The error that halted the group was captured when it was
             // recorded; it may still sit inside a pending column.
-            let errors = self.groups.get(g).failure.clone().into_iter().collect();
-            self.groups.get_mut(g).state = GroupState::Failed;
-            for other in self.groups.list.iter_mut().skip(1) {
-                other.state = GroupState::Dropped;
+            let error = self.groups.fail_halted(g);
+            for (id, other) in self.groups.iter_mut() {
+                if id != g {
+                    other.state = GroupState::Dropped;
+                }
             }
-            return ControlFlow::Break(errors);
+            return ControlFlow::Break(vec![error]);
         }
         let roots = [(Vec::new(), 0)];
         let errors = root_errors(self.root, &roots);
@@ -607,18 +605,14 @@ impl Barrier<'_, '_> {
     /// A shared field set settles on its own but ships with a member
     /// fragment: it fails here, or waits in `ready_shared` for one.
     fn settle_shared_set(&mut self, g: GroupId, halted: bool) {
-        let failure = if halted {
-            self.groups.get(g).failure.clone()
-        } else {
-            let roots = group_roots(self.root, g);
-            self.settle(&roots).map(|error| *error)
-        };
-        if halted || failure.is_some() {
-            let group = self.groups.get_mut(g);
-            group.state = GroupState::Failed;
-            group.failure = failure;
-        } else {
-            self.ready_shared.push(g);
+        if halted {
+            self.groups.fail_halted(g);
+            return;
+        }
+        let roots = group_roots(self.root, g);
+        match self.settle(&roots) {
+            Some(error) => self.groups.get_mut(g).state = GroupState::Failed(Some(*error)),
+            None => self.ready_shared.push(g),
         }
     }
 
@@ -627,14 +621,12 @@ impl Barrier<'_, '_> {
     fn ship_fragment(&mut self, g: GroupId, halted: bool, sharing: Vec<GroupId>) {
         if halted {
             // The error that halted the group was captured when it was
-            // recorded; it may still sit inside a pending column. It stays on
-            // the group for the fragments that depend on it.
-            let errors = self.groups.get(g).failure.clone().into_iter().collect();
-            self.groups.get_mut(g).state = GroupState::Failed;
+            // recorded; it may still sit inside a pending column.
+            let error = self.groups.fail_halted(g);
             let id = self.groups.assign_wire_id(g);
             self.out.completed.push(CompletedEntry {
                 id: id.to_string(),
-                errors,
+                errors: vec![error],
             });
             return;
         }
@@ -643,9 +635,7 @@ impl Barrier<'_, '_> {
         let failure = self.settle(&roots);
         let id = self.groups.assign_wire_id(g).to_string();
         if let Some(error) = failure {
-            let group = self.groups.get_mut(g);
-            group.state = GroupState::Failed;
-            group.failure = Some((*error).clone());
+            self.groups.get_mut(g).state = GroupState::Failed(Some((*error).clone()));
             self.out.completed.push(CompletedEntry {
                 id,
                 errors: vec![*error],
@@ -664,7 +654,7 @@ impl Barrier<'_, '_> {
             if !self.ready_shared.contains(&s) {
                 continue;
             }
-            if self.groups.get(s).state != GroupState::Released {
+            if !matches!(self.groups.get(s).state, GroupState::Released) {
                 continue;
             }
             self.groups.get_mut(s).state = GroupState::Completed;
@@ -770,15 +760,14 @@ impl Barrier<'_, '_> {
         });
         let mut halted = Vec::new();
         for g in driver_groups {
-            let group = self.groups.get(g);
-            if group.halted && group.state == GroupState::Released {
+            if let GroupState::Halted(error) = &self.groups.get(g).state {
+                let error = error.clone();
                 let id = self.groups.assign_wire_id(g).to_string();
-                let errors = self.groups.get_mut(g).failure.take().into_iter().collect();
-                halted.push((g, id, errors));
+                halted.push((g, id, error));
             }
         }
-        for (g, id, errors) in halted {
-            self.fail_stream_group(path, field, g, id, errors);
+        for (g, id, error) in halted {
+            self.fail_stream_group(path, field, g, id, error);
         }
     }
 
@@ -794,7 +783,7 @@ impl Barrier<'_, '_> {
         let mut handled = Vec::new();
         for (t, ri, range, g) in ranges {
             handled.push((t, ri));
-            if self.groups.is_dead(g) || self.groups.get(g).state != GroupState::Released {
+            if self.groups.is_dead(g) || !matches!(self.groups.get(g).state, GroupState::Released) {
                 continue;
             }
             let mut errs = settle::ErrorSink::default();
@@ -805,21 +794,21 @@ impl Barrier<'_, '_> {
             let errors = errs.sorted();
             let id = self.groups.assign_wire_id(g).to_string();
             // Propagation fails the group with the error that reached the boundary.
-            let failure: Option<Vec<GraphQLError>> =
-                if self.shared.behavior == ErrorBehavior::Propagate {
-                    with_scope_at_mut(self.root, path, &mut |scope| {
-                        let table = &scope.shared.table;
-                        let meta = scope.meta;
-                        let column = scope.columns_mut().find(|c| c.field == field).unwrap();
-                        settle::settle_range(table, meta, column, t, range)
-                            .err()
-                            .map(|error| vec![*error])
-                    })
-                } else {
-                    None
-                };
-            if let Some(errors) = failure {
-                self.fail_stream_group(path, field, g, id, errors);
+            let failure: Option<GraphQLError> = if self.shared.behavior == ErrorBehavior::Propagate
+            {
+                with_scope_at_mut(self.root, path, &mut |scope| {
+                    let table = &scope.shared.table;
+                    let meta = scope.meta;
+                    let column = scope.columns_mut().find(|c| c.field == field).unwrap();
+                    settle::settle_range(table, meta, column, t, range)
+                        .err()
+                        .map(|error| *error)
+                })
+            } else {
+                None
+            };
+            if let Some(error) = failure {
+                self.fail_stream_group(path, field, g, id, error);
                 continue;
             }
             with_scope_at_mut(self.root, path, &mut |scope| {
@@ -863,7 +852,7 @@ impl Barrier<'_, '_> {
             for (p, &g) in driver.groups().iter().enumerate() {
                 let group = self.groups.get(g);
                 if !matches!(group.kind, GroupKind::Stream { .. })
-                    || group.state != GroupState::Released
+                    || !matches!(group.state, GroupState::Released)
                 {
                     continue;
                 }
@@ -892,10 +881,13 @@ impl Barrier<'_, '_> {
         field: u32,
         g: GroupId,
         id: String,
-        errors: Vec<GraphQLError>,
+        error: GraphQLError,
     ) {
-        self.groups.get_mut(g).state = GroupState::Failed;
-        self.out.completed.push(CompletedEntry { id, errors });
+        self.groups.get_mut(g).state = GroupState::Failed(Some(error.clone()));
+        self.out.completed.push(CompletedEntry {
+            id,
+            errors: vec![error],
+        });
         with_scope_at_mut(self.root, path, &mut |scope| {
             let column = scope.columns_mut().find(|c| c.field == field).unwrap();
             if let Some(driver) = &mut column.stream {
@@ -928,10 +920,14 @@ impl Barrier<'_, '_> {
     }
 
     /// The initial payload once the initial group settled; after it, a
-    /// subsequent payload whenever there is an entry to send.
+    /// subsequent payload whenever there is an entry to send, and always for
+    /// the last one.
     fn finish(self, state: &mut Loop) -> Option<BarrierOutput> {
-        let has_next = self.groups.list.iter().any(|g| {
-            g.state == GroupState::Released || (g.state == GroupState::Unreleased && g.announced)
+        let has_next = self.groups.iter().any(|(_, g)| {
+            matches!(
+                g.state,
+                GroupState::Announced | GroupState::Released | GroupState::Halted(_)
+            )
         }) || !self.out.pending.is_empty();
         if !state.initial_shipped {
             let (data, errors) = self.initial?;
@@ -954,8 +950,7 @@ impl Barrier<'_, '_> {
         }
         if !has_next {
             state.done = true;
-        }
-        if self.out.pending.is_empty()
+        } else if self.out.pending.is_empty()
             && self.out.incremental.is_empty()
             && self.out.completed.is_empty()
         {

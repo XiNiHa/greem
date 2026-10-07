@@ -437,14 +437,14 @@ impl<'a> Scope<'a> {
 fn all_settled(table: &Groups, groups: &[GroupId]) -> bool {
     groups
         .iter()
-        .all(|&g| table.get(g).state == GroupState::Completed || table.is_dead(g))
+        .all(|&g| matches!(table.get(g).state, GroupState::Completed) || table.is_dead(g))
 }
 
 fn all_terminal(table: &Groups, groups: &[GroupId]) -> bool {
     groups.iter().all(|&g| {
         matches!(
             table.get(g).state,
-            GroupState::Completed | GroupState::Failed | GroupState::Dropped
+            GroupState::Completed | GroupState::Failed(_) | GroupState::Dropped
         )
     })
 }

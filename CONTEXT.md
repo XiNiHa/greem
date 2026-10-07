@@ -109,6 +109,10 @@ _Avoid_: Shared group (it is not a delivery group), merged fragment
 The response position at the root of a delivery group; post-hoc null propagation that would cross it fails the group instead of rewriting what was already delivered.
 _Avoid_: Fragment root, payload root
 
+**Announcement**:
+The `pending` entry that tells the client a delivery group exists, sent in its parent's payload; the group is released once that payload has shipped.
+_Avoid_: Registration, pending (as a verb)
+
 **Release**:
 The moment a delivery group's parent payload has shipped and its scopes may be enqueued; a group whose parent position was nulled is dropped instead.
 _Avoid_: Trigger, schedule, kick-off

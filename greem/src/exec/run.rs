@@ -4,7 +4,7 @@
 use crate::exec::barrier::{BarrierOutput, barrier};
 use crate::exec::payload::{Data, Payload, PayloadKind};
 use crate::exec::scope::{Activity, DeferredSetState, FieldState, Scope};
-use crate::exec::state::{GroupId, GroupKind, GroupState, Shared};
+use crate::exec::state::{GroupKind, GroupState, Shared};
 use std::sync::atomic::Ordering;
 use std::task::Poll;
 
@@ -20,8 +20,8 @@ pub(crate) fn advance(root: &mut Scope<'_>, shared: &Shared) -> bool {
     let mut changed = false;
     {
         let mut groups = shared.groups();
-        for group in &mut groups.list {
-            if group.state == GroupState::Unreleased && group.announced {
+        for (_, group) in groups.iter_mut() {
+            if matches!(group.state, GroupState::Announced) {
                 group.state = GroupState::Released;
                 // The next barrier can ship it, even when it starts no work
                 // itself (a fragment whose only content is a nested defer).
@@ -29,9 +29,9 @@ pub(crate) fn advance(root: &mut Scope<'_>, shared: &Shared) -> bool {
             }
         }
         // A shared field set runs as soon as one member fragment may.
-        for g in 0..groups.list.len() as GroupId {
+        for g in groups.ids() {
             let group = groups.get(g);
-            if group.freed || group.state != GroupState::Unreleased {
+            if !matches!(group.state, GroupState::Unreleased) {
                 continue;
             }
             let GroupKind::Shared { members } = &group.kind else {
@@ -132,10 +132,9 @@ fn advance_scope_inner(scope: &mut Scope<'_>, shared: &Shared, changed: &mut boo
                 } = groups.get(g).kind
                     && matches!(
                         groups.get(after).state,
-                        GroupState::Failed | GroupState::Dropped
+                        GroupState::Failed(_) | GroupState::Dropped
                     )
-                    && groups.get(g).state == GroupState::Unreleased
-                    && !groups.get(g).announced
+                    && matches!(groups.get(g).state, GroupState::Unreleased)
                 {
                     groups.get_mut(g).state = GroupState::Dropped;
                 }
@@ -144,7 +143,7 @@ fn advance_scope_inner(scope: &mut Scope<'_>, shared: &Shared, changed: &mut boo
             if all_dead {
                 // Abandoned deferred work: make its groups terminal so they reclaim.
                 for &g in &deferred.groups {
-                    if groups.get(g).state == GroupState::Unreleased {
+                    if matches!(groups.get(g).state, GroupState::Unreleased) {
                         groups.get_mut(g).state = GroupState::Dropped;
                     }
                 }
@@ -154,7 +153,7 @@ fn advance_scope_inner(scope: &mut Scope<'_>, shared: &Shared, changed: &mut boo
                     let after_done = match groups.get(g).kind {
                         GroupKind::Defer {
                             after: Some(after), ..
-                        } => groups.get(after).state == GroupState::Completed,
+                        } => matches!(groups.get(after).state, GroupState::Completed),
                         _ => true,
                     };
                     groups.is_dead(g) || (groups.is_released(g) && after_done)
