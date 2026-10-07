@@ -509,14 +509,14 @@ mod tests {
         let router = router(Arc::new(build_schema()));
         let (status, content_type, body) = post(
             router,
-            "multipart/mixed; deferSpec=20220824, application/json",
+            "multipart/mixed;incrementalSpec=v0.2,application/graphql-response+json,application/json;q=0.9",
             serde_json::json!({"query": "{ users { name ... @defer { posts { title } } } posts(first: 3) @stream(initialCount: 1) { title } }"}),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert!(
-            content_type.starts_with("multipart/mixed"),
-            "{content_type}"
+        assert_eq!(
+            content_type,
+            "multipart/mixed; boundary=\"-\"; incrementalSpec=v0.2"
         );
         let parts: Vec<&str> = body
             .split("\r\n---\r\n")
@@ -564,6 +564,29 @@ mod tests {
         assert_eq!(
             deferred[0]["data"],
             serde_json::json!({"posts": [{"title": "Hello"}, {"title": "Again"}]})
+        );
+    }
+
+    #[tokio::test]
+    async fn defer_spec_only_clients_get_one_json_response() {
+        let router = router(Arc::new(build_schema()));
+        let (status, content_type, body) = post(
+            router,
+            "multipart/mixed;deferSpec=20220824,application/json",
+            serde_json::json!({"query": "{ users { name ... @defer { posts { title } } } posts(first: 3) @stream(initialCount: 1) { title } }"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(content_type, "application/json");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(v.get("hasNext").is_none(), "{v}");
+        assert_eq!(
+            v["data"]["users"][0],
+            serde_json::json!({"name": "Ann", "posts": [{"title": "Hello"}, {"title": "Again"}]})
+        );
+        assert_eq!(
+            v["data"]["posts"],
+            serde_json::json!([{"title": "Hello"}, {"title": "Again"}, {"title": "Hi"}])
         );
     }
 
