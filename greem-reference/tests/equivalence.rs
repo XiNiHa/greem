@@ -1,16 +1,10 @@
-//! BFS ≡ DFS equivalence over the hand-written generated module.
-#![allow(non_snake_case, non_camel_case_types, dead_code)]
+//! BFS ≡ DFS equivalence over `greem-test-app`.
 
 use futures::executor::block_on;
-use greem::{
-    Args, As, Context, Either, Error, ErrorBehavior, ExecuteOptions, Operation, Resolver, Roots,
-};
+use greem::{ErrorBehavior, ExecuteOptions, Operation, Roots};
+use greem_test_app::app::{App, MutationRoot, QueryRoot, build_schema};
 use serde_json::{Value, json};
 use std::sync::Mutex;
-
-include!("../../greem/tests/fixtures/handwritten_schema.rs");
-
-include!("../../greem/tests/fixtures/handwritten_app.rs");
 
 fn options(behavior: ErrorBehavior) -> ExecuteOptions {
     ExecuteOptions {
@@ -26,7 +20,7 @@ fn both(
     variables: Value,
     behavior: ErrorBehavior,
 ) -> (Value, Value, u64) {
-    let schema = schema();
+    let schema = build_schema();
     let document = schema.parse(query).unwrap_or_else(|e| panic!("{e:?}"));
     let output = block_on(schema.execute(
         Roots {
@@ -258,7 +252,7 @@ fn request_error() {
 #[test]
 fn reference_calls_once_per_object() {
     // BFS: one call per field per scope; the reference: one call per object.
-    let schema = schema();
+    let schema = build_schema();
     let query = "{ users { posts { title author { name } } } }";
     let document = schema.parse(query).unwrap();
     let bfs_calls = std::sync::Arc::new(Mutex::new(0usize));

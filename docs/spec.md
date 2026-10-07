@@ -10,7 +10,7 @@ what codegen emits: build any consumer and open `target/debug/build/<crate>-*/ou
 
 | Command | Proves |
 | --- | --- |
-| `cargo test -p greem --test handwritten` | The runtime against a hand-written copy of the generated module: queries, nested lists, interfaces, unions, null propagation in all three error behaviors, serial mutations, introspection, variables, depth limit, `@defer`, `@stream`. |
+| `cargo test -p greem --test runtime` | The runtime against `greem-test-app`'s generated module and hand-written resolvers: queries, nested lists, interfaces, unions, null propagation in all three error behaviors, serial mutations, introspection, variables, depth limit, `@defer`, `@stream`. |
 | `cargo test -p greem-macros` | `#[greem::object]` per-object and set-based sugar, hints and plan routing. |
 | `cargo test -p greem-reference` | The depth-first reference executor and its equivalence to the BFS on hand-picked queries. |
 | `cargo test -p greem-compliance` | Generated code compiled from `schemas/property.graphql` through `build.rs`; property-based BFS≡DFS over generated documents, worlds and interleavings; the incremental fold property; breadth-first call counts; determinism; hand-written spec cases; depth, cancellation and panic evidence on a 2 MiB stack; 1,000 stream turns and 1,000 mutation roots. |
@@ -31,6 +31,7 @@ counterexample found so far.
 | `greem-macros` | `#[greem::object]`; `#[derive(Abstract)]` is a stub that errors (ticket 15: after the skeleton). | |
 | `greem-reference` | Unpublished naive depth-first executor, the oracle. | `greem_reference::execute` |
 | `greem-compliance` | Unpublished harness: property schema, world, generators, evidence tests. | |
+| `greem-test-app` | Unpublished: the module `greem-build` generates from its `schema.graphql`, and hand-written resolvers over it, shared by the runtime, macro and reference integration tests. | `schema`, `app::build_schema` |
 | `examples/axum` | The one framework example. | `router`, `build_schema` |
 
 ## The contract a user writes against

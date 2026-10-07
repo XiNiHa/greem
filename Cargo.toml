@@ -7,6 +7,7 @@ members = [
     "greem-core",
     "greem-reference",
     "greem-compliance",
+    "greem-test-app",
     "examples/axum",
 ]
 
@@ -23,6 +24,7 @@ greem-build = { path = "greem-build", version = "0.0.1" }
 greem-macros = { path = "greem-macros", version = "0.0.1" }
 greem-core = { path = "greem-core", version = "0.0.1" }
 greem-reference = { path = "greem-reference" }
+greem-test-app = { path = "greem-test-app" }
 apollo-compiler = "1.33"
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }

@@ -1,0 +1,16 @@
+[package]
+name = "greem-test-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+test = false
+doctest = false
+
+[dependencies]
+greem = { workspace = true }
+
+[build-dependencies]
+greem-build = { workspace = true }

@@ -1,18 +1,15 @@
-//! A hand-written copy of the generated schema module, exercising the runtime
-//! end-to-end before codegen exists. Mirrors exactly what `greem-build` emits.
-#![allow(non_snake_case, non_camel_case_types, dead_code)]
+//! The runtime end to end, over `greem-test-app`'s generated schema module
+//! and hand-written resolvers.
 
 use futures::executor::block_on;
 use greem::{
-    Args, As, Context, Either, Error, ErrorBehavior, ExecuteOptions, IncrementalDelivery,
-    Operation, Resolver, Roots, Streamed,
+    Args, As, Context, Error, ErrorBehavior, ExecuteOptions, IncrementalDelivery, Operation,
+    Resolver, Roots, Streamed,
 };
+use greem_test_app::app::{App, MutationRoot, QueryRoot, User, build_schema, users};
+use greem_test_app::schema;
 use serde_json::{Value, json};
 use std::sync::Mutex;
-
-include!("fixtures/handwritten_schema.rs");
-
-include!("fixtures/handwritten_app.rs");
 
 fn run(
     app: App,
@@ -20,7 +17,7 @@ fn run(
     variables: Value,
     options: ExecuteOptions,
 ) -> (Vec<Value>, Vec<String>) {
-    let schema = schema();
+    let schema = build_schema();
     let document = schema.parse(query).unwrap_or_else(|e| panic!("{e:?}"));
     let output = block_on(schema.execute(
         Roots {
@@ -66,13 +63,10 @@ fn flat_and_nested() {
 
 #[test]
 fn set_based_calls_once_per_generation() {
-    let app = App::default();
-    let schema = schema();
+    let schema = build_schema();
     let document = schema
         .parse("{ users { posts { title author { name } } } }")
         .unwrap();
-    let app = std::sync::Arc::new(app);
-    struct Wrap(std::sync::Arc<App>);
     let output = block_on(schema.execute(
         Roots {
             query: QueryRoot,
@@ -89,7 +83,6 @@ fn set_based_calls_once_per_generation() {
         },
         ExecuteOptions::default(),
     ));
-    let _ = (app, Wrap);
     let v: Value = serde_json::from_slice(&output.payloads[0].json).unwrap();
     assert_eq!(
         v["data"]["users"][1]["posts"][1]["author"]["name"],
@@ -233,7 +226,7 @@ fn mutation_serial() {
 
 #[test]
 fn request_errors() {
-    let schema = schema();
+    let schema = build_schema();
     assert!(schema.parse("{ nope }").is_err());
     let (p, _) = run(
         App::default(),
@@ -602,7 +595,7 @@ fn failed_root_is_reported_once_at_its_position() {
 fn a_module_generated_by_another_version_is_rejected() {
     struct Stale;
     impl greem::__private::SchemaInfo for Stale {
-        const SDL: &'static str = schema::SDL;
+        const SDL: &'static str = schema::__private::SDL;
         const BUILD_VERSION: &'static str = "0.0.0-stale";
         type Query = schema::types::Query;
         type Mutation = schema::types::Mutation;

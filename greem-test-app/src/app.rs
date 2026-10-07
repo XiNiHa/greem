@@ -1,15 +1,16 @@
-// The application over the hand-written schema module: types, resolvers and
-// the schema constructor, shared by the runtime, macro-free and reference tests.
+//! Hand-written resolvers over the generated schema, and its constructor.
 
-// ---- application ------------------------------------------------------------
+use crate::schema;
+use greem::{Args, As, Context, Either, Error, Resolver};
+use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
-struct App {
-    log: Mutex<Vec<String>>,
-    calls: Option<std::sync::Arc<Mutex<usize>>>,
-    fail_email: bool,
-    fail_name: bool,
-    fail_author: bool,
+pub struct App {
+    pub log: Mutex<Vec<String>>,
+    pub calls: Option<Arc<Mutex<usize>>>,
+    pub fail_email: bool,
+    pub fail_name: bool,
+    pub fail_author: bool,
 }
 
 impl App {
@@ -21,20 +22,20 @@ impl App {
     }
 }
 
-struct QueryRoot;
-struct MutationRoot;
-struct User {
+pub struct QueryRoot;
+pub struct MutationRoot;
+pub struct User {
     id: u32,
     name: String,
     email: Option<String>,
 }
-struct Post<'a> {
+pub struct Post<'a> {
     id: u32,
     title: String,
     author: &'a User,
 }
 
-fn users() -> Vec<User> {
+pub fn users() -> Vec<User> {
     vec![
         User {
             id: 1,
@@ -380,9 +381,7 @@ impl Resolver<schema::Mutation::fail, App> for MutationRoot {
     }
 }
 
-type S = schema::Schema<App, QueryRoot, MutationRoot>;
-
-fn schema() -> S {
+pub fn build_schema() -> schema::Schema<App, QueryRoot, MutationRoot> {
     schema::Schema::<App>::builder()
         .query::<QueryRoot>()
         .mutation::<MutationRoot>()

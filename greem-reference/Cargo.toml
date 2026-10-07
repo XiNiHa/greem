@@ -13,3 +13,4 @@ futures.workspace = true
 
 [dev-dependencies]
 futures = { workspace = true, features = ["executor"] }
+greem-test-app = { workspace = true }

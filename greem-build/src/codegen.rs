@@ -1,6 +1,5 @@
 //! The code generator: one `TokenStream` per schema, formatted with
-//! prettyplease. The shape it emits is the one `greem/tests/handwritten.rs`
-//! writes by hand.
+//! prettyplease.
 
 use crate::{Codec, DEFER_DIRECTIVE, Error, STREAM_DIRECTIVE};
 use apollo_compiler::ast::Type;

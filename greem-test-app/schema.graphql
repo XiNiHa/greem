@@ -1,0 +1,8 @@
+directive @defer(if: Boolean! = true, label: String) on FRAGMENT_SPREAD | INLINE_FRAGMENT
+directive @stream(if: Boolean! = true, label: String, initialCount: Int = 0) on FIELD
+type Query { users: [User!]! user(id: ID!): User node(id: ID!): Node search: [SearchResult!]! ints: [[Int]!] }
+interface Node { id: ID! }
+type User implements Node { id: ID! name: String! email: String posts(first: Int = 10): [Post!]! }
+type Post implements Node { id: ID! title: String! author: User! }
+union SearchResult = User | Post
+type Mutation { rename(id: ID!, name: String!): User fail: String! }

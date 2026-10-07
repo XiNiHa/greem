@@ -1,14 +1,12 @@
-//! `#[greem::object]` against the hand-written schema module (what codegen emits).
-#![allow(non_snake_case, non_camel_case_types, dead_code)]
+//! `#[greem::object]` against `greem-test-app`'s generated schema module.
 
 use futures::executor::block_on;
 use greem::{
     Args, Context, Error, ExecuteOptions, HintRegistry, Operation, Planning, Roots, Streamed,
 };
+use greem_test_app::schema;
 use serde_json::{Value, json};
 use std::sync::Mutex;
-
-include!("../../greem/tests/fixtures/handwritten_schema.rs");
 
 #[derive(Default)]
 struct App {

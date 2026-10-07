@@ -355,6 +355,7 @@ dependencies = [
  "apollo-compiler",
  "futures",
  "greem-macros",
+ "greem-test-app",
  "indexmap",
  "self_cell",
  "serde",
@@ -421,6 +422,7 @@ dependencies = [
  "futures",
  "greem",
  "greem-core",
+ "greem-test-app",
  "proc-macro2",
  "quote",
  "serde_json",
@@ -433,7 +435,16 @@ version = "0.0.1"
 dependencies = [
  "futures",
  "greem",
+ "greem-test-app",
  "serde_json",
+]
+
+[[package]]
+name = "greem-test-app"
+version = "0.0.1"
+dependencies = [
+ "greem",
+ "greem-build",
 ]
 
 [[package]]
