@@ -12,7 +12,6 @@ use crate::plan::{Leaf, PlanTable, Walker};
 use crate::resolver::{NoMutation, Outputs};
 use crate::tree::{Abort, Document, Tree, json_to_input, span_location};
 use crate::value::InputValue;
-use apollo_compiler::Node;
 use apollo_compiler::validation::Valid;
 use apollo_compiler::{ExecutableDocument, Schema as ApolloSchema};
 use std::marker::PhantomData;
@@ -239,11 +238,7 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
         Ok(Arc::new(Document { doc }))
     }
 
-    fn prepare(
-        &self,
-        op: &Operation<'_>,
-        options: ExecuteOptions,
-    ) -> Result<(Tree, Node<apollo_compiler::executable::Operation>), RequestErrors> {
+    fn prepare(&self, op: &Operation<'_>, options: ExecuteOptions) -> Result<Tree, RequestErrors> {
         let doc: &Valid<ExecutableDocument> = &op.document.doc;
         let operation = doc
             .operations
@@ -297,15 +292,14 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
         }
         apollo_compiler::introspection::check_max_depth(doc, &operation)
             .map_err(|e| RequestErrors(vec![request_error_to_graphql(&e, &doc.sources)]))?;
-        let tree = Tree::new(
+        Ok(Tree::new(
             self.schema.clone(),
             op.document.clone(),
-            operation.clone(),
+            operation,
             coerced,
             options.incremental == IncrementalDelivery::Enabled,
             self.max_depth,
-        );
-        Ok((tree, operation))
+        ))
     }
 
     fn introspection(&self, tree: &Tree) -> Result<Option<serde_json::Value>, RequestErrors> {
@@ -329,10 +323,40 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
         Ok(Some(data))
     }
 
-    /// Prepares a request for the reference executor: same tree, planning
-    /// pass and introspection as `execute_with`, always non-incremental.
-    /// Returns the frozen Plan table, the introspection JSON and whether the
+    /// Builds the execution tree and runs the planning pass over it. Returns
+    /// the frozen Plan table, the introspection JSON and whether the
     /// operation is a mutation.
+    fn plan(
+        &self,
+        op: &Operation<'_>,
+        app: &C,
+        options: ExecuteOptions,
+    ) -> Result<(Arc<PlanTable>, Option<serde_json::Value>, bool), RequestErrors>
+    where
+        Q: Outputs<I::Query, C>,
+        M: Outputs<I::Mutation, C>,
+    {
+        let mut tree = self.prepare(op, options)?;
+        let introspection = self.introspection(&tree)?;
+        let planning_ctx = Context::new(app, None);
+        let mut table = PlanTable::default();
+        let is_mutation = tree.is_mutation();
+        let walk = {
+            let mut walker = Walker::new(&mut tree, &mut table, &planning_ctx);
+            if is_mutation {
+                M::__walk(&mut walker, 0, &Leaf::default())
+            } else {
+                Q::__walk(&mut walker, 0, &Leaf::default())
+            }
+        };
+        walk.map_err(|Abort(errors)| RequestErrors(errors))?;
+        table.usages = tree.usages.clone();
+        table.compute_beneath();
+        Ok((Arc::new(table), introspection, is_mutation))
+    }
+
+    /// Prepares a request for the reference executor: the same planning as
+    /// `execute_with`, always non-incremental.
     #[doc(hidden)]
     pub fn __prepare_reference(
         &self,
@@ -348,25 +372,7 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
             incremental: IncrementalDelivery::Disabled,
             ..options
         };
-        let (mut tree, _operation) = self.prepare(op, options)?;
-        let introspection = self.introspection(&tree)?;
-        let planning_ctx = Context::new(&*app, None);
-        let mut table = PlanTable::default();
-        let is_mutation = tree.is_mutation();
-        let walk = {
-            let mut walker = Walker::new(&mut tree, &mut table, &planning_ctx);
-            if is_mutation {
-                M::__walk(&mut walker, 0, &Leaf::default())
-            } else {
-                Q::__walk(&mut walker, 0, &Leaf::default())
-            }
-        };
-        if let Err(Abort(errors)) = walk {
-            return Err(RequestErrors(errors));
-        }
-        table.usages = tree.usages.clone();
-        table.compute_beneath();
-        Ok((Arc::new(table), introspection, is_mutation))
+        self.plan(op, &app, options)
     }
 
     /// Plans and executes one request, handing every payload to `sink` while
@@ -382,81 +388,46 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
         Q: Outputs<I::Query, C> + Send + Sync,
         M: Outputs<I::Mutation, C> + Send + Sync,
     {
-        let prepared = self.prepare(&op, options);
-        let introspection = prepared
-            .as_ref()
-            .ok()
-            .and_then(|(tree, _)| self.introspection(tree).transpose());
-        let stream_capacity = self.stream_capacity;
-        {
-            let (mut tree, _operation) = match prepared {
-                Ok(p) => p,
-                Err(errors) => {
-                    sink(Payload::request_error(errors.0));
-                    return;
-                }
-            };
-            let introspection = match introspection {
-                Some(Ok(value)) => Some(value),
-                Some(Err(errors)) => {
-                    sink(Payload::request_error(errors.0));
-                    return;
-                }
-                None => None,
-            };
-            let app = ctx;
-            let planning_ctx = Context::new(&app, None);
-            let mut table = PlanTable::default();
-            let is_mutation = tree.is_mutation();
-            let walk = {
-                let mut walker = Walker::new(&mut tree, &mut table, &planning_ctx);
-                if is_mutation {
-                    M::__walk(&mut walker, 0, &Leaf::default())
-                } else {
-                    Q::__walk(&mut walker, 0, &Leaf::default())
-                }
-            };
-            if let Err(Abort(errors)) = walk {
-                sink(Payload::request_error(errors));
+        let (table, introspection, is_mutation) = match self.plan(&op, &ctx, options) {
+            Ok(planned) => planned,
+            Err(errors) => {
+                sink(Payload::request_error(errors.0));
                 return;
             }
-            table.usages = tree.usages.clone();
-            table.compute_beneath();
-            let table = Arc::new(table);
-            let shared = Shared {
-                groups: Mutex::new(Groups::new()),
-                behavior: options.error_behavior,
-                incremental: options.incremental == IncrementalDelivery::Enabled,
-                capacity: stream_capacity,
-                table: table.clone(),
-                introspection,
-                has_streams: std::sync::atomic::AtomicBool::new(false),
-                halted: std::sync::atomic::AtomicBool::new(false),
-            };
-            let Roots { query, mutation } = roots;
-            // A failed root is marked once, at its own position, like any object.
-            let failed = if is_mutation {
-                mutation.__parent_error()
-            } else {
-                query.__parent_error()
-            };
-            if let Some(error) = failed {
-                sink(Payload::failed_root(GraphQLError::from_error(
-                    error,
-                    Vec::new(),
-                    Vec::new(),
-                )));
-                return;
-            }
-            if is_mutation {
-                let batch = root_batch::<M, I::Mutation, C>(mutation, &shared, &app, &table, true);
-                let mut root = batch.start();
-                run_loop(&mut root, &shared, &mut sink).await;
-            } else {
-                let batch = root_batch::<Q, I::Query, C>(query, &shared, &app, &table, false);
-                let mut root = batch.start();
-                run_loop(&mut root, &shared, &mut sink).await;
-            }
+        };
+        let shared = Shared {
+            groups: Mutex::new(Groups::new()),
+            behavior: options.error_behavior,
+            incremental: options.incremental == IncrementalDelivery::Enabled,
+            capacity: self.stream_capacity,
+            table: table.clone(),
+            introspection,
+            has_streams: std::sync::atomic::AtomicBool::new(false),
+            halted: std::sync::atomic::AtomicBool::new(false),
+        };
+        let Roots { query, mutation } = roots;
+        // A failed root is marked once, at its own position, like any object.
+        let failed = if is_mutation {
+            mutation.__parent_error()
+        } else {
+            query.__parent_error()
+        };
+        if let Some(error) = failed {
+            sink(Payload::failed_root(GraphQLError::from_error(
+                error,
+                Vec::new(),
+                Vec::new(),
+            )));
+            return;
+        }
+        if is_mutation {
+            let batch = root_batch::<M, I::Mutation, C>(mutation, &shared, &ctx, &table, true);
+            let mut root = batch.start();
+            run_loop(&mut root, &shared, &mut sink).await;
+        } else {
+            let batch = root_batch::<Q, I::Query, C>(query, &shared, &ctx, &table, false);
+            let mut root = batch.start();
+            run_loop(&mut root, &shared, &mut sink).await;
         }
     }
 
@@ -690,12 +661,4 @@ fn request_error_to_graphql(
         })
         .unwrap_or_default();
     GraphQLError::request(error.message().to_string(), locations)
-}
-
-#[allow(dead_code)]
-fn _span(
-    node: Option<apollo_compiler::parser::SourceSpan>,
-    doc: &ExecutableDocument,
-) -> Vec<crate::error::Location> {
-    span_location(node, doc)
 }
