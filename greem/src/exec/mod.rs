@@ -1,3 +1,4 @@
+pub mod barrier;
 pub mod column;
 pub mod complete;
 pub mod payload;

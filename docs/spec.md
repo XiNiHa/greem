@@ -152,10 +152,11 @@ absent; apollo-compiler validates documents against them.
    output batch and per-field `Context` views, dependent = the child scope
    borrowing them). The top-level loop polls the whole tree one generation at a
    time; children created in a generation start in the next.
-4. **Barrier** (`exec/run.rs`): for each released delivery group with no live
-   scopes, collect errors, settle (null pass), mark alive objects, build the
-   payload (`Payload<'p>` borrows the frames; the sink serializes it in place),
-   announce child groups. Then `advance`: release announced groups, start
+4. **Barrier** (`exec/barrier.rs`): close a finished serial root field, then
+   for each released delivery group with no live scopes, collect errors,
+   settle (null pass), mark alive objects, build the payload (`Payload<'p>`
+   borrows the frames; the sink serializes it in place); ship finished stream
+   item ranges; announce child groups. Then `advance` (`exec/run.rs`): release announced groups, start
    deferred field sets, turn buffered stream items into turns, retire shipped
    turns (children, slots and values are freed and the slot is reused by the
    next turn, so memory follows in-flight work rather than stream length),
