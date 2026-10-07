@@ -13,6 +13,7 @@ pub use crate::exec::reference::{
 pub use crate::exec::scope::FieldFuture;
 pub use crate::exec::state::{GroupId, Shared};
 pub use crate::plan::{FieldHeader, Leaf, PlanHeader, PlanId, PlanTable, Walker};
+pub use crate::resolver::seal;
 pub use crate::schema::SchemaInfo;
 pub use crate::tree::{Abort, FieldKind, NodeId, Tree, UsageId};
 pub use crate::value::{ToLeaf, null_at_non_null, read_field, read_field_with, scalar_from_input};

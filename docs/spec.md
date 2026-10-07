@@ -59,11 +59,14 @@ impl Resolver<schema::User::posts, App> for User {
   own tags (`Nullable<Ty>`, `List<Ty>`, `scalars::*`).
 - Abstract positions: `As<types::User, T>` and `Either<A, B>`, one partition leaf
   per arm; repeated arms are separate scopes.
-- `parent_error` marks a failed object once, at its own position (a failed
-  root is `data: null` with the error at the empty path), before any
-  child scope exists. `hints` declares accepted hint types; `plan` runs
-  post-order at tree build and writes hints upward (`Planning::hint`, to the
-  nearest accepting field above the writer, never the writer's own slot).
+- An object fails as a whole only when returned as `Result<T, Error>`
+  (forwarded through `&T`). It is marked once, at its own position (a failed
+  root is `data: null` with the error at the empty path), before any child
+  scope exists. The `parent_error` hook that carries this is sealed, so every
+  field's impl on one type agrees and codegen asks the first.
+- `hints` declares accepted hint types; `plan` runs post-order at tree build
+  and writes hints upward (`Planning::hint`, to the nearest accepting field
+  above the writer, never the writer's own slot).
 - `Context<'req, C>` is a per-invocation view: `app()`, `hint::<H>()`,
   `try_hint`. It borrows the application value and the frozen plan table for
   the request and shrinks to the resolver's `'obj`, so the signature is

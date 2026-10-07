@@ -749,7 +749,7 @@ impl Gen<'_> {
                 fn reference<'v, 's: 'v>(value: T, rc: &rt::RefCompletion<'s, C>) -> rt::futures::future::BoxFuture<'v, rt::RefValue>
                 where T: 'v, C: 'v,
                 {
-                    if let Some(error) = <T as Resolver<super::#module::#witness, C>>::parent_error(&value) {
+                    if let Some(error) = <T as Resolver<super::#module::#witness, C>>::parent_error(&value, rt::seal()) {
                         return rc.error(error.clone());
                     }
                     let rc = rc.clone();
@@ -807,7 +807,7 @@ impl Gen<'_> {
                 }
 
                 fn parent_error(value: &T) -> ::core::option::Option<&::greem::Error> {
-                    <T as Resolver<super::#module::#witness, C>>::parent_error(value)
+                    <T as Resolver<super::#module::#witness, C>>::parent_error(value, rt::seal())
                 }
 
                 fn complete<'a>(values: Vec<T>, positions: Vec<rt::Pos>, cc: &mut rt::Completion<'a, '_, C>)
@@ -816,7 +816,7 @@ impl Gen<'_> {
                     let mut ok = Vec::with_capacity(values.len());
                     let mut ok_pos = Vec::with_capacity(values.len());
                     for (value, pos) in values.into_iter().zip(positions) {
-                        match <T as Resolver<super::#module::#witness, C>>::parent_error(&value) {
+                        match <T as Resolver<super::#module::#witness, C>>::parent_error(&value, rt::seal()) {
                             Some(error) => cc.error(&pos, error.clone()),
                             None => { ok.push(value); ok_pos.push(pos); }
                         }

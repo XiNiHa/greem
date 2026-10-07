@@ -62,9 +62,13 @@ pub trait Resolver<F: Field, C = ()>: Send + Sync {
     where
         'obj: 'call;
 
-    /// Reserved framework hook: an object that failed as a whole. Normal
-    /// implementations inherit `None`; wrapper delegations forward it.
-    fn parent_error(&self) -> Option<&Error> {
+    /// Framework hook: an object that failed as a whole. Sealed, since `Seal`
+    /// cannot be named outside greem: only the `&T` and `Result<T, Error>`
+    /// delegations override it, so every field's impl on one type agrees and
+    /// codegen asks any one of them. Users fail an object by returning it as
+    /// `Result<T, Error>`.
+    #[doc(hidden)]
+    fn parent_error(&self, _: sealed::Seal) -> Option<&Error> {
         None
     }
 
@@ -94,8 +98,8 @@ impl<T: Resolver<F, C>, F: Field, C: Send + Sync> Resolver<F, C> for &T {
         T::resolve(&inner, args, ctx).await
     }
 
-    fn parent_error(&self) -> Option<&Error> {
-        T::parent_error(self)
+    fn parent_error(&self, seal: sealed::Seal) -> Option<&Error> {
+        T::parent_error(self, seal)
     }
 
     fn hints(registry: &mut HintRegistry<'_>) {
@@ -129,9 +133,9 @@ impl<T: Resolver<F, C>, F: Field, C: Send + Sync> Resolver<F, C> for Result<T, E
         T::resolve(&inner?, args, ctx).await
     }
 
-    fn parent_error(&self) -> Option<&Error> {
+    fn parent_error(&self, seal: sealed::Seal) -> Option<&Error> {
         match self {
-            Ok(value) => T::parent_error(value),
+            Ok(value) => T::parent_error(value, seal),
             Err(error) => Some(error),
         }
     }
@@ -274,6 +278,14 @@ impl<T, Ty: Completes<T, C>, C> sealed::Sealed<Ty, C> for T {}
 
 mod sealed {
     pub trait Sealed<Ty, C> {}
+
+    #[derive(Clone, Copy)]
+    pub struct Seal;
+}
+
+/// The token generated code passes to [`Resolver::parent_error`].
+pub fn seal() -> sealed::Seal {
+    sealed::Seal
 }
 
 pub use crate::exec::complete::Completes;
