@@ -28,7 +28,7 @@ counterexample found so far.
 | `greem` | Runtime: resolver contract, execution tree, plan table, breadth-first executor, incremental delivery, HTTP types. | `Resolver`, `Outputs`, `Schema`, `Context`, `greem::http` |
 | `greem-core` | What `greem-build` and `greem-macros` share: the GraphQL-name-to-identifier mapping. | `greem_core::ident` |
 | `greem-build` | Schema compilation from `build.rs`: SDL → generated module in `OUT_DIR`. | `greem_build::compile`, `configure()` (`file_name`, `scalar`, `absent_aware`, hidden `reference_executor`) |
-| `greem-macros` | `#[greem::object]`; `#[derive(Abstract)]` is a stub that errors (ticket 15: after the skeleton). | |
+| `greem-macros` | Per-type resolver sugar, re-exported by `greem`. | `#[greem::object]` |
 | `greem-reference` | Unpublished naive depth-first executor, the oracle. | `greem_reference::execute` |
 | `greem-compliance` | Unpublished harness: property schema, world, generators, evidence tests. | |
 | `greem-test-app` | Unpublished: the module `greem-build` generates from its `schema.graphql`, and hand-written resolvers over it, shared by the runtime, macro and reference integration tests. | `schema`, `app::build_schema` |

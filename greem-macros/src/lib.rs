@@ -1,5 +1,4 @@
-//! Procedural macros for greem: `#[greem::object]` (per-type resolver sugar)
-//! and the `Abstract` derive placeholder.
+//! Procedural macros for greem: `#[greem::object]` (per-type resolver sugar).
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
@@ -59,17 +58,6 @@ pub fn object(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(tokens) => tokens.into(),
         Err(error) => error.to_compile_error().into(),
     }
-}
-
-#[proc_macro_derive(Abstract, attributes(greem))]
-pub fn derive_abstract(item: TokenStream) -> TokenStream {
-    let input = syn::parse_macro_input!(item as syn::DeriveInput);
-    Error::new(
-        input.ident.span(),
-        "`#[derive(greem::Abstract)]` is not implemented yet; use `greem::Either`/`greem::As`",
-    )
-    .to_compile_error()
-    .into()
 }
 
 #[derive(Default)]
