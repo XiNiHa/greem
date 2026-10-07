@@ -1452,6 +1452,42 @@ fn halted_stream_groups_fail_with_their_error() {
 }
 
 #[test]
+fn announced_fragments_under_a_failed_stream_fail_with_it() {
+    // Item 0 ships and announces its fragment; item 1 then halts the stream,
+    // which leaves that fragment unable to deliver.
+    let (payloads, _) = run_at_capacity(
+        failing(2, 0, &[("User", "id", 1)]),
+        "{ search @stream(initialCount: 0) { ... on User { id ... @defer { friends { id } } } } }",
+        Value::Null,
+        ExecuteOptions {
+            error_behavior: ErrorBehavior::Halt,
+            incremental: IncrementalDelivery::Enabled,
+        },
+        Some(1),
+    );
+    let error = json!({
+        "message": "User.id failed for 1",
+        "locations": [{"line": 1, "column": 51}],
+        "path": ["search", 1, "id"],
+    });
+    assert_eq!(
+        payloads,
+        [
+            json!({"data": {"search": []}, "pending": [{"id": "0", "path": ["search"]}], "hasNext": true}),
+            json!({
+                "pending": [{"id": "1", "path": ["search", 0]}],
+                "incremental": [{"id": "0", "items": [{"id": "0"}]}],
+                "hasNext": true,
+            }),
+            json!({
+                "completed": [{"id": "0", "errors": [error]}, {"id": "1", "errors": [error]}],
+                "hasNext": false,
+            }),
+        ]
+    );
+}
+
+#[test]
 fn a_fragment_spread_repeated_across_merged_fields_is_collected_once() {
     // Both `users` occurrences merge into one node; F is collected once there,
     // so its deferred fragment yields one group per user, not two.

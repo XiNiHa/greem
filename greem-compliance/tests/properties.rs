@@ -1,5 +1,6 @@
 //! Property tests: BFS ≡ DFS over generated documents, worlds and
-//! interleavings; incremental fold; breadth-first call counts; determinism.
+//! interleavings; incremental fold; every pending id completes; breadth-first
+//! call counts; determinism.
 
 mod common;
 
@@ -125,6 +126,24 @@ proptest! {
             && payloads.len() > 1 {
                 prop_assert_eq!(last.get("hasNext"), Some(&Value::Bool(false)));
             }
+    }
+
+    #[test]
+    fn every_pending_id_completes(doc in document(true), (users, posts, failures) in world(), yields in interleaving(), flag in any::<bool>(), capacity in stream_capacity(), behavior in prop::sample::select(vec![ErrorBehavior::Null, ErrorBehavior::Propagate, ErrorBehavior::Halt])) {
+        let options = ExecuteOptions { error_behavior: behavior, incremental: IncrementalDelivery::Enabled };
+        let (payloads, _) = run_at_capacity(make_world(users, posts, &failures, &yields), &doc, variables(flag), options, capacity);
+        let ids = |key: &str| {
+            let mut ids: Vec<&str> = payloads.iter()
+                .flat_map(|p| p.get(key).and_then(Value::as_array).into_iter().flatten())
+                .map(|entry| entry["id"].as_str().unwrap())
+                .collect();
+            ids.sort_unstable();
+            ids
+        };
+        prop_assert_eq!(ids("pending"), ids("completed"), "doc: {}\ncapacity: {:?}\npayloads: {:?}", doc, capacity, payloads);
+        if payloads[0].get("hasNext") == Some(&Value::Bool(true)) {
+            prop_assert_eq!(payloads.last().unwrap().get("hasNext"), Some(&Value::Bool(false)), "doc: {}\npayloads: {:?}", doc, payloads);
+        }
     }
 
     #[test]

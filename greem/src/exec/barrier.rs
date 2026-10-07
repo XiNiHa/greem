@@ -212,20 +212,20 @@ fn drop_orphaned_shared(groups: &mut Groups) {
     }
 }
 
-/// Fails every announced group whose enclosing fragment (its `after`
-/// dependency) failed or was dropped: the client was told to expect it, so it
-/// completes with that fragment's error. Repeats for chains of dependents.
+/// Fails every announced group that can no longer deliver because the
+/// fragment enclosing it (its `after` dependency) or an ancestor failed or was
+/// dropped: the client was told to expect it, so it completes with that
+/// group's error. Repeats for chains of dependents.
 fn fail_dependents(groups: &mut Groups, out: &mut Entries) {
     let ids = groups.ids();
     loop {
         let mut failed = false;
         for &g in &ids {
             let group = groups.get(g);
-            let GroupKind::Defer {
-                after: Some(after), ..
-            } = group.kind
-            else {
-                continue;
+            let after = match group.kind {
+                GroupKind::Defer { after, .. } => after,
+                GroupKind::Stream { .. } => None,
+                _ => continue,
             };
             if !matches!(
                 group.state,
@@ -233,10 +233,18 @@ fn fail_dependents(groups: &mut Groups, out: &mut Entries) {
             ) {
                 continue;
             }
-            let failure = match &groups.get(after).state {
-                GroupState::Failed(failure) => failure.clone(),
-                GroupState::Dropped => None,
-                _ => continue,
+            let ancestors = std::iter::successors(group.parent, |&p| groups.get(p).parent);
+            let Some(failure) =
+                after
+                    .into_iter()
+                    .chain(ancestors)
+                    .find_map(|d| match &groups.get(d).state {
+                        GroupState::Failed(failure) => Some(failure.clone()),
+                        GroupState::Dropped => Some(None),
+                        _ => None,
+                    })
+            else {
+                continue;
             };
             let id = groups.assign_wire_id(g).to_string();
             groups.get_mut(g).state = GroupState::Failed(failure.clone());
