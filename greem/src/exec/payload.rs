@@ -12,7 +12,7 @@ use serde::{Serialize, Serializer};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Step {
     Child { field: u32, turn: u32, child: u32 },
-    Parked(u32),
+    Deferred(u32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -269,11 +269,10 @@ pub(crate) fn with_scope_at<R>(
             column.turns[*turn as usize].children[*child as usize]
                 .with_dependent(|_, inner| with_scope_at(inner, rest, f))
         }
-        Some((Step::Parked(index), rest)) => {
-            let inner = scope.parked[*index as usize]
-                .scope
-                .as_ref()
-                .expect("released parked scope on path");
+        Some((Step::Deferred(index), rest)) => {
+            let inner = scope.deferred[*index as usize]
+                .scope()
+                .expect("running deferred set on path");
             with_scope_at(inner, rest, f)
         }
     }

@@ -78,8 +78,6 @@ pub struct Group {
     pub wire_id: Option<u32>,
     pub halted: bool,
     pub failure: Option<GraphQLError>,
-    /// For streams: the source has ended and every turn shipped.
-    pub stream_done: bool,
     /// For streams: whether a `pending` entry was sent for it.
     pub announced: bool,
     /// Live references from objects, scopes, drivers and child groups; a
@@ -105,7 +103,6 @@ impl Groups {
             wire_id: None,
             halted: false,
             failure: None,
-            stream_done: false,
             announced: true,
             refs: 0,
             freed: false,
@@ -133,7 +130,6 @@ impl Groups {
             wire_id: None,
             halted: false,
             failure: None,
-            stream_done: false,
             announced: false,
             refs: 0,
             freed: false,

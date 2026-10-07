@@ -5,7 +5,9 @@
 use crate::context::{Context, HintAddr};
 use crate::error::{Error, GraphQLError, PathSegment};
 use crate::exec::column::{Column, Inner, Slot, Turn};
-use crate::exec::scope::{Batch, FieldFuture, Frame, ObjectMeta, Parked, Scope, ScopeMeta};
+use crate::exec::scope::{
+    Batch, DeferredSet, DeferredSetState, FieldFuture, Frame, ObjectMeta, Scope, ScopeMeta,
+};
 use crate::exec::state::{GroupId, GroupKind, Shared};
 use crate::exec::stream::StreamState;
 use crate::plan::{Leaf as LeafPath, PlanHeader, PlanId, PlanTable, Walker};
@@ -485,7 +487,7 @@ where
             groups: base_groups.clone(),
         };
         let futures = T::__start_fields(&cx, &parents, 0);
-        let parked = (1..self.header.sets.len())
+        let deferred = (1..self.header.sets.len())
             .map(|set| {
                 let usages = &self.header.sets[set].0;
                 let attributed = usages
@@ -514,16 +516,16 @@ where
                     ..cx.clone()
                 };
                 let parents = parents.clone();
-                Parked {
+                DeferredSet {
                     set,
                     groups,
-                    start: Some(Box::new(move || T::__start_fields(&cx, &parents, set))),
-                    scope: None,
-                    dropped: false,
+                    state: DeferredSetState::Waiting(Box::new(move || {
+                        T::__start_fields(&cx, &parents, set)
+                    })),
                 }
             })
             .collect();
-        Scope::new(&self.meta, self.shared, 0, base_groups, futures, parked)
+        Scope::new(&self.meta, self.shared, 0, base_groups, futures, deferred)
     }
 }
 

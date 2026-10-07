@@ -6,7 +6,7 @@ use crate::exec::column::{Slot, TurnRange};
 use crate::exec::payload::{
     CompletedEntry, Data, EntrySource, IncrementalEntry, Payload, PayloadKind, PendingEntry, Step,
 };
-use crate::exec::scope::{FieldState, Scope};
+use crate::exec::scope::{Activity, DeferredSetState, FieldState, Scope};
 use crate::exec::settle;
 use crate::exec::state::{ErrorBehavior, GroupId, GroupKind, GroupState, Shared};
 use std::sync::atomic::Ordering;
@@ -18,7 +18,7 @@ pub(crate) fn walk_scopes_mut(
     f: &mut dyn for<'a> FnMut(&[Step], &mut Scope<'a>),
 ) {
     f(path, scope);
-    if scope.quiescent {
+    if scope.activity == Activity::Quiescent {
         return;
     }
     for fi in 0..scope.fields.len() {
@@ -38,9 +38,9 @@ pub(crate) fn walk_scopes_mut(
             }
         }
     }
-    for p in 0..scope.parked.len() {
-        if let Some(inner) = &mut scope.parked[p].scope {
-            path.push(Step::Parked(p as u32));
+    for d in 0..scope.deferred.len() {
+        if let Some(inner) = scope.deferred[d].scope_mut() {
+            path.push(Step::Deferred(d as u32));
             walk_scopes_mut(inner, path, f);
             path.pop();
         }
@@ -62,11 +62,10 @@ pub(crate) fn with_scope_at_mut<R>(
             column.turns[*turn as usize].children[*child as usize]
                 .with_dependent_mut(|_, inner| with_scope_at_mut(inner, rest, f))
         }
-        Some((Step::Parked(index), rest)) => {
-            let inner = scope.parked[*index as usize]
-                .scope
-                .as_mut()
-                .expect("released parked scope on path");
+        Some((Step::Deferred(index), rest)) => {
+            let inner = scope.deferred[*index as usize]
+                .scope_mut()
+                .expect("running deferred set on path");
             with_scope_at_mut(inner, rest, f)
         }
     }
@@ -900,7 +899,7 @@ pub(crate) fn barrier(
     })
 }
 
-/// After the sink returns: release announced groups, start parked scopes,
+/// After the sink returns: release announced groups, start deferred sets,
 /// make stream turns, retire shipped turns.
 pub(crate) fn advance(root: &mut Scope<'_>, shared: &Shared) -> bool {
     let mut changed = false;
@@ -945,22 +944,21 @@ pub(crate) fn advance(root: &mut Scope<'_>, shared: &Shared) -> bool {
 fn advance_scope(scope: &mut Scope<'_>, shared: &Shared, changed: &mut bool) {
     // Every object here belongs to a dead group: nothing it produces can be
     // delivered, so its pending futures are never polled again.
-    if !scope.quiescent && scope.all_dead(shared) {
-        scope.quiescent = true;
+    if scope.activity != Activity::Quiescent && scope.all_dead(shared) {
+        scope.activity = Activity::Quiescent;
         return;
     }
     let mut local = false;
     advance_scope_inner(scope, shared, &mut local);
     if local {
-        scope.quiescent = false;
         *changed = true;
     } else if scope.is_finished() {
-        scope.quiescent = true;
+        scope.activity = Activity::Quiescent;
     }
 }
 
 fn advance_scope_inner(scope: &mut Scope<'_>, shared: &Shared, changed: &mut bool) {
-    if scope.quiescent {
+    if scope.activity == Activity::Quiescent {
         return;
     }
     for i in 0..scope.fields.len() {
@@ -1000,19 +998,20 @@ fn advance_scope_inner(scope: &mut Scope<'_>, shared: &Shared, changed: &mut boo
             column.stream = Some(driver);
         }
     }
-    for parked in &mut scope.parked {
-        if let Some(inner) = &mut parked.scope {
-            advance_scope(inner, shared, changed);
-            continue;
-        }
-        if parked.dropped || parked.start.is_none() {
-            continue;
+    for deferred in &mut scope.deferred {
+        match &mut deferred.state {
+            DeferredSetState::Waiting(_) => {}
+            DeferredSetState::Running(inner) => {
+                advance_scope(inner, shared, changed);
+                continue;
+            }
+            DeferredSetState::Dropped => continue,
         }
         let (all_dead, ready) = {
             let mut groups = shared.groups.lock().unwrap();
             // A group whose `after` dependency failed or was dropped is
             // dropped too; one already announced was failed by the barrier.
-            for &g in &parked.groups {
+            for &g in &deferred.groups {
                 if let GroupKind::Defer {
                     after: Some(after), ..
                 } = groups.get(g).kind
@@ -1026,8 +1025,8 @@ fn advance_scope_inner(scope: &mut Scope<'_>, shared: &Shared, changed: &mut boo
                     groups.get_mut(g).state = GroupState::Dropped;
                 }
             }
-            let all_dead = parked.groups.iter().all(|&g| groups.is_dead(g));
-            let ready = parked.groups.iter().all(|&g| {
+            let all_dead = deferred.groups.iter().all(|&g| groups.is_dead(g));
+            let ready = deferred.groups.iter().all(|&g| {
                 let after_done = match groups.get(g).kind {
                     GroupKind::Defer {
                         after: Some(after), ..
@@ -1041,24 +1040,27 @@ fn advance_scope_inner(scope: &mut Scope<'_>, shared: &Shared, changed: &mut boo
         if all_dead {
             // Abandoned deferred work: make its groups terminal so they reclaim.
             let mut groups = shared.groups.lock().unwrap();
-            for &g in &parked.groups {
+            for &g in &deferred.groups {
                 if groups.get(g).state == GroupState::Unreleased {
                     groups.get_mut(g).state = GroupState::Dropped;
                 }
             }
             drop(groups);
-            parked.dropped = true;
-            parked.start = None;
+            deferred.state = DeferredSetState::Dropped;
             continue;
         }
         if ready {
-            let start = parked.start.take().expect("starter");
+            let DeferredSetState::Waiting(start) =
+                std::mem::replace(&mut deferred.state, DeferredSetState::Dropped)
+            else {
+                unreachable!()
+            };
             let futures = start();
-            parked.scope = Some(Box::new(Scope::new(
+            deferred.state = DeferredSetState::Running(Box::new(Scope::new(
                 scope.meta,
                 scope.shared,
-                parked.set,
-                parked.groups.clone(),
+                deferred.set,
+                deferred.groups.clone(),
                 futures,
                 Vec::new(),
             )));

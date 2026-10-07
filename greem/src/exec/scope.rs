@@ -54,13 +54,45 @@ pub enum FieldState<'a> {
 
 pub type Starter<'a> = Box<dyn FnOnce() -> Vec<FieldFuture<'a>> + Send + 'a>;
 
-/// A deferred field set over the same objects, parked until release.
-pub struct Parked<'a> {
+/// A deferred field set over the same objects: it waits for its groups'
+/// release, then runs as a scope of its own.
+pub struct DeferredSet<'a> {
     pub set: usize,
     pub groups: Vec<GroupId>,
-    pub start: Option<Starter<'a>>,
-    pub scope: Option<Box<Scope<'a>>>,
-    pub dropped: bool,
+    pub state: DeferredSetState<'a>,
+}
+
+pub enum DeferredSetState<'a> {
+    Waiting(Starter<'a>),
+    Running(Box<Scope<'a>>),
+    /// Every group it runs under died before release: it never starts.
+    Dropped,
+}
+
+impl<'a> DeferredSet<'a> {
+    pub fn scope(&self) -> Option<&Scope<'a>> {
+        match &self.state {
+            DeferredSetState::Running(scope) => Some(scope),
+            _ => None,
+        }
+    }
+
+    pub fn scope_mut(&mut self) -> Option<&mut Scope<'a>> {
+        match &mut self.state {
+            DeferredSetState::Running(scope) => Some(scope),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Activity {
+    /// Created in this generation; polled from the next one.
+    Fresh,
+    Active,
+    /// Nothing under this scope can change any more; polls and liveness
+    /// checks skip it. Final.
+    Quiescent,
 }
 
 pub struct Scope<'a> {
@@ -72,15 +104,10 @@ pub struct Scope<'a> {
     pub groups: Vec<GroupId>,
     pub fields: Vec<FieldState<'a>>,
     pub cursor: usize,
-    pub parked: Vec<Parked<'a>>,
+    pub deferred: Vec<DeferredSet<'a>>,
     /// Per object: reachable from a delivered payload (not nulled away).
     pub alive: Vec<bool>,
-    pub fresh: bool,
-    /// Serial mode: the current field's subtree has been settled and closed.
-    pub serial_settled: bool,
-    /// Nothing under this scope can change any more; polls and liveness
-    /// checks skip it until `advance` starts new work beneath it.
-    pub quiescent: bool,
+    pub activity: Activity,
 }
 
 impl Drop for Scope<'_> {
@@ -89,7 +116,7 @@ impl Drop for Scope<'_> {
             for &g in self
                 .groups
                 .iter()
-                .chain(self.parked.iter().flat_map(|p| p.groups.iter()))
+                .chain(self.deferred.iter().flat_map(|d| d.groups.iter()))
             {
                 table.release_ref(g);
             }
@@ -104,14 +131,14 @@ impl<'a> Scope<'a> {
         set: usize,
         groups: Vec<GroupId>,
         futures: Vec<FieldFuture<'a>>,
-        parked: Vec<Parked<'a>>,
+        deferred: Vec<DeferredSet<'a>>,
     ) -> Self {
         let n = meta.objects.len();
         {
             let mut table = shared.groups.lock().unwrap();
             for &g in groups
                 .iter()
-                .chain(parked.iter().flat_map(|p| p.groups.iter()))
+                .chain(deferred.iter().flat_map(|d| d.groups.iter()))
             {
                 table.retain(g);
             }
@@ -123,11 +150,9 @@ impl<'a> Scope<'a> {
             groups,
             fields: futures.into_iter().map(FieldState::Pending).collect(),
             cursor: 0,
-            parked,
+            deferred,
             alive: vec![false; n],
-            fresh: true,
-            serial_settled: false,
-            quiescent: false,
+            activity: Activity::Fresh,
         }
     }
 
@@ -153,7 +178,7 @@ impl<'a> Scope<'a> {
     /// nothing under it is pending; `progress` says whether a future completed
     /// or a stream has items waiting for a turn.
     pub fn poll_generation(&mut self, cx: &mut TaskContext<'_>) -> Poll<bool> {
-        if self.quiescent {
+        if self.activity == Activity::Quiescent {
             return Poll::Ready(false);
         }
         let mut progress = false;
@@ -179,7 +204,7 @@ impl<'a> Scope<'a> {
                     continue;
                 }
                 for child in &mut turn.children {
-                    let fresh = child.with_dependent(|_, scope| scope.fresh);
+                    let fresh = child.with_dependent(|_, scope| scope.activity == Activity::Fresh);
                     if fresh {
                         continue;
                     }
@@ -193,9 +218,9 @@ impl<'a> Scope<'a> {
                 progress |= driver.pump(cx);
             }
         }
-        for parked in &mut self.parked {
-            if let Some(scope) = &mut parked.scope {
-                if scope.fresh {
+        for deferred in &mut self.deferred {
+            if let Some(scope) = deferred.scope_mut() {
+                if scope.activity == Activity::Fresh {
                     continue;
                 }
                 match scope.poll_generation(cx) {
@@ -228,7 +253,7 @@ impl<'a> Scope<'a> {
 
     /// A released stream that may still yield items exists under this scope.
     pub fn has_live_streams(&self) -> bool {
-        if self.quiescent {
+        if self.activity == Activity::Quiescent {
             return false;
         }
         for column in self.columns() {
@@ -249,15 +274,15 @@ impl<'a> Scope<'a> {
                 }
             }
         }
-        self.parked
+        self.deferred
             .iter()
-            .any(|p| p.scope.as_ref().is_some_and(|s| s.has_live_streams()))
+            .any(|d| d.scope().is_some_and(|s| s.has_live_streams()))
     }
 
     /// True when no future under this scope (same or nested group) is pending
     /// and no stream can still produce work.
     pub fn is_parked(&self) -> bool {
-        if self.quiescent {
+        if self.activity == Activity::Quiescent {
             return true;
         }
         if self.meta.serial {
@@ -285,15 +310,15 @@ impl<'a> Scope<'a> {
                 }
             }
         }
-        self.parked
+        self.deferred
             .iter()
-            .all(|p| p.scope.as_ref().is_none_or(|s| s.is_parked()))
+            .all(|d| d.scope().is_none_or(|s| s.is_parked()))
     }
 
     /// True when nothing under this scope can still run: every future is
-    /// done, every stream ended, and no parked deferred set is waiting.
+    /// done, every stream ended, and no deferred set is waiting.
     pub fn is_finished(&self) -> bool {
-        if self.quiescent {
+        if self.activity == Activity::Quiescent {
             return true;
         }
         if !self.is_parked() {
@@ -325,11 +350,10 @@ impl<'a> Scope<'a> {
         // A released deferred scope whose group has not shipped still has to be
         // read by a later barrier, so the subtree is not finished yet. The
         // recursion runs before the lock is taken: the mutex is not reentrant.
-        self.parked.iter().all(|p| {
-            p.dropped
-                || p.scope
-                    .as_ref()
-                    .is_some_and(|s| s.is_finished() && self.groups_terminal(&p.groups))
+        self.deferred.iter().all(|d| match &d.state {
+            DeferredSetState::Waiting(_) => false,
+            DeferredSetState::Running(s) => s.is_finished() && self.groups_terminal(&d.groups),
+            DeferredSetState::Dropped => true,
         })
     }
 
@@ -353,7 +377,7 @@ impl<'a> Scope<'a> {
 
     /// True when the objects of `group` under this scope have unfinished work.
     pub fn is_live_for(&self, group: GroupId) -> bool {
-        if self.quiescent {
+        if self.activity == Activity::Quiescent {
             return false;
         }
         let has_group = self.groups.contains(&group);
@@ -389,23 +413,26 @@ impl<'a> Scope<'a> {
                 }
             }
         }
-        self.parked.iter().any(|p| match &p.scope {
-            Some(scope) => scope.is_live_for(group),
-            None => !p.dropped && p.start.is_some() && p.groups.contains(&group),
+        self.deferred.iter().any(|d| match &d.state {
+            DeferredSetState::Waiting(_) => d.groups.contains(&group),
+            DeferredSetState::Running(scope) => scope.is_live_for(group),
+            DeferredSetState::Dropped => false,
         })
     }
 
-    /// Every object of this scope, and every parked set under it, is dead.
+    /// Every object of this scope, and every deferred set under it, is dead.
     pub fn all_dead(&self, shared: &Shared) -> bool {
         let groups = shared.groups.lock().unwrap();
         self.groups
             .iter()
-            .chain(self.parked.iter().flat_map(|p| p.groups.iter()))
+            .chain(self.deferred.iter().flat_map(|d| d.groups.iter()))
             .all(|&g| groups.is_dead(g))
     }
 
     pub fn clear_fresh(&mut self) {
-        self.fresh = false;
+        if self.activity == Activity::Fresh {
+            self.activity = Activity::Active;
+        }
         for column in self.columns_mut() {
             for turn in &mut column.turns {
                 for child in &mut turn.children {
@@ -413,8 +440,8 @@ impl<'a> Scope<'a> {
                 }
             }
         }
-        for parked in &mut self.parked {
-            if let Some(scope) = &mut parked.scope {
+        for deferred in &mut self.deferred {
+            if let Some(scope) = deferred.scope_mut() {
                 scope.clear_fresh();
             }
         }

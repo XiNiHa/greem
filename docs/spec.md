@@ -156,7 +156,7 @@ absent; apollo-compiler validates documents against them.
    scopes, collect errors, settle (null pass), mark alive objects, build the
    payload (`Payload<'p>` borrows the frames; the sink serializes it in place),
    announce child groups. Then `advance`: release announced groups, start
-   parked deferred scopes, turn buffered stream items into turns, retire shipped
+   deferred field sets, turn buffered stream items into turns, retire shipped
    turns (children, slots and values are freed and the slot is reused by the
    next turn, so memory follows in-flight work rather than stream length),
    mark finished subtrees quiescent. A group whose parent position was nulled
@@ -213,7 +213,7 @@ would cross a delivery boundary fails the group instead.
   sweep at each barrier and its slot reused, so the group table follows
   in-flight work rather than stream length (evidence: `MAX_LIVE_GROUPS` in the
   1,000-turn test and the abandoned-nested-groups test). Objects carry the pending groups they participate in; a
-  deferred field set is a parked scope over the same objects. A set one
+  deferred field set waits for release, then runs as a scope over the same objects. A set one
   fragment selects runs under that fragment's group. A shared field set
   (several fragments select it) runs under its own entry in the group table
   (`GroupKind::Shared`), which has no wire identity: it starts once any
