@@ -360,6 +360,7 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
     /// Prepares a request for the reference executor: the same planning as
     /// `execute_with`, always non-incremental.
     #[doc(hidden)]
+    #[cfg(feature = "reference-executor")]
     pub fn __prepare_reference(
         &self,
         op: &Operation<'_>,

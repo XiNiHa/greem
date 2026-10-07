@@ -21,7 +21,6 @@ struct Gen<'s> {
     schema: &'s Valid<Schema>,
     scalars: &'s BTreeMap<String, Codec>,
     absent_aware: &'s [String],
-    reference: bool,
     sdl: String,
 }
 
@@ -29,7 +28,6 @@ pub(crate) fn generate(
     sources: &[(String, String)],
     scalars: &BTreeMap<String, Codec>,
     absent_aware: &[String],
-    reference: bool,
 ) -> Result<String, Error> {
     let mut merged = String::new();
     for (_, text) in sources {
@@ -58,7 +56,6 @@ pub(crate) fn generate(
         schema: &schema,
         scalars,
         absent_aware,
-        reference,
         sdl: merged,
     };
     let tokens = generator.module();
@@ -747,8 +744,8 @@ impl Gen<'_> {
             .first()
             .expect("object types have at least one field")
             .clone();
-        let reference = if self.reference {
-            quote! {
+        let reference = quote! {
+            rt::reference! {
                 fn reference<'v, 's: 'v>(value: T, rc: &rt::RefCompletion<'s, C>) -> rt::futures::future::BoxFuture<'v, rt::RefValue>
                 where T: 'v, C: 'v,
                 {
@@ -768,8 +765,6 @@ impl Gen<'_> {
                     })
                 }
             }
-        } else {
-            quote!()
         };
         quote! {
             impl rt::InnerKind for super::types::#tag { const OBJECTS: bool = true; }
@@ -873,10 +868,12 @@ impl Gen<'_> {
                         {
                             rt::complete_as::<super::types::#member, T, C>(#step, values, positions, cc)
                         }
-                        fn reference<'v, 's: 'v>(value: ::greem::As<super::types::#member, T>, rc: &rt::RefCompletion<'s, C>) -> rt::futures::future::BoxFuture<'v, rt::RefValue>
-                        where ::greem::As<super::types::#member, T>: 'v, C: 'v,
-                        {
-                            T::__reference(value.into_inner(), &rc.with_leaf(#step))
+                        rt::reference! {
+                            fn reference<'v, 's: 'v>(value: ::greem::As<super::types::#member, T>, rc: &rt::RefCompletion<'s, C>) -> rt::futures::future::BoxFuture<'v, rt::RefValue>
+                            where ::greem::As<super::types::#member, T>: 'v, C: 'v,
+                            {
+                                T::__reference(value.into_inner(), &rc.with_leaf(#step))
+                            }
                         }
                     }
                 }
@@ -905,12 +902,14 @@ impl Gen<'_> {
                 {
                     rt::complete_either::<super::types::#tag, A, B, C>(values, positions, cc)
                 }
-                fn reference<'v, 's: 'v>(value: ::greem::Either<A, B>, rc: &rt::RefCompletion<'s, C>) -> rt::futures::future::BoxFuture<'v, rt::RefValue>
-                where ::greem::Either<A, B>: 'v, C: 'v,
-                {
-                    match value {
-                        ::greem::Either::A(a) => <super::types::#tag as rt::Completes<A, C>>::reference(a, &rc.with_leaf(0)),
-                        ::greem::Either::B(b) => <super::types::#tag as rt::Completes<B, C>>::reference(b, &rc.with_leaf(1)),
+                rt::reference! {
+                    fn reference<'v, 's: 'v>(value: ::greem::Either<A, B>, rc: &rt::RefCompletion<'s, C>) -> rt::futures::future::BoxFuture<'v, rt::RefValue>
+                    where ::greem::Either<A, B>: 'v, C: 'v,
+                    {
+                        match value {
+                            ::greem::Either::A(a) => <super::types::#tag as rt::Completes<A, C>>::reference(a, &rc.with_leaf(0)),
+                            ::greem::Either::B(b) => <super::types::#tag as rt::Completes<B, C>>::reference(b, &rc.with_leaf(1)),
+                        }
                     }
                 }
             }
@@ -942,12 +941,14 @@ impl Gen<'_> {
                     }
                     X::__complete(ok, ok_pos, cc)
                 }
-                fn reference<'v, 's: 'v>(value: Result<X, ::greem::Error>, rc: &rt::RefCompletion<'s, C>) -> rt::futures::future::BoxFuture<'v, rt::RefValue>
-                where Result<X, ::greem::Error>: 'v, C: 'v,
-                {
-                    match value {
-                        Ok(v) => X::__reference(v, rc),
-                        Err(e) => rc.error(e),
+                rt::reference! {
+                    fn reference<'v, 's: 'v>(value: Result<X, ::greem::Error>, rc: &rt::RefCompletion<'s, C>) -> rt::futures::future::BoxFuture<'v, rt::RefValue>
+                    where Result<X, ::greem::Error>: 'v, C: 'v,
+                    {
+                        match value {
+                            Ok(v) => X::__reference(v, rc),
+                            Err(e) => rc.error(e),
+                        }
                     }
                 }
             }
@@ -982,10 +983,12 @@ impl Gen<'_> {
                         cc.leaf(pos, value.to_leaf());
                     }
                 }
-                fn reference<'v, 's: 'v>(value: T, rc: &rt::RefCompletion<'s, C>) -> rt::futures::future::BoxFuture<'v, rt::RefValue>
-                where T: 'v, C: 'v,
-                {
-                    rc.leaf(value.to_leaf())
+                rt::reference! {
+                    fn reference<'v, 's: 'v>(value: T, rc: &rt::RefCompletion<'s, C>) -> rt::futures::future::BoxFuture<'v, rt::RefValue>
+                    where T: 'v, C: 'v,
+                    {
+                        rc.leaf(value.to_leaf())
+                    }
                 }
             }
         }
@@ -1084,7 +1087,6 @@ mod tests {
             &[("test.graphql".to_owned(), sdl.to_owned())],
             &BTreeMap::new(),
             &[],
-            false,
         )
     }
 

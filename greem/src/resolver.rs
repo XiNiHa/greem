@@ -181,6 +181,7 @@ pub trait Outputs<Ty, C = ()>: Sized + sealed::Sealed<Ty, C> {
     ) -> Option<Error>;
 
     #[doc(hidden)]
+    #[cfg(feature = "reference-executor")]
     fn __reference<'v, 's: 'v>(
         value: Self,
         rc: &crate::exec::reference::RefCompletion<'s, C>,
@@ -243,6 +244,7 @@ impl<T, Ty: Completes<T, C>, C> Outputs<Ty, C> for T {
         Ty::complete(values, positions, cc)
     }
 
+    #[cfg(feature = "reference-executor")]
     fn __reference<'v, 's: 'v>(
         value: Self,
         rc: &crate::exec::reference::RefCompletion<'s, C>,

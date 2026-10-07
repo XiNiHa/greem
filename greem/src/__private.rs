@@ -6,6 +6,7 @@ pub use crate::exec::complete::{
     Completes, Completion, FieldsCx, InnerKind, ObjectBatch, Pos, complete_as, complete_either,
     field, introspection_field, typename_field, walk_as, walk_either,
 };
+#[cfg(feature = "reference-executor")]
 pub use crate::exec::reference::{
     RefCompletion, RefShared, RefValue, list, nullable, reference_field, reference_object,
 };
@@ -28,3 +29,22 @@ pub static MAX_LIVE_GROUPS: std::sync::atomic::AtomicUsize = std::sync::atomic::
 
 /// The per-field argument payload stored in a typed Plan entry.
 pub type FieldArgs<F> = Result<crate::resolver::Args<F>, crate::error::Error>;
+
+/// Keeps its items when greem is built with the `reference-executor`
+/// feature and drops them otherwise, so generated code can always emit its
+/// reference completion.
+#[cfg(feature = "reference-executor")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __reference_items {
+    ($($item:tt)*) => { $($item)* };
+}
+
+#[cfg(not(feature = "reference-executor"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __reference_items {
+    ($($item:tt)*) => {};
+}
+
+pub use crate::__reference_items as reference;

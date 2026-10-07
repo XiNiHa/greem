@@ -5,7 +5,6 @@
 use crate::context::{Context, HintAddr};
 use crate::error::{Error, GraphQLError, PathSegment};
 use crate::exec::column::{Column, Inner, Slot, Turn};
-use crate::exec::reference::{RefCompletion, RefValue};
 use crate::exec::scope::{Batch, FieldFuture, Frame, ObjectMeta, Parked, Scope, ScopeMeta};
 use crate::exec::state::{GroupId, GroupKind, Shared};
 use crate::exec::stream::StreamState;
@@ -17,8 +16,12 @@ use crate::tree::{Abort, FieldKind, NodeId};
 use crate::value::{ToLeaf, Value};
 use futures::Stream;
 use futures::StreamExt;
-use futures::future::BoxFuture;
 use std::marker::PhantomData;
+#[cfg(feature = "reference-executor")]
+use {
+    crate::exec::reference::{RefCompletion, RefValue},
+    futures::future::BoxFuture,
+};
 
 /// A position being completed: a slot at the current level, the parent
 /// object it belongs to, and the list indices below that object.
@@ -99,19 +102,12 @@ pub trait Completes<T, C>: Sized {
         T: 'a,
         C: 'a;
 
-    /// The reference executor's depth-first completion of one value. Object
-    /// tags only implement it when schema compilation asked for reference
-    /// executor support.
-    fn reference<'v, 's: 'v>(_value: T, _rc: &RefCompletion<'s, C>) -> BoxFuture<'v, RefValue>
+    /// The reference executor's depth-first completion of one value.
+    #[cfg(feature = "reference-executor")]
+    fn reference<'v, 's: 'v>(value: T, rc: &RefCompletion<'s, C>) -> BoxFuture<'v, RefValue>
     where
         T: 'v,
-        C: 'v,
-    {
-        panic!(
-            "reference executor support was not generated for `{}`; enable `reference_executor(true)` in build.rs",
-            Self::TYPENAME
-        )
-    }
+        C: 'v;
 
     /// Object tags only: the field futures of one delivery set over a parent set.
     fn start_fields<'a>(
@@ -765,6 +761,7 @@ macro_rules! scalar_tag {
                 }
             }
 
+            #[cfg(feature = "reference-executor")]
             fn reference<'v, 's: 'v>(value: T, rc: &RefCompletion<'s, C>) -> BoxFuture<'v, RefValue>
             where
                 T: 'v,
@@ -826,6 +823,7 @@ where
         }
     }
 
+    #[cfg(feature = "reference-executor")]
     fn reference<'v, 's: 'v>(value: Option<T>, rc: &RefCompletion<'s, C>) -> BoxFuture<'v, RefValue>
     where
         Option<T>: 'v,
@@ -890,6 +888,7 @@ where
         <Nullable<Ty> as Completes<Option<T>, C>>::complete(ok, ok_pos, cc);
     }
 
+    #[cfg(feature = "reference-executor")]
     fn reference<'v, 's: 'v>(
         value: Result<Option<T>, Error>,
         rc: &RefCompletion<'s, C>,
@@ -939,6 +938,7 @@ where
         <Nullable<Ty> as Completes<Option<&'x T>, C>>::complete(values, positions, cc);
     }
 
+    #[cfg(feature = "reference-executor")]
     fn reference<'v, 's: 'v>(
         value: &'x Option<T>,
         rc: &RefCompletion<'s, C>,
@@ -1000,6 +1000,7 @@ where
         }
     }
 
+    #[cfg(feature = "reference-executor")]
     fn reference<'v, 's: 'v>(value: Vec<T>, rc: &RefCompletion<'s, C>) -> BoxFuture<'v, RefValue>
     where
         Vec<T>: 'v,
@@ -1070,6 +1071,7 @@ where
         }
     }
 
+    #[cfg(feature = "reference-executor")]
     fn reference<'v, 's: 'v>(
         value: Result<Vec<T>, Error>,
         rc: &RefCompletion<'s, C>,
@@ -1122,6 +1124,7 @@ where
         <List<Ty> as Completes<Vec<&'x T>, C>>::complete(values, positions, cc);
     }
 
+    #[cfg(feature = "reference-executor")]
     fn reference<'v, 's: 'v>(value: &'x [T], rc: &RefCompletion<'s, C>) -> BoxFuture<'v, RefValue>
     where
         &'x [T]: 'v,
@@ -1163,6 +1166,7 @@ where
         <List<Ty> as Completes<&'x [T], C>>::complete(values, positions, cc);
     }
 
+    #[cfg(feature = "reference-executor")]
     fn reference<'v, 's: 'v>(
         value: &'x Vec<T>,
         rc: &RefCompletion<'s, C>,
@@ -1206,6 +1210,7 @@ where
         cc.stream::<T, Ty, S>(values, positions);
     }
 
+    #[cfg(feature = "reference-executor")]
     fn reference<'v, 's: 'v>(
         value: Streamed<S, Result<T, Error>>,
         rc: &RefCompletion<'s, C>,
@@ -1329,6 +1334,7 @@ impl<C> Completes<crate::resolver::NoMutation, C> for crate::resolver::NoMutatio
     {
     }
 
+    #[cfg(feature = "reference-executor")]
     fn reference<'v, 's: 'v>(
         _: crate::resolver::NoMutation,
         _: &RefCompletion<'s, C>,

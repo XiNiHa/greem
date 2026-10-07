@@ -1,6 +1,7 @@
 pub mod column;
 pub mod complete;
 pub mod payload;
+#[cfg(feature = "reference-executor")]
 pub mod reference;
 pub mod run;
 pub mod scope;

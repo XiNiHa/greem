@@ -46,7 +46,6 @@ pub struct Config {
     emit_rerun_if_changed: bool,
     scalars: BTreeMap<String, Codec>,
     absent_aware: Vec<String>,
-    reference_executor: bool,
 }
 
 pub fn configure() -> Config {
@@ -56,7 +55,6 @@ pub fn configure() -> Config {
         emit_rerun_if_changed: true,
         scalars: BTreeMap::new(),
         absent_aware: Vec::new(),
-        reference_executor: false,
     }
 }
 
@@ -100,12 +98,6 @@ impl Config {
         self
     }
 
-    #[doc(hidden)]
-    pub fn reference_executor(mut self, enabled: bool) -> Self {
-        self.reference_executor = enabled;
-        self
-    }
-
     /// Merges the SDL files into one schema and writes the generated module.
     pub fn compile(self, paths: &[impl AsRef<Path>]) -> Result<(), Error> {
         let mut sources = Vec::new();
@@ -136,12 +128,7 @@ impl Config {
 
     /// Generates the module source for in-memory SDL (used by tests).
     pub fn generate(&self, sources: &[(String, String)]) -> Result<String, Error> {
-        codegen::generate(
-            sources,
-            &self.scalars,
-            &self.absent_aware,
-            self.reference_executor,
-        )
+        codegen::generate(sources, &self.scalars, &self.absent_aware)
     }
 }
 

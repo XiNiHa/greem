@@ -27,7 +27,7 @@ counterexample found so far.
 | --- | --- | --- |
 | `greem` | Runtime: resolver contract, execution tree, plan table, breadth-first executor, incremental delivery, HTTP types. | `Resolver`, `Outputs`, `Schema`, `Context`, `greem::http` |
 | `greem-core` | What `greem-build` and `greem-macros` share: the GraphQL-name-to-identifier mapping. | `greem_core::ident` |
-| `greem-build` | Schema compilation from `build.rs`: SDL → generated module in `OUT_DIR`. | `greem_build::compile`, `configure()` (`file_name`, `scalar`, `absent_aware`, hidden `reference_executor`) |
+| `greem-build` | Schema compilation from `build.rs`: SDL → generated module in `OUT_DIR`. | `greem_build::compile`, `configure()` (`file_name`, `scalar`, `absent_aware`) |
 | `greem-macros` | Per-type resolver sugar, re-exported by `greem`. | `#[greem::object]` |
 | `greem-reference` | Unpublished naive depth-first executor, the oracle. | `greem_reference::execute` |
 | `greem-compliance` | Unpublished harness: property schema, world, generators, evidence tests. | |
@@ -106,7 +106,7 @@ hook method's own `#[cfg]`/`#[cfg_attr]`. See `examples/axum/src/main.rs`.
 - Per object type: the `Completes<T, C>` impl bounded on every field's
   `Resolver`, with `walk` (the plan walk), `complete` (parent-error witness,
   then a child scope), `start_fields` (the static per-field dispatch into
-  `greem::__private::field`) and, under `reference_executor(true)`, `reference`.
+  `greem::__private::field`) and `reference`.
 - Per abstract type: `As` impls per member and sub-interface, `Either`,
   `Result`.
 - Custom scalar codecs (`Codec::{Uuid, Json, String, I64}`; integers above
@@ -291,9 +291,12 @@ has no setting.
 builds `serde_json::Value` directly and bubbles nulls by returning `Err` up the
 recursion; it shares the tree, the plan walk and apollo's introspection with
 the BFS and nothing else. Its per-tag support is the `Completes::reference`
-method (defaulted to a panic; codegen emits object bodies only under
-`reference_executor(true)`), which replaces the two support traits sketched in
-ticket 12 with one hidden method.
+method, which replaces the two support traits sketched in ticket 12 with one
+hidden method. It exists only under greem's `reference-executor` feature:
+codegen always emits it inside `greem::__private::reference!`, which keeps it
+when the feature is on and drops it otherwise, so the same generated module
+builds either way. `greem-reference` and `greem-compliance` enable the feature;
+`cargo build -p greem` and `cargo test -p greem` run without it.
 
 `greem-compliance/tests/properties.rs` generates documents from the property
 schema (aliases, fragments, `@skip`/`@include` with variables, `@defer`,
@@ -322,7 +325,7 @@ and shared with the reference.
   views are plain borrows; ticket 05 wrote it without one.
 - Reference support is `Completes::reference` plus `reference_object` /
   `reference_field` helpers, not `ReferenceDispatch` / `ReferenceComplete`
-  (ticket 12). The `reference-executor` cargo feature exists but gates nothing yet.
+  (ticket 12).
 - Object paths are stored per object rather than reconstructed from parent
   links (ticket 08); error ids are local to the column that owns the slot.
 - A finished subtree is marked quiescent at `advance` so later polls and
