@@ -8,8 +8,7 @@
 
 mod context;
 mod error;
-#[doc(hidden)]
-pub mod exec;
+mod exec;
 pub mod http;
 mod plan;
 mod resolver;
