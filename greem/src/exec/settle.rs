@@ -248,19 +248,27 @@ fn visit_inner(
 /// Marks every object reachable from `object` through delivered (non-null)
 /// slots as alive, so pending delivery groups on nulled objects are dropped.
 pub(crate) fn mark_alive(scope: &mut Scope<'_>, object: u32) {
+    mark_alive_with(scope, object, &mut Vec::new());
+}
+
+/// `mark_alive` with one target stack for the whole subtree: each level
+/// pushes its children above its caller's and truncates back when done.
+fn mark_alive_with(scope: &mut Scope<'_>, object: u32, targets: &mut Vec<(u32, u32)>) {
     scope.alive[object as usize] = true;
     for i in 0..scope.fields.len() {
         let FieldState::Done(column) = &mut scope.fields[i] else {
             continue;
         };
-        let mut targets = Vec::new();
+        let start = targets.len();
         for_each_child_of(column, 0, object, false, &mut |child, index| {
             targets.push((child, index))
         });
-        for (child, index) in targets {
+        for t in start..targets.len() {
+            let (child, index) = targets[t];
             column.turns[0].children[child as usize]
-                .with_dependent_mut(|_, s| mark_alive(s, index));
+                .with_dependent_mut(|_, s| mark_alive_with(s, index, targets));
         }
+        targets.truncate(start);
     }
 }
 
@@ -269,8 +277,10 @@ pub(crate) fn mark_alive_range(column: &mut Column<'_>, turn: usize, range: Turn
     for_each_child_in_range(column, turn, range, false, &mut |child, index| {
         targets.push((child, index))
     });
-    for (child, index) in targets {
-        column.turns[turn].children[child as usize].with_dependent_mut(|_, s| mark_alive(s, index));
+    for t in 0..targets.len() {
+        let (child, index) = targets[t];
+        column.turns[turn].children[child as usize]
+            .with_dependent_mut(|_, s| mark_alive_with(s, index, &mut targets));
     }
 }
 
