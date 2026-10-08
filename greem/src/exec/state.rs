@@ -86,6 +86,8 @@ pub struct Group {
     /// Live references from objects, scopes, drivers and child groups; a
     /// terminal group with none is reclaimed at the next barrier.
     pub refs: u32,
+    /// The live shared field sets this group is a member of, by ascending id.
+    sharing: Vec<GroupId>,
 }
 
 #[derive(Default, Debug)]
@@ -105,6 +107,7 @@ impl Groups {
             state: GroupState::Released,
             wire_id: None,
             refs: 0,
+            sharing: Vec::new(),
         }));
         groups
     }
@@ -117,9 +120,13 @@ impl Groups {
         {
             self.retain(after);
         }
+        let id = self.free.pop().unwrap_or(self.list.len() as GroupId);
         if let GroupKind::Shared { members } = &kind {
             for &member in members {
-                self.retain(member);
+                let group = self.get_mut(member);
+                group.refs += 1;
+                let at = group.sharing.partition_point(|&s| s < id);
+                group.sharing.insert(at, id);
             }
         }
         let group = Group {
@@ -128,17 +135,13 @@ impl Groups {
             state: GroupState::Unreleased,
             wire_id: None,
             refs: 0,
+            sharing: Vec::new(),
         };
-        let id = match self.free.pop() {
-            Some(id) => {
-                self.list[id as usize] = Some(group);
-                id
-            }
-            None => {
-                self.list.push(Some(group));
-                (self.list.len() - 1) as GroupId
-            }
-        };
+        if id as usize == self.list.len() {
+            self.list.push(Some(group));
+        } else {
+            self.list[id as usize] = Some(group);
+        }
         crate::__private::MAX_LIVE_GROUPS.fetch_max(
             self.list.len() - self.free.len(),
             std::sync::atomic::Ordering::Relaxed,
@@ -198,6 +201,7 @@ impl Groups {
                     GroupKind::Shared { members } => {
                         for member in members {
                             self.release_ref(member);
+                            self.get_mut(member).sharing.retain(|&s| s != id as GroupId);
                         }
                     }
                     _ => {}
@@ -282,12 +286,7 @@ impl Groups {
 
     /// The shared field sets `member` takes part in.
     pub fn sharing(&self, member: GroupId) -> Vec<GroupId> {
-        self.iter()
-            .filter(|(_, group)| {
-                matches!(&group.kind, GroupKind::Shared { members } if members.contains(&member))
-            })
-            .map(|(id, _)| id)
-            .collect()
+        self.get(member).sharing.clone()
     }
 
     /// Allocates the groups of one object's shared field sets: one per set
