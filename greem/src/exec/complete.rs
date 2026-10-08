@@ -19,6 +19,7 @@ use crate::tree::{Abort, FieldKind, NodeId};
 use crate::value::{ToLeaf, Value};
 use futures::Stream;
 use futures::StreamExt;
+use smallvec::SmallVec;
 use std::borrow::Borrow;
 use std::marker::PhantomData;
 #[cfg(feature = "reference-executor")]
@@ -33,7 +34,7 @@ use {
 pub struct Pos {
     pub slot: u32,
     pub object: u32,
-    pub indices: Vec<u32>,
+    pub indices: SmallVec<[u32; 4]>,
 }
 
 /// Everything a scope's field futures share.
@@ -167,7 +168,7 @@ impl<'a, C> Completion<'a, '_, C> {
             self.turn,
             error,
             pos.object,
-            pos.indices.clone(),
+            pos.indices.to_vec(),
             self.generation,
         );
         let depth = self.depth();
@@ -332,7 +333,7 @@ impl<'a, C: Send + Sync + 'a> Completion<'a, '_, C> {
                 objects.push(ObjectMeta {
                     group,
                     parent: pos.object,
-                    indices: pos.indices.clone(),
+                    indices: pos.indices.to_vec(),
                     path,
                     pending,
                     shared,
@@ -617,7 +618,7 @@ where
         let base = |i: u32| Pos {
             slot: i,
             object: i,
-            indices: Vec::new(),
+            indices: SmallVec::new(),
         };
         let mut cc = Completion {
             cx: &cx,

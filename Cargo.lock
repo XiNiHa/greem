@@ -360,6 +360,7 @@ dependencies = [
  "self_cell",
  "serde",
  "serde_json",
+ "smallvec",
 ]
 
 [[package]]

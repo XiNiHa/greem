@@ -369,7 +369,7 @@ where
                     let pos = Pos {
                         slot: start_slot + j as u32,
                         object,
-                        indices: vec![self.next_index[p] + j as u32],
+                        indices: smallvec::smallvec![self.next_index[p] + j as u32],
                     };
                     match item {
                         Ok(value) => {

@@ -30,4 +30,5 @@ futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 self_cell = "1.2"
+smallvec = { version = "1.13", features = ["union"] }
 indexmap = "2"
