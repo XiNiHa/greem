@@ -298,16 +298,15 @@ impl Groups {
         group: GroupId,
     ) -> Vec<(usize, GroupId)> {
         let mut shared = Vec::new();
+        let member = |u: &UsageId| pending.iter().find(|(p, _)| p == u).map(|(_, g)| *g);
         for (set, (usages, _)) in sets.iter().enumerate().skip(1) {
-            let members: Vec<GroupId> = usages
-                .iter()
-                .filter_map(|u| pending.iter().find(|(p, _)| p == u).map(|(_, g)| *g))
-                .collect();
-            if members.len() > 1 {
-                let g = self.alloc(GroupKind::Shared { members }, group);
-                self.retain(g);
-                shared.push((set, g));
+            if usages.iter().filter_map(member).nth(1).is_none() {
+                continue;
             }
+            let members = usages.iter().filter_map(member).collect();
+            let g = self.alloc(GroupKind::Shared { members }, group);
+            self.retain(g);
+            shared.push((set, g));
         }
         shared
     }
