@@ -9,4 +9,4 @@ The breadth-first executor resolves one field across a whole scope at a time, so
 
 ## Consequences
 
-Error paths are not stored; they are rebuilt at serialization from the parent links. `__typename` is not stored; it comes from the scope's type. Any scope subtree can be serialized on its own, which is what incremental delivery needs.
+Object paths are not stored. Each scope links to its parent scope and field, and each object keeps only its parent index and list indices, so a path is rebuilt by walking up when an error, a deferred or streamed group, or an incremental entry needs one. Under Halt that happens when the error is recorded, because its column may still be pending. `__typename` is not stored; it comes from the scope's type. Any scope's data can be serialized on its own, which is what incremental delivery needs; errors and `subPath` are worked out at the barrier, before serialization.

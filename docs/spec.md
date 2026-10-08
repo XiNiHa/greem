@@ -188,8 +188,8 @@ link so errors beneath it are still reported. Leaf values borrow the objects
 values are pre-resolved columns. A non-finite `Float` output is an execution error
 at its position (JSON has no NaN or infinity). Errors are recorded on the turn that owns the
 slot with the object index and list indices, so a retired stream turn frees
-its error records with its values; paths come from the object's stored path
-plus the field key. `errors` order is generation, then field, then
+its error records with its values; paths are rebuilt from the scopes' parent
+links plus the field key. `errors` order is generation, then field, then
 object; serial mutation roots come first, each root field's errors (its
 subtree's included) before the next root field's.
 
@@ -337,8 +337,7 @@ and shared with the reference.
 - Reference support is `Completes::reference` plus `reference_object` /
   `reference_field` helpers, not `ReferenceDispatch` / `ReferenceComplete`
   (ticket 12).
-- Object paths are stored per object rather than reconstructed from parent
-  links (ticket 08); error ids are local to the column that owns the slot.
+- Error ids are local to the column that owns the slot (ticket 08).
 - A finished subtree is marked quiescent at `advance` so later polls and
   liveness checks skip it; without it 1,000 parked mutation roots were quadratic.
 - Merged fields whose occurrences carry different `@stream` directives are a
