@@ -579,7 +579,7 @@ where
 {
     let entry = table.lookup(0, &Leaf::default()).expect("root plan entry");
     let header = table.header(entry);
-    let mut pending = Vec::new();
+    let mut pending = smallvec::SmallVec::new();
     let shared_sets;
     {
         let mut groups = shared.groups();

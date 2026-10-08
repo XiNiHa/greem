@@ -4,6 +4,7 @@ use crate::exec::state::{GroupId, GroupState, Groups, Shared};
 use crate::plan::PlanId;
 use crate::tree::UsageId;
 use futures::future::BoxFuture;
+use smallvec::SmallVec;
 use std::ops::ControlFlow;
 use std::task::{Context as TaskContext, Poll};
 
@@ -16,7 +17,7 @@ pub struct ObjectMeta {
     pub indices: Vec<u32>,
     pub path: Vec<PathSegment>,
     /// Deferred group instances this object participates in: (usage, group).
-    pub pending: Vec<(UsageId, GroupId)>,
+    pub pending: SmallVec<[(UsageId, GroupId); 2]>,
     /// The groups of the field sets several of those fragments share: (set, group).
     pub shared: Vec<(usize, GroupId)>,
 }
