@@ -99,6 +99,22 @@ fn workloads() -> Vec<Workload> {
                     .into(),
             incremental: true,
         },
+        Workload {
+            name: "streamed",
+            users: 10_000,
+            posts_per_user: 3,
+            query: "{ users(first: 10000) @stream { id name email posts { id title tags } } }"
+                .into(),
+            incremental: true,
+        },
+        Workload {
+            name: "streams",
+            users: 10_000,
+            posts_per_user: 3,
+            query: "{ users(first: 10000) { id drafts @stream(initialCount: 1) { id title } } }"
+                .into(),
+            incremental: true,
+        },
     ]
 }
 
