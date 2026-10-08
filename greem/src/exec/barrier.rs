@@ -295,14 +295,10 @@ fn announce_children(
     // shipped are not alive yet, and are decided when it does.
     let unshipped = UnshippedItems::collect(root);
     walk_scopes_mut(root, &mut Vec::new(), &mut |_, scope| {
-        for object in 0..scope.meta.objects.len() {
+        let meta = scope.meta;
+        for object in 0..meta.objects.len() {
             let alive = scope.alive[object];
-            let pending_groups: Vec<GroupId> = scope.meta.objects[object]
-                .pending
-                .iter()
-                .map(|(_, g)| *g)
-                .collect();
-            for g in pending_groups {
+            for &(_, g) in &meta.objects[object].pending {
                 let group = groups.get(g);
                 if !matches!(group.state, GroupState::Unreleased) || groups.is_dead(g) {
                     continue;
@@ -312,7 +308,7 @@ fn announce_children(
                 }
                 if !alive {
                     // The parent payload nulled this object: its groups never run.
-                    if !unshipped.contain(&scope.meta.objects[object].path) {
+                    if !unshipped.contain(&meta.objects[object].path) {
                         groups.get_mut(g).state = GroupState::Dropped;
                     }
                     continue;
