@@ -199,7 +199,7 @@ impl<'a, C> Completion<'a, '_, C> {
 
     /// Writes a list of `len` items at `pos` and returns the item positions one
     /// level down.
-    pub fn list(&mut self, pos: &Pos, len: usize) -> Vec<Pos> {
+    pub fn list(&mut self, pos: &Pos, len: usize) -> impl Iterator<Item = Pos> + use<C> {
         let depth = self.depth();
         debug_assert!(self.level < depth, "list written at a non-list level");
         let turn = &mut self.column.turns[self.turn];
@@ -224,17 +224,16 @@ impl<'a, C> Completion<'a, '_, C> {
         } else {
             turn.levels[self.level - 1][pos.slot as usize] = slot;
         }
-        (0..len as u32)
-            .map(|i| {
-                let mut indices = pos.indices.clone();
-                indices.push(i);
-                Pos {
-                    slot: start + i,
-                    object: pos.object,
-                    indices,
-                }
-            })
-            .collect()
+        let (object, base) = (pos.object, pos.indices.clone());
+        (0..len as u32).map(move |i| {
+            let mut indices = base.clone();
+            indices.push(i);
+            Pos {
+                slot: start + i,
+                object,
+                indices,
+            }
+        })
     }
 
     pub fn descend<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
