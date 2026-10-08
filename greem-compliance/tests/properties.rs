@@ -180,7 +180,7 @@ proptest! {
         let output = futures::executor::block_on(schema.execute(
             greem::Roots { query: greem_compliance::world::QueryRoot, mutation: greem_compliance::world::MutationRoot },
             World::seeded(2, 0),
-            greem::Operation { document: &document, operation_name: None, variables: Value::Null },
+            greem::Operation { document: document.clone(), operation_name: None, variables: Value::Null },
             ExecuteOptions::default(),
         ));
         let response: Value = serde_json::from_slice(&output.payloads[0].json).unwrap();
@@ -188,7 +188,7 @@ proptest! {
             &schema,
             greem::Roots { query: greem_compliance::world::QueryRoot, mutation: greem_compliance::world::MutationRoot },
             World::seeded(2, 0),
-            greem::Operation { document: &document, operation_name: None, variables: Value::Null },
+            greem::Operation { document: document.clone(), operation_name: None, variables: Value::Null },
             ExecuteOptions::default(),
         ));
         // users adds one level; each friends adds one.

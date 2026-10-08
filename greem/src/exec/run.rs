@@ -2,7 +2,7 @@
 //! (null pass, payload, release), advance, repeat.
 
 use crate::exec::barrier::{barrier, stalled};
-use crate::exec::payload::Payload;
+use crate::exec::pull::Ship;
 use crate::exec::scope::{Activity, DeferredSetState, FieldState, Scope};
 use crate::exec::state::{GroupKind, GroupState, Shared};
 use std::sync::atomic::Ordering;
@@ -184,11 +184,7 @@ fn advance_scope_inner(scope: &mut Scope<'_>, shared: &Shared, changed: &mut boo
     }
 }
 
-pub(crate) async fn run_loop<'a>(
-    root: &mut Scope<'a>,
-    shared: &Shared,
-    sink: &mut (dyn for<'p> FnMut(Payload<'p>) + Send),
-) {
+pub(crate) async fn run_loop<'a>(root: &mut Scope<'a>, shared: &Shared, sink: &mut dyn Ship) {
     let mut state = Loop {
         generation: 0,
         initial_shipped: false,
@@ -210,18 +206,20 @@ pub(crate) async fn run_loop<'a>(
         .await;
         state.generation += 1;
         if let Some(output) = barrier(root, shared, &mut state) {
-            sink(output.into_payload(&*root));
+            sink.ship(output.into_payload(&*root));
         }
         if state.done {
             break;
         }
+        // Nothing runs until the consumer takes the payload.
+        futures::future::poll_fn(|_| sink.poll_taken()).await;
         let changed = advance(root, shared);
         let stuck = !progress && !changed && !root.has_live_streams();
         debug_assert!(!stuck, "execution stalled: nothing can make progress");
         if stuck {
             // End the response anyway so the client is not left hanging.
             let output = stalled(&mut shared.groups(), state.initial_shipped);
-            sink(output.into_payload(&*root));
+            sink.ship(output.into_payload(&*root));
             break;
         }
     }

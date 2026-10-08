@@ -52,7 +52,7 @@ pub fn run_at_capacity(
         },
         world,
         Operation {
-            document: &document,
+            document: document.clone(),
             operation_name: None,
             variables,
         },
@@ -70,32 +70,33 @@ pub fn run_at_capacity(
 /// Drives the execution with a no-op waker until it stalls or finishes, and
 /// returns the payloads shipped so far: for queries that never complete.
 pub fn run_until_stalled(world: World, query: &str, options: ExecuteOptions) -> Vec<Value> {
+    use futures::Stream;
     use std::task::{Context, Poll};
     let schema = build_schema();
     let document = schema.parse(query).unwrap();
     let mut payloads = Vec::new();
-    {
-        let future = schema.execute_with(
-            Roots {
-                query: QueryRoot,
-                mutation: MutationRoot,
-            },
-            world,
-            Operation {
-                document: &document,
-                operation_name: None,
-                variables: Value::Null,
-            },
-            options,
-            |payload| payloads.push(serde_json::to_value(&payload).unwrap()),
-        );
-        let mut future = std::pin::pin!(future);
-        let waker = futures::task::noop_waker();
-        let mut cx = Context::from_waker(&waker);
-        for _ in 0..1000 {
-            if let Poll::Ready(()) = future.as_mut().poll(&mut cx) {
-                break;
-            }
+    let stream = schema.execute_stream(
+        Roots {
+            query: QueryRoot,
+            mutation: MutationRoot,
+        },
+        world,
+        Operation {
+            document,
+            operation_name: None,
+            variables: Value::Null,
+        },
+        options,
+        |payload| serde_json::to_value(&payload).unwrap(),
+    );
+    let mut stream = std::pin::pin!(stream);
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    for _ in 0..1000 {
+        match stream.as_mut().poll_next(&mut cx) {
+            Poll::Ready(Some(payload)) => payloads.push(payload),
+            Poll::Ready(None) => break,
+            Poll::Pending => {}
         }
     }
     payloads
@@ -140,7 +141,7 @@ pub fn reference(
         },
         world,
         Operation {
-            document: &document,
+            document: document.clone(),
             operation_name: None,
             variables,
         },

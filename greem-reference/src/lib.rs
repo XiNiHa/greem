@@ -21,7 +21,7 @@ pub async fn execute<I, C, Q, M>(
     schema: &Schema<I, C, Q, M>,
     roots: Roots<Q, M>,
     ctx: C,
-    op: Operation<'_>,
+    op: Operation,
     options: ExecuteOptions,
 ) -> ReferenceOutput
 where

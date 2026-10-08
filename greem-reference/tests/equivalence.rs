@@ -29,7 +29,7 @@ fn both(
         },
         make_app(),
         Operation {
-            document: &document,
+            document: document.clone(),
             operation_name: None,
             variables: variables.clone(),
         },
@@ -44,7 +44,7 @@ fn both(
         },
         make_app(),
         Operation {
-            document: &document,
+            document: document.clone(),
             operation_name: None,
             variables,
         },
@@ -266,7 +266,7 @@ fn reference_calls_once_per_object() {
             ..Default::default()
         },
         Operation {
-            document: &document,
+            document: document.clone(),
             operation_name: None,
             variables: Value::Null,
         },
@@ -280,7 +280,7 @@ fn reference_calls_once_per_object() {
         },
         App::default(),
         Operation {
-            document: &document,
+            document: document.clone(),
             operation_name: None,
             variables: Value::Null,
         },

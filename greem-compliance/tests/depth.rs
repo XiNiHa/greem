@@ -4,6 +4,7 @@
 
 mod common;
 
+use futures::StreamExt;
 use futures::executor::block_on;
 use greem::{ExecuteOptions, IncrementalDelivery, Operation, Roots};
 use greem_compliance::world::{MutationRoot, QueryRoot, World, take_drops};
@@ -58,7 +59,7 @@ fn run_deep(depth: u32, limit: u32, world: World) -> Value {
         },
         world,
         Operation {
-            document: &document,
+            document: document.clone(),
             operation_name: None,
             variables: Value::Null,
         },
@@ -109,7 +110,7 @@ fn cancel_after(depth: u32, world: World, polls: usize) -> Vec<(&'static str, u3
             },
             world,
             Operation {
-                document: &document,
+                document: document.clone(),
                 operation_name: None,
                 variables: Value::Null,
             },
@@ -201,37 +202,41 @@ fn a_thousand_stream_turns_do_not_add_depth() {
         let document = schema.parse(query).unwrap();
         let mut entries = 0usize;
         let mut items = 0usize;
-        block_on(schema.execute_with(
-            Roots {
-                query: QueryRoot,
-                mutation: MutationRoot,
-            },
-            World::seeded(1, 1000),
-            Operation {
-                document: &document,
-                operation_name: None,
-                variables: Value::Null,
-            },
-            ExecuteOptions {
-                incremental: IncrementalDelivery::Enabled,
-                ..Default::default()
-            },
-            |payload| {
-                let json: Value = serde_json::to_value(&payload).unwrap();
-                for entry in json
-                    .get("incremental")
-                    .and_then(|i| i.as_array())
-                    .into_iter()
-                    .flatten()
-                {
-                    // Deferred data entries ride alongside; only item entries are turns.
-                    if let Some(list) = entry["items"].as_array() {
-                        entries += 1;
-                        items += list.len();
-                    }
-                }
-            },
-        ));
+        block_on(
+            schema
+                .execute_stream(
+                    Roots {
+                        query: QueryRoot,
+                        mutation: MutationRoot,
+                    },
+                    World::seeded(1, 1000),
+                    Operation {
+                        document: document.clone(),
+                        operation_name: None,
+                        variables: Value::Null,
+                    },
+                    ExecuteOptions {
+                        incremental: IncrementalDelivery::Enabled,
+                        ..Default::default()
+                    },
+                    |payload| {
+                        let json: Value = serde_json::to_value(&payload).unwrap();
+                        for entry in json
+                            .get("incremental")
+                            .and_then(|i| i.as_array())
+                            .into_iter()
+                            .flatten()
+                        {
+                            // Deferred data entries ride alongside; only item entries are turns.
+                            if let Some(list) = entry["items"].as_array() {
+                                entries += 1;
+                                items += list.len();
+                            }
+                        }
+                    },
+                )
+                .for_each(|()| async {}),
+        );
         assert_eq!(items, 1000);
         assert_eq!(entries, 1000, "one turn per item at capacity 1");
         let groups = greem::__private::MAX_LIVE_GROUPS.load(std::sync::atomic::Ordering::Relaxed);
@@ -261,36 +266,40 @@ fn a_thousand_streamed_errors_are_retired_with_their_turns() {
         greem::__private::MAX_LIVE_TURNS.store(0, std::sync::atomic::Ordering::Relaxed);
         let mut errors = 0usize;
         let mut nulls = 0usize;
-        block_on(schema.execute_with(
-            Roots {
-                query: QueryRoot,
-                mutation: MutationRoot,
-            },
-            World::seeded(1, 0),
-            Operation {
-                document: &document,
-                operation_name: None,
-                variables: Value::Null,
-            },
-            ExecuteOptions {
-                incremental: IncrementalDelivery::Enabled,
-                ..Default::default()
-            },
-            |payload| {
-                let json: Value = serde_json::to_value(&payload).unwrap();
-                for entry in json
-                    .get("incremental")
-                    .and_then(|i| i.as_array())
-                    .into_iter()
-                    .flatten()
-                {
-                    nulls += entry["items"]
-                        .as_array()
-                        .map_or(0, |i| i.iter().filter(|v| v.is_null()).count());
-                    errors += entry["errors"].as_array().map_or(0, |e| e.len());
-                }
-            },
-        ));
+        block_on(
+            schema
+                .execute_stream(
+                    Roots {
+                        query: QueryRoot,
+                        mutation: MutationRoot,
+                    },
+                    World::seeded(1, 0),
+                    Operation {
+                        document: document.clone(),
+                        operation_name: None,
+                        variables: Value::Null,
+                    },
+                    ExecuteOptions {
+                        incremental: IncrementalDelivery::Enabled,
+                        ..Default::default()
+                    },
+                    |payload| {
+                        let json: Value = serde_json::to_value(&payload).unwrap();
+                        for entry in json
+                            .get("incremental")
+                            .and_then(|i| i.as_array())
+                            .into_iter()
+                            .flatten()
+                        {
+                            nulls += entry["items"]
+                                .as_array()
+                                .map_or(0, |i| i.iter().filter(|v| v.is_null()).count());
+                            errors += entry["errors"].as_array().map_or(0, |e| e.len());
+                        }
+                    },
+                )
+                .for_each(|()| async {}),
+        );
         assert_eq!((nulls, errors), (1000, 1000));
         let turns = greem::__private::MAX_LIVE_TURNS.load(std::sync::atomic::Ordering::Relaxed);
         assert!(
@@ -326,31 +335,35 @@ fn abandoned_nested_groups_are_reclaimed_after_parent_failure() {
         };
         greem::__private::MAX_LIVE_GROUPS.store(0, std::sync::atomic::Ordering::Relaxed);
         let mut failed = 0usize;
-        block_on(schema.execute_with(
-            Roots {
-                query: QueryRoot,
-                mutation: MutationRoot,
-            },
-            world,
-            Operation {
-                document: &document,
-                operation_name: None,
-                variables: Value::Null,
-            },
-            ExecuteOptions {
-                incremental: IncrementalDelivery::Enabled,
-                ..Default::default()
-            },
-            |payload| {
-                let json: Value = serde_json::to_value(&payload).unwrap();
-                failed += json
-                    .get("completed")
-                    .and_then(|c| c.as_array())
-                    .map_or(0, |c| {
-                        c.iter().filter(|e| e.get("errors").is_some()).count()
-                    });
-            },
-        ));
+        block_on(
+            schema
+                .execute_stream(
+                    Roots {
+                        query: QueryRoot,
+                        mutation: MutationRoot,
+                    },
+                    world,
+                    Operation {
+                        document: document.clone(),
+                        operation_name: None,
+                        variables: Value::Null,
+                    },
+                    ExecuteOptions {
+                        incremental: IncrementalDelivery::Enabled,
+                        ..Default::default()
+                    },
+                    |payload| {
+                        let json: Value = serde_json::to_value(&payload).unwrap();
+                        failed += json
+                            .get("completed")
+                            .and_then(|c| c.as_array())
+                            .map_or(0, |c| {
+                                c.iter().filter(|e| e.get("errors").is_some()).count()
+                            });
+                    },
+                )
+                .for_each(|()| async {}),
+        );
         assert_eq!(failed, 200);
         let groups = greem::__private::MAX_LIVE_GROUPS.load(std::sync::atomic::Ordering::Relaxed);
         assert!(
@@ -380,7 +393,7 @@ fn a_thousand_mutation_roots_do_not_add_depth() {
             },
             World::seeded(2, 0),
             Operation {
-                document: &document,
+                document: document.clone(),
                 operation_name: None,
                 variables: Value::Null,
             },
@@ -419,7 +432,7 @@ fn reference_executor_runs_on_a_larger_stack() {
                 },
                 World::seeded(2, 0),
                 Operation {
-                    document: &document,
+                    document: document.clone(),
                     operation_name: None,
                     variables: Value::Null,
                 },

@@ -9,10 +9,10 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use futures::{FutureExt, Stream, StreamExt, future, stream};
+use futures::{StreamExt, future, stream};
 use greem::{
-    Args, As, Context, Either, Error, ErrorBehavior, ExecuteOptions, IncrementalDelivery,
-    OwnedPayload, Planning, Resolver, Roots, Streamed,
+    Args, As, Context, Either, Error, ErrorBehavior, ExecuteOptions, IncrementalDelivery, Payload,
+    PayloadKind, Planning, Resolver, Roots, Streamed,
 };
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
@@ -333,14 +333,14 @@ pub fn build_schema() -> Schema {
         .expect("schema builds")
 }
 
-pub fn router(schema: Arc<Schema>) -> Router {
+pub fn router(schema: Schema) -> Router {
     Router::new()
         .route("/graphql", post(graphql))
         .with_state(schema)
 }
 
 async fn graphql(
-    State(schema): State<Arc<Schema>>,
+    State(schema): State<Schema>,
     headers: HeaderMap,
     Json(request): Json<greem::http::Request>,
 ) -> Response {
@@ -354,22 +354,31 @@ async fn graphql(
         error_behavior: ErrorBehavior::Propagate,
         incremental,
     };
-    let mut payloads = Box::pin(execute(schema, request, options));
+    let mut payloads = Box::pin(schema.execute_request_stream(
+        Roots {
+            query: QueryRoot,
+            mutation: MutationRoot,
+        },
+        App::seeded(),
+        request,
+        options,
+        encode,
+    ));
     let first = payloads
         .next()
         .await
         .expect("an execution ships at least one payload");
-    if first.has_next.is_some() {
+    if first.incremental {
         let parts = stream::once(future::ready(first))
             .chain(payloads)
-            .map(|payload| Ok::<_, Infallible>(greem::http::multipart_part(&payload)));
+            .map(|payload| Ok::<_, Infallible>(payload.bytes));
         return (
             [(header::CONTENT_TYPE, greem::http::MULTIPART_CONTENT_TYPE)],
             Body::from_stream(parts),
         )
             .into_response();
     }
-    let status = if first.kind == greem::PayloadKind::RequestError {
+    let status = if first.kind == PayloadKind::RequestError {
         StatusCode::BAD_REQUEST
     } else {
         StatusCode::OK
@@ -377,45 +386,37 @@ async fn graphql(
     (
         status,
         [(header::CONTENT_TYPE, "application/json")],
-        Body::from(first.json),
+        Body::from(first.bytes),
     )
         .into_response()
 }
 
-/// One request as a stream of serialized payloads. Polling the stream is what
-/// drives the execution: a payload is yielded as soon as the sink receives it,
-/// and dropping the stream (the client went away) cancels the rest.
-fn execute(
-    schema: Arc<Schema>,
-    request: greem::http::Request,
-    options: ExecuteOptions,
-) -> impl Stream<Item = OwnedPayload> + Send + 'static {
-    let (tx, rx) = futures::channel::mpsc::unbounded();
-    let execution = async move {
-        schema
-            .execute_request_with(
-                Roots {
-                    query: QueryRoot,
-                    mutation: MutationRoot,
-                },
-                App::seeded(),
-                &request,
-                options,
-                move |payload| {
-                    let _ = tx.unbounded_send(OwnedPayload::from(&payload));
-                },
-            )
-            .await
-    };
-    stream::select(
-        rx,
-        execution.into_stream().filter_map(|()| future::ready(None)),
-    )
+/// A payload encoded for the wire while the execution still borrows it: a
+/// multipart part when the response is incremental, otherwise the whole JSON
+/// body. The stream yields one only when polled, so a slow client holds the
+/// execution back instead of queueing payloads.
+struct Encoded {
+    incremental: bool,
+    kind: PayloadKind,
+    bytes: Vec<u8>,
+}
+
+fn encode(payload: Payload<'_>) -> Encoded {
+    let incremental = payload.has_next().is_some();
+    Encoded {
+        incremental,
+        kind: payload.kind(),
+        bytes: if incremental {
+            greem::http::multipart_part(&payload)
+        } else {
+            serde_json::to_vec(&payload).expect("serialize payload")
+        },
+    }
 }
 
 #[tokio::main]
 async fn main() {
-    let schema = Arc::new(build_schema());
+    let schema = build_schema();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8080")
         .await
         .expect("bind");
@@ -464,7 +465,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_end_to_end() {
-        let router = router(Arc::new(build_schema()));
+        let router = router(build_schema());
         let (status, content_type, body) = post(
             router,
             "application/json",
@@ -488,7 +489,7 @@ mod tests {
 
     #[tokio::test]
     async fn defer_and_stream_over_multipart() {
-        let router = router(Arc::new(build_schema()));
+        let router = router(build_schema());
         let (status, content_type, body) = post(
             router,
             "multipart/mixed;incrementalSpec=v0.2,application/graphql-response+json,application/json;q=0.9",
@@ -551,7 +552,7 @@ mod tests {
 
     #[tokio::test]
     async fn defer_spec_only_clients_get_one_json_response() {
-        let router = router(Arc::new(build_schema()));
+        let router = router(build_schema());
         let (status, content_type, body) = post(
             router,
             "multipart/mixed;deferSpec=20220824,application/json",
@@ -574,7 +575,7 @@ mod tests {
 
     #[tokio::test]
     async fn each_payload_is_its_own_delimited_chunk() {
-        let router = router(Arc::new(build_schema()));
+        let router = router(build_schema());
         let response = send(
             router,
             "multipart/mixed",
@@ -613,7 +614,7 @@ mod tests {
                 },
                 app,
                 greem::Operation {
-                    document: &document,
+                    document,
                     operation_name: None,
                     variables: serde_json::Value::Null,
                 },
@@ -626,7 +627,7 @@ mod tests {
 
     #[tokio::test]
     async fn request_errors_are_bad_requests() {
-        let router = router(Arc::new(build_schema()));
+        let router = router(build_schema());
         let (status, _, body) = post(
             router,
             "application/json",

@@ -1,4 +1,4 @@
-//! Payloads: the borrowed views the sink receives at each barrier, and their
+//! Payloads: the borrowed views the encoder receives at each barrier, and their
 //! serialization straight from the columns.
 
 use crate::error::{GraphQLError, PathSegment};
@@ -93,7 +93,8 @@ fn with_root<R>(root: &dyn ErasedRoot, f: impl for<'s, 'a> FnOnce(&'s Scope<'a>)
 }
 
 /// One response payload, borrowing the executor's retained frames. It is only
-/// valid inside the sink callback; serialize it there.
+/// valid inside the encoder passed to `Schema::execute_stream`; serialize it
+/// there.
 pub struct Payload<'p> {
     pub(crate) root: Option<&'p (dyn ErasedRoot + 'p)>,
     pub(crate) kind: PayloadKind,

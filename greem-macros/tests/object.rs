@@ -1,5 +1,6 @@
 //! `#[greem::object]` against `greem-test-app`'s generated schema module.
 
+use futures::StreamExt;
 use futures::executor::block_on;
 use greem::{
     Args, Context, Error, ExecuteOptions, HintRegistry, Operation, Planning, Roots, Streamed,
@@ -200,7 +201,7 @@ fn run(query: &str) -> (Value, Vec<String>) {
         },
         app,
         Operation {
-            document: &document,
+            document: document.clone(),
             operation_name: None,
             variables: Value::Null,
         },
@@ -235,20 +236,24 @@ fn set_based_and_hints() {
         .parse("{ users { posts { author { id } } } }")
         .unwrap();
     let mut seen = Vec::new();
-    block_on(schema.execute_with(
-        Roots {
-            query: Query,
-            mutation: Mutation,
-        },
-        App::default(),
-        Operation {
-            document: &document,
-            operation_name: None,
-            variables: Value::Null,
-        },
-        ExecuteOptions::default(),
-        |payload| seen.push(serde_json::to_value(&payload).unwrap()),
-    ));
+    block_on(
+        schema
+            .execute_stream(
+                Roots {
+                    query: Query,
+                    mutation: Mutation,
+                },
+                App::default(),
+                Operation {
+                    document: document.clone(),
+                    operation_name: None,
+                    variables: Value::Null,
+                },
+                ExecuteOptions::default(),
+                |payload| seen.push(serde_json::to_value(&payload).unwrap()),
+            )
+            .for_each(|()| async {}),
+    );
     assert_eq!(
         seen[0]["data"]["users"][1]["posts"][0]["author"]["id"],
         json!("2")

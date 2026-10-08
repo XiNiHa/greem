@@ -5,6 +5,7 @@ use crate::context::Context;
 use crate::error::{GraphQLError, InputError, SchemaError};
 use crate::exec::complete::ObjectBatch;
 use crate::exec::payload::{Payload, PayloadKind};
+use crate::exec::pull::{Ship, pull};
 use crate::exec::run::run_loop;
 use crate::exec::scope::{Batch, ObjectMeta, ScopeMeta};
 use crate::exec::state::{ExecuteOptions, GroupKind, Groups, IncrementalDelivery, Shared};
@@ -14,6 +15,7 @@ use crate::tree::{Abort, Document, Tree, json_to_input, span_location};
 use crate::value::InputValue;
 use apollo_compiler::validation::Valid;
 use apollo_compiler::{ExecutableDocument, Schema as ApolloSchema};
+use futures::{Stream, StreamExt};
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 
@@ -46,17 +48,31 @@ impl<Q> Roots<Q, NoMutation> {
     }
 }
 
+/// A handle to a built schema; clones share it.
 pub struct Schema<I: SchemaInfo, C = (), Q = (), M = NoMutation> {
-    pub(crate) schema: Arc<Valid<ApolloSchema>>,
-    pub(crate) implementers: apollo_compiler::collections::HashMap<
+    inner: Arc<Inner>,
+    _marker: Marker<I, C, Q, M>,
+}
+
+struct Inner {
+    schema: Arc<Valid<ApolloSchema>>,
+    implementers: apollo_compiler::collections::HashMap<
         apollo_compiler::Name,
         apollo_compiler::schema::Implementers,
     >,
-    pub(crate) max_depth: u32,
-    pub(crate) stream_capacity: usize,
-    pub(crate) recursion_limit: Option<usize>,
-    pub(crate) token_limit: Option<usize>,
-    _marker: Marker<I, C, Q, M>,
+    max_depth: u32,
+    stream_capacity: usize,
+    recursion_limit: Option<usize>,
+    token_limit: Option<usize>,
+}
+
+impl<I: SchemaInfo, C, Q, M> Clone for Schema<I, C, Q, M> {
+    fn clone(&self) -> Self {
+        Schema {
+            inner: self.inner.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 type Marker<I, C, Q, M> = PhantomData<fn() -> (I, C, Q, M)>;
@@ -142,12 +158,14 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> SchemaBuilder<I, C, Q, M> {
             .map_err(|e| SchemaError(e.to_string()))?;
         let implementers = schema.implementers_map();
         Ok(Schema {
-            schema: Arc::new(schema),
-            implementers,
-            max_depth: self.max_depth,
-            stream_capacity: self.stream_capacity,
-            recursion_limit: self.recursion_limit,
-            token_limit: self.token_limit,
+            inner: Arc::new(Inner {
+                schema: Arc::new(schema),
+                implementers,
+                max_depth: self.max_depth,
+                stream_capacity: self.stream_capacity,
+                recursion_limit: self.recursion_limit,
+                token_limit: self.token_limit,
+            }),
             _marker: PhantomData,
         })
     }
@@ -159,14 +177,14 @@ pub struct RequestErrors(pub Vec<GraphQLError>);
 
 impl RequestErrors {
     pub fn into_payload(self) -> OwnedPayload {
-        OwnedPayload::from(&Payload::request_error(self.0))
+        OwnedPayload::encode(Payload::request_error(self.0))
     }
 }
 
 /// One operation of a parsed document plus its variables.
-pub struct Operation<'a> {
-    pub document: &'a Arc<Document>,
-    pub operation_name: Option<&'a str>,
+pub struct Operation {
+    pub document: Arc<Document>,
+    pub operation_name: Option<String>,
     pub variables: serde_json::Value,
 }
 
@@ -179,18 +197,17 @@ pub struct OwnedPayload {
 }
 
 impl OwnedPayload {
-    pub fn as_str(&self) -> &str {
-        std::str::from_utf8(&self.json).expect("payload JSON is UTF-8")
-    }
-}
-
-impl From<&Payload<'_>> for OwnedPayload {
-    fn from(payload: &Payload<'_>) -> Self {
+    /// The JSON encoder, for `Schema::execute_stream`.
+    pub fn encode(payload: Payload<'_>) -> Self {
         OwnedPayload {
             kind: payload.kind(),
             has_next: payload.has_next(),
-            json: serde_json::to_vec(payload).expect("serialize payload"),
+            json: serde_json::to_vec(&payload).expect("serialize payload"),
         }
+    }
+
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.json).expect("payload JSON is UTF-8")
     }
 }
 
@@ -220,33 +237,33 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
     }
 
     pub fn max_depth(&self) -> u32 {
-        self.max_depth
+        self.inner.max_depth
     }
 
     /// Parses and validates a request document once; the result is shared
     /// between requests.
     pub fn parse(&self, source: &str) -> Result<Arc<Document>, RequestErrors> {
         let mut parser = apollo_compiler::parser::Parser::new();
-        if let Some(limit) = self.recursion_limit {
+        if let Some(limit) = self.inner.recursion_limit {
             parser = parser.recursion_limit(limit);
         }
-        if let Some(limit) = self.token_limit {
+        if let Some(limit) = self.inner.token_limit {
             parser = parser.token_limit(limit);
         }
         let doc = parser
-            .parse_executable(&self.schema, source, "request.graphql")
+            .parse_executable(&self.inner.schema, source, "request.graphql")
             .map_err(|e| RequestErrors(diagnostics_to_errors(&e.errors)))?;
         let doc = doc
-            .validate(&self.schema)
+            .validate(&self.inner.schema)
             .map_err(|e| RequestErrors(diagnostics_to_errors(&e.errors)))?;
         Ok(Arc::new(Document { doc }))
     }
 
-    fn prepare(&self, op: &Operation<'_>, options: ExecuteOptions) -> Result<Tree, RequestErrors> {
+    fn prepare(&self, op: &Operation, options: ExecuteOptions) -> Result<Tree, RequestErrors> {
         let doc: &Valid<ExecutableDocument> = &op.document.doc;
         let operation = doc
             .operations
-            .get(op.operation_name)
+            .get(op.operation_name.as_deref())
             .map_err(|e| {
                 RequestErrors(vec![GraphQLError::request(
                     e.message().to_string(),
@@ -278,16 +295,19 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
                 )]));
             }
         };
-        let coerced =
-            apollo_compiler::request::coerce_variable_values(&self.schema, &operation, &variables)
-                .map_err(|e| RequestErrors(vec![request_error_to_graphql(&e, &doc.sources)]))?;
+        let coerced = apollo_compiler::request::coerce_variable_values(
+            &self.inner.schema,
+            &operation,
+            &variables,
+        )
+        .map_err(|e| RequestErrors(vec![request_error_to_graphql(&e, &doc.sources)]))?;
         // apollo accepts any value for a custom scalar: its codec runs here,
         // so an invalid variable is a request error and nothing executes.
         for variable in &operation.variables {
             let Some(value) = coerced.get(variable.name.as_str()) else {
                 continue;
             };
-            check_scalars::<I>(&self.schema, &variable.ty, value).map_err(|e| {
+            check_scalars::<I>(&self.inner.schema, &variable.ty, value).map_err(|e| {
                 RequestErrors(vec![GraphQLError::request(
                     format!("variable `${}` got an invalid value: {e}", variable.name),
                     span_location(variable.location(), doc),
@@ -297,12 +317,12 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
         apollo_compiler::introspection::check_max_depth(doc, &operation)
             .map_err(|e| RequestErrors(vec![request_error_to_graphql(&e, &doc.sources)]))?;
         Ok(Tree::new(
-            self.schema.clone(),
+            self.inner.schema.clone(),
             op.document.clone(),
             operation,
             coerced,
             options.incremental == IncrementalDelivery::Enabled,
-            self.max_depth,
+            self.inner.max_depth,
         ))
     }
 
@@ -316,8 +336,8 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
             return Ok(None);
         }
         let response = apollo_compiler::introspection::partial_execute(
-            &self.schema,
-            &self.implementers,
+            &self.inner.schema,
+            &self.inner.implementers,
             doc,
             &tree.operation,
             &tree.variables,
@@ -332,7 +352,7 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
     /// operation is a mutation.
     fn plan(
         &self,
-        op: &Operation<'_>,
+        op: &Operation,
         app: &C,
         options: ExecuteOptions,
     ) -> Result<(Arc<PlanTable>, Option<serde_json::Value>, bool), RequestErrors>
@@ -360,12 +380,12 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
     }
 
     /// Prepares a request for the reference executor: the same planning as
-    /// `execute_with`, always non-incremental.
+    /// `execute_stream`, always non-incremental.
     #[doc(hidden)]
     #[cfg(feature = "reference-executor")]
     pub fn __prepare_reference(
         &self,
-        op: &Operation<'_>,
+        op: &Operation,
         app: Arc<C>,
         options: ExecuteOptions,
     ) -> Result<(Arc<PlanTable>, Option<serde_json::Value>, bool), RequestErrors>
@@ -380,23 +400,132 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
         self.plan(op, &app, options)
     }
 
-    /// Plans and executes one request, handing every payload to `sink` while
-    /// the executor's frames are alive.
-    pub async fn execute_with(
+    /// Plans and executes one request as a stream of payloads, each passed
+    /// to `encode` while the executor's frames are alive; pass
+    /// `OwnedPayload::encode` for owned JSON. Execution advances only while
+    /// the stream is polled and pauses after each payload until the next
+    /// poll. Dropping the stream cancels it, a mutation's root fields
+    /// included.
+    pub fn execute_stream<T, E>(
         &self,
         roots: Roots<Q, M>,
         ctx: C,
-        op: Operation<'_>,
+        op: Operation,
         options: ExecuteOptions,
-        mut sink: impl for<'p> FnMut(Payload<'p>) + Send,
+        encode: E,
+    ) -> impl Stream<Item = T> + Send + use<I, C, Q, M, T, E>
+    where
+        Q: Outputs<I::Query, C> + Send + Sync,
+        M: Outputs<I::Mutation, C> + Send + Sync,
+        T: Send,
+        E: for<'p> FnMut(Payload<'p>) -> T + Send,
+    {
+        let schema = self.clone();
+        pull(encode, move |mut outlet| async move {
+            schema.run(roots, ctx, &op, options, &mut outlet).await
+        })
+    }
+
+    /// The text path: parses and validates a whole request, then streams it
+    /// like `execute_stream`.
+    pub fn execute_request_stream<T, E>(
+        &self,
+        roots: Roots<Q, M>,
+        ctx: C,
+        request: crate::http::Request,
+        options: ExecuteOptions,
+        encode: E,
+    ) -> impl Stream<Item = T> + Send + use<I, C, Q, M, T, E>
+    where
+        Q: Outputs<I::Query, C> + Send + Sync,
+        M: Outputs<I::Mutation, C> + Send + Sync,
+        T: Send,
+        E: for<'p> FnMut(Payload<'p>) -> T + Send,
+    {
+        let schema = self.clone();
+        pull(encode, move |mut outlet| async move {
+            match schema.operation(request) {
+                Ok(op) => schema.run(roots, ctx, &op, options, &mut outlet).await,
+                Err(errors) => outlet.ship(Payload::request_error(errors.0)),
+            }
+        })
+    }
+
+    /// Executes and returns every payload as owned JSON.
+    pub async fn execute(
+        &self,
+        roots: Roots<Q, M>,
+        ctx: C,
+        op: Operation,
+        options: ExecuteOptions,
+    ) -> ExecutionOutput
+    where
+        Q: Outputs<I::Query, C> + Send + Sync,
+        M: Outputs<I::Mutation, C> + Send + Sync,
+    {
+        ExecutionOutput {
+            payloads: self
+                .execute_stream(roots, ctx, op, options, OwnedPayload::encode)
+                .collect()
+                .await,
+        }
+    }
+
+    /// The text path, returning every payload as owned JSON.
+    pub async fn execute_request(
+        &self,
+        roots: Roots<Q, M>,
+        ctx: C,
+        request: crate::http::Request,
+        options: ExecuteOptions,
+    ) -> ExecutionOutput
+    where
+        Q: Outputs<I::Query, C> + Send + Sync,
+        M: Outputs<I::Mutation, C> + Send + Sync,
+    {
+        ExecutionOutput {
+            payloads: self
+                .execute_request_stream(roots, ctx, request, options, OwnedPayload::encode)
+                .collect()
+                .await,
+        }
+    }
+
+    fn operation(&self, request: crate::http::Request) -> Result<Operation, RequestErrors> {
+        let crate::http::Request {
+            query,
+            operation_name,
+            variables,
+            ..
+        } = request;
+        let Some(query) = query else {
+            return Err(RequestErrors(vec![GraphQLError::request(
+                "request has no query",
+                Vec::new(),
+            )]));
+        };
+        Ok(Operation {
+            document: self.parse(&query)?,
+            operation_name,
+            variables: variables.unwrap_or(serde_json::Value::Null),
+        })
+    }
+
+    async fn run(
+        &self,
+        roots: Roots<Q, M>,
+        ctx: C,
+        op: &Operation,
+        options: ExecuteOptions,
+        outlet: &mut dyn Ship,
     ) where
         Q: Outputs<I::Query, C> + Send + Sync,
         M: Outputs<I::Mutation, C> + Send + Sync,
     {
-        let (table, introspection, is_mutation) = match self.plan(&op, &ctx, options) {
+        let (table, introspection, is_mutation) = match self.plan(op, &ctx, options) {
             Ok(planned) => planned,
             Err(errors) => {
-                sink(Payload::request_error(errors.0));
+                outlet.ship(Payload::request_error(errors.0));
                 return;
             }
         };
@@ -404,7 +533,7 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
             groups: Mutex::new(Groups::new()),
             behavior: options.error_behavior,
             incremental: options.incremental == IncrementalDelivery::Enabled,
-            capacity: self.stream_capacity,
+            capacity: self.inner.stream_capacity,
             table: table.clone(),
             introspection,
             has_streams: std::sync::atomic::AtomicBool::new(false),
@@ -418,7 +547,7 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
             query.__parent_error()
         };
         if let Some(error) = failed {
-            sink(Payload::failed_root(GraphQLError::from_error(
+            outlet.ship(Payload::failed_root(GraphQLError::from_error(
                 error,
                 Vec::new(),
                 Vec::new(),
@@ -428,87 +557,12 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
         if is_mutation {
             let batch = root_batch::<M, I::Mutation, C>(mutation, &shared, &ctx, &table, true);
             let mut root = batch.start();
-            run_loop(&mut root, &shared, &mut sink).await;
+            run_loop(&mut root, &shared, outlet).await;
         } else {
             let batch = root_batch::<Q, I::Query, C>(query, &shared, &ctx, &table, false);
             let mut root = batch.start();
-            run_loop(&mut root, &shared, &mut sink).await;
+            run_loop(&mut root, &shared, outlet).await;
         }
-    }
-
-    /// Executes and returns every payload as owned JSON.
-    pub async fn execute(
-        &self,
-        roots: Roots<Q, M>,
-        ctx: C,
-        op: Operation<'_>,
-        options: ExecuteOptions,
-    ) -> ExecutionOutput
-    where
-        Q: Outputs<I::Query, C> + Send + Sync,
-        M: Outputs<I::Mutation, C> + Send + Sync,
-    {
-        let mut output = ExecutionOutput::default();
-        self.execute_with(roots, ctx, op, options, |payload| {
-            output.payloads.push(OwnedPayload::from(&payload));
-        })
-        .await;
-        output
-    }
-
-    /// The text path: parse, validate and execute a whole request, handing
-    /// every payload to `sink` like `execute_with`.
-    pub async fn execute_request_with(
-        &self,
-        roots: Roots<Q, M>,
-        ctx: C,
-        request: &crate::http::Request,
-        options: ExecuteOptions,
-        mut sink: impl for<'p> FnMut(Payload<'p>) + Send,
-    ) where
-        Q: Outputs<I::Query, C> + Send + Sync,
-        M: Outputs<I::Mutation, C> + Send + Sync,
-    {
-        let Some(query) = &request.query else {
-            sink(Payload::request_error(vec![GraphQLError::request(
-                "request has no query",
-                Vec::new(),
-            )]));
-            return;
-        };
-        let document = match self.parse(query) {
-            Ok(document) => document,
-            Err(errors) => {
-                sink(Payload::request_error(errors.0));
-                return;
-            }
-        };
-        let op = Operation {
-            document: &document,
-            operation_name: request.operation_name.as_deref(),
-            variables: request.variables.clone().unwrap_or(serde_json::Value::Null),
-        };
-        self.execute_with(roots, ctx, op, options, sink).await
-    }
-
-    /// The text path, returning every payload as owned JSON.
-    pub async fn execute_request(
-        &self,
-        roots: Roots<Q, M>,
-        ctx: C,
-        request: &crate::http::Request,
-        options: ExecuteOptions,
-    ) -> ExecutionOutput
-    where
-        Q: Outputs<I::Query, C> + Send + Sync,
-        M: Outputs<I::Mutation, C> + Send + Sync,
-    {
-        let mut output = ExecutionOutput::default();
-        self.execute_request_with(roots, ctx, request, options, |payload| {
-            output.payloads.push(OwnedPayload::from(&payload));
-        })
-        .await;
-        output
     }
 }
 

@@ -1,8 +1,7 @@
 //! Transport-agnostic HTTP pieces: the request body type, payload helpers
 //! and a `multipart/mixed` part encoder for incremental delivery.
 
-use crate::exec::payload::PayloadKind;
-use crate::schema::{ExecutionOutput, OwnedPayload};
+use crate::exec::payload::{Payload, PayloadKind};
 use serde::{Deserialize, Serialize};
 
 /// A GraphQL-over-HTTP request body.
@@ -73,27 +72,23 @@ pub fn accepts_multipart(accept: Option<&str>) -> bool {
     })
 }
 
-/// Encodes one payload as a multipart part. Each part carries the delimiter
-/// that follows it (the closing one once nothing follows), so a client can
-/// read a streamed payload when it arrives, not when the next one starts.
-pub fn multipart_part(payload: &OwnedPayload) -> Vec<u8> {
-    let mut out = Vec::with_capacity(payload.json.len() + 64);
-    if payload.kind != PayloadKind::Subsequent {
+/// Encodes one payload as a multipart part, serializing it straight into the
+/// part. Each part carries the delimiter that follows it (the closing one
+/// once nothing follows), so a client can read a streamed payload when it
+/// arrives, not when the next one starts.
+pub fn multipart_part(payload: &Payload<'_>) -> Vec<u8> {
+    let mut out = Vec::new();
+    if payload.kind() != PayloadKind::Subsequent {
         out.extend_from_slice(b"\r\n---\r\n");
     }
     out.extend_from_slice(b"Content-Type: application/json; charset=utf-8\r\n\r\n");
-    out.extend_from_slice(&payload.json);
-    if payload.has_next == Some(true) {
+    serde_json::to_writer(&mut out, payload).expect("serialize payload");
+    if payload.has_next() == Some(true) {
         out.extend_from_slice(b"\r\n---\r\n");
     } else {
         out.extend_from_slice(b"\r\n-----\r\n");
     }
     out
-}
-
-/// Encodes a whole owned execution as one multipart body.
-pub fn multipart_body(output: &ExecutionOutput) -> Vec<u8> {
-    output.payloads.iter().flat_map(multipart_part).collect()
 }
 
 #[cfg(test)]

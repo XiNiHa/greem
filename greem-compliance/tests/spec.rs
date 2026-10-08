@@ -948,7 +948,7 @@ fn streamed_items_ship_in_list_order_per_parent() {
             },
             World::seeded(2, 4),
             greem::Operation {
-                document: &document,
+                document: document.clone(),
                 operation_name: None,
                 variables: Value::Null,
             },
@@ -1036,7 +1036,7 @@ fn reused_turn_slots_register_progress() {
         },
         World::seeded(1, 3),
         greem::Operation {
-            document: &document,
+            document: document.clone(),
             operation_name: None,
             variables: Value::Null,
         },
@@ -1922,7 +1922,7 @@ fn depth_counts_composites_defer_and_stream() {
                 },
                 World::seeded(1, 1),
                 greem::Operation {
-                    document: &document,
+                    document: document.clone(),
                     operation_name: None,
                     variables: Value::Null,
                 },

@@ -1,6 +1,7 @@
 //! The runtime end to end, over `greem-test-app`'s generated schema module
 //! and hand-written resolvers.
 
+use futures::StreamExt;
 use futures::executor::block_on;
 use greem::{
     Args, As, Context, Error, ErrorBehavior, ExecuteOptions, IncrementalDelivery, Items, Operation,
@@ -9,6 +10,7 @@ use greem::{
 use greem_test_app::app::{App, MutationRoot, QueryRoot, User, build_schema, users};
 use greem_test_app::schema;
 use serde_json::{Value, json};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 fn run(
@@ -26,7 +28,7 @@ fn run(
         },
         app,
         Operation {
-            document: &document,
+            document: document.clone(),
             operation_name: None,
             variables,
         },
@@ -77,7 +79,7 @@ fn set_based_calls_once_per_generation() {
             ..Default::default()
         },
         Operation {
-            document: &document,
+            document: document.clone(),
             operation_name: None,
             variables: Value::Null,
         },
@@ -261,7 +263,7 @@ fn depth_limit() {
         },
         App::default(),
         Operation {
-            document: &document,
+            document: document.clone(),
             operation_name: None,
             variables: Value::Null,
         },
@@ -380,8 +382,20 @@ fn stream_disabled_drains() {
     assert_eq!(v["data"], json!({"users": [{"id": "1"}, {"id": "2"}]}));
 }
 
-// A lazily streamed list from a real Stream, borrowing its parent.
-struct StreamRoot;
+// A lazily streamed list from a real Stream, borrowing its parent. With
+// `stall`, the list never ends, and its stream sets the flag when dropped.
+#[derive(Default)]
+struct StreamRoot {
+    stall: Option<Arc<AtomicBool>>,
+}
+
+struct SetOnDrop(Arc<AtomicBool>);
+
+impl Drop for SetOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
 impl Resolver<schema::Query::users, App> for StreamRoot {
     type Output<'obj>
         = Streamed<futures::stream::BoxStream<'obj, Result<User, Error>>>
@@ -395,10 +409,20 @@ impl Resolver<schema::Query::users, App> for StreamRoot {
     where
         'obj: 'call,
     {
-        use futures::StreamExt;
         Ok(parents
             .iter()
-            .map(|_| Streamed::new(futures::stream::iter(users().into_iter().map(Ok)).boxed()))
+            .map(|parent| {
+                let items = futures::stream::iter(users().into_iter().map(Ok));
+                let Some(dropped) = &parent.stall else {
+                    return Streamed::new(items.boxed());
+                };
+                let guard = SetOnDrop(dropped.clone());
+                let stall = futures::stream::once(async move {
+                    let _guard = guard;
+                    futures::future::pending().await
+                });
+                Streamed::new(items.chain(stall).boxed())
+            })
             .collect())
     }
 }
@@ -479,12 +503,12 @@ fn stream_lazy() {
         .unwrap();
     let output = block_on(schema.execute(
         Roots {
-            query: StreamRoot,
+            query: StreamRoot::default(),
             mutation: MutationRoot,
         },
         App::default(),
         Operation {
-            document: &document,
+            document: document.clone(),
             operation_name: None,
             variables: Value::Null,
         },
@@ -509,12 +533,12 @@ fn stream_lazy() {
     // Disabled: the same stream drains in place.
     let output = block_on(schema.execute(
         Roots {
-            query: StreamRoot,
+            query: StreamRoot::default(),
             mutation: MutationRoot,
         },
         App::default(),
         Operation {
-            document: &document,
+            document: document.clone(),
             operation_name: None,
             variables: Value::Null,
         },
@@ -522,6 +546,79 @@ fn stream_lazy() {
     ));
     let v: Value = serde_json::from_slice(&output.payloads[0].json).unwrap();
     assert_eq!(v["data"]["users"][1]["name"], json!("Bob"));
+}
+
+#[test]
+fn execution_waits_for_the_consumer_to_pull() {
+    let schema = build_schema();
+    let calls = Arc::new(Mutex::new(0));
+    let document = schema
+        .parse("{ users { id ... @defer { name } } }")
+        .unwrap();
+    let mut payloads = Box::pin(schema.execute_stream(
+        Roots {
+            query: QueryRoot,
+            mutation: MutationRoot,
+        },
+        App {
+            calls: Some(calls.clone()),
+            ..Default::default()
+        },
+        Operation {
+            document,
+            operation_name: None,
+            variables: Value::Null,
+        },
+        ExecuteOptions {
+            incremental: IncrementalDelivery::Enabled,
+            ..Default::default()
+        },
+        |payload| serde_json::to_value(&payload).unwrap(),
+    ));
+    let first = block_on(payloads.next()).unwrap();
+    assert_eq!(first["data"], json!({"users": [{"id": "1"}, {"id": "2"}]}));
+    // Query.users and User.id ran; the deferred User.name waits for a pull.
+    assert_eq!(*calls.lock().unwrap(), 2);
+    let rest: Vec<Value> = block_on(payloads.collect());
+    assert_eq!(*calls.lock().unwrap(), 3);
+    assert_eq!(rest.last().unwrap()["hasNext"], json!(false));
+}
+
+#[test]
+fn dropping_the_stream_cancels_execution() {
+    let schema = schema::Schema::<App>::builder()
+        .query::<StreamRoot>()
+        .mutation::<MutationRoot>()
+        .build()
+        .unwrap();
+    let dropped = Arc::new(AtomicBool::new(false));
+    let document = schema
+        .parse("{ users @stream(initialCount: 1) { name } }")
+        .unwrap();
+    let mut payloads = Box::pin(schema.execute_stream(
+        Roots {
+            query: StreamRoot {
+                stall: Some(dropped.clone()),
+            },
+            mutation: MutationRoot,
+        },
+        App::default(),
+        Operation {
+            document,
+            operation_name: None,
+            variables: Value::Null,
+        },
+        ExecuteOptions {
+            incremental: IncrementalDelivery::Enabled,
+            ..Default::default()
+        },
+        |payload| serde_json::to_value(&payload).unwrap(),
+    ));
+    let first = block_on(payloads.next()).unwrap();
+    assert_eq!(first["data"], json!({"users": [{"name": "Ann"}]}));
+    assert!(!dropped.load(Ordering::SeqCst));
+    drop(payloads);
+    assert!(dropped.load(Ordering::SeqCst));
 }
 
 // Objects behind `Arc` and `Box`, and owned list containers other than `Vec`.
@@ -599,7 +696,7 @@ fn owned_output_shapes() {
             },
             App::default(),
             Operation {
-                document: &document,
+                document: document.clone(),
                 operation_name: None,
                 variables: Value::Null,
             },
@@ -702,7 +799,7 @@ fn borrowed_output_shapes() {
         },
         App::default(),
         Operation {
-            document: &document,
+            document: document.clone(),
             operation_name: None,
             variables: Value::Null,
         },
@@ -774,7 +871,7 @@ fn failed_root_is_reported_once_at_its_position() {
         },
         App::default(),
         Operation {
-            document: &document,
+            document: document.clone(),
             operation_name: None,
             variables: Value::Null,
         },
