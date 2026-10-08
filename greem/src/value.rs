@@ -379,6 +379,54 @@ impl<Tag, T: ToLeaf<Tag>> ToLeaf<Tag> for Result<T, Error> {
     }
 }
 
+impl<'r, Tag, T> ToLeaf<Tag> for &'r Result<T, Error>
+where
+    &'r T: ToLeaf<Tag>,
+{
+    fn to_leaf<'a>(self) -> Result<Value<'a>, Error>
+    where
+        Self: 'a,
+    {
+        match self {
+            Ok(value) => value.to_leaf(),
+            Err(error) => Err(error.clone()),
+        }
+    }
+
+    fn leaf_error(&self) -> Option<Error> {
+        match self {
+            Ok(value) => <&'r T as ToLeaf<Tag>>::leaf_error(&value),
+            Err(error) => Some(error.clone()),
+        }
+    }
+
+    fn leaf_is_null(&self) -> bool {
+        self.as_ref()
+            .is_ok_and(|value| <&'r T as ToLeaf<Tag>>::leaf_is_null(&value))
+    }
+}
+
+/// A borrow of a borrowed leaf completes like the borrow it points to.
+impl<'x, Tag, T: ?Sized> ToLeaf<Tag> for &&'x T
+where
+    &'x T: ToLeaf<Tag>,
+{
+    fn to_leaf<'a>(self) -> Result<Value<'a>, Error>
+    where
+        Self: 'a,
+    {
+        (*self).to_leaf()
+    }
+
+    fn leaf_error(&self) -> Option<Error> {
+        <&'x T as ToLeaf<Tag>>::leaf_error(*self)
+    }
+
+    fn leaf_is_null(&self) -> bool {
+        <&'x T as ToLeaf<Tag>>::leaf_is_null(*self)
+    }
+}
+
 /// Tags for the built-in scalars, used as `Field::Type` at leaf positions.
 pub mod scalars {
     pub struct Int;
@@ -510,14 +558,6 @@ macro_rules! strings {
                 Ok(Value::Str(Cow::Borrowed(self)))
             }
         }
-        impl<'x> ToLeaf<$tag> for &'x &'x str {
-            fn to_leaf<'a>(self) -> Result<Value<'a>, Error>
-            where
-                Self: 'a,
-            {
-                Ok(Value::Str(Cow::Borrowed(self)))
-            }
-        }
         impl<'x> ToLeaf<$tag> for Cow<'x, str> {
             fn to_leaf<'a>(self) -> Result<Value<'a>, Error>
             where
@@ -526,7 +566,7 @@ macro_rules! strings {
                 Ok(Value::Str(self))
             }
         }
-        impl<'x> ToLeaf<$tag> for &'x Cow<'x, str> {
+        impl<'r, 'x> ToLeaf<$tag> for &'r Cow<'x, str> {
             fn to_leaf<'a>(self) -> Result<Value<'a>, Error>
             where
                 Self: 'a,
@@ -577,6 +617,31 @@ mod tests {
             <u64 as ToLeaf<scalars::ID>>::to_leaf(u64::MAX).unwrap(),
             Value::Str("18446744073709551615".into())
         );
+    }
+
+    #[test]
+    fn leaves_complete_through_a_borrow_of_any_lifetime() {
+        fn through_any_borrow<T>(value: &T) -> Result<Value<'_>, Error>
+        where
+            for<'q> &'q T: ToLeaf<scalars::String>,
+        {
+            value.to_leaf()
+        }
+        let text = String::from("x");
+        let x = Value::Str("x".into());
+        assert_eq!(through_any_borrow::<&str>(&text.as_str()).unwrap(), x);
+        assert_eq!(through_any_borrow::<&String>(&&text).unwrap(), x);
+        assert_eq!(
+            through_any_borrow::<Cow<str>>(&Cow::Borrowed(text.as_str())).unwrap(),
+            x
+        );
+        assert_eq!(
+            through_any_borrow::<Result<&str, Error>>(&Ok(text.as_str())).unwrap(),
+            x
+        );
+        let failed: Result<String, Error> = Err(Error::new("failed"));
+        assert!(through_any_borrow::<Result<String, Error>>(&failed).is_err());
+        assert!(ToLeaf::<scalars::String>::leaf_error(&&failed).is_some());
     }
 
     #[test]

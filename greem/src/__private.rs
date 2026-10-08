@@ -4,7 +4,7 @@
 pub use crate::error::{GraphQLError, Location, PathSegment};
 pub use crate::exec::complete::{
     Completes, Completion, FieldsCx, InnerKind, ObjectBatch, Pos, complete_as, complete_either,
-    field, introspection_field, typename_field, walk_as, walk_either,
+    either_ref, field, introspection_field, typename_field, walk_as, walk_either,
 };
 #[cfg(feature = "reference-executor")]
 pub use crate::exec::reference::{

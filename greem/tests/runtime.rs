@@ -4,8 +4,8 @@
 use futures::StreamExt;
 use futures::executor::block_on;
 use greem::{
-    Args, As, Context, Error, ErrorBehavior, ExecuteOptions, IncrementalDelivery, Items, Operation,
-    Resolver, Roots, Streamed,
+    Args, As, Context, Either, Error, ErrorBehavior, ExecuteOptions, IncrementalDelivery, Items,
+    Operation, Resolver, Roots, Streamed,
 };
 use greem_test_app::app::{App, MutationRoot, QueryRoot, User, build_schema, users};
 use greem_test_app::schema;
@@ -816,6 +816,152 @@ fn borrowed_output_shapes() {
             "ints": [[1, null], []],
         })
     );
+}
+
+// Wrappers borrowed from the parent object complete like their owned forms.
+type UserAs = As<schema::types::User, User>;
+type FallibleRows = Items<Sequence<Vec<Option<Result<i32, Error>>>>>;
+
+struct Wrapped {
+    users: Result<Vec<User>, Error>,
+    user: Result<Option<User>, Error>,
+    node: Option<Result<UserAs, Error>>,
+    search: Vec<Either<UserAs, As<schema::types::User, Box<User>>>>,
+    ints: FallibleRows,
+}
+
+fn wrapped(fail: bool) -> Wrapped {
+    let error = |at: &str| Error::new(format!("{at} failed"));
+    let mut search = users().into_iter();
+    Wrapped {
+        users: Ok(users()),
+        user: if fail {
+            Err(error("user"))
+        } else {
+            Ok(users().pop())
+        },
+        node: Some(if fail {
+            Err(error("node"))
+        } else {
+            Ok(As::new(users().remove(0)))
+        }),
+        search: vec![
+            Either::A(As::new(search.next().unwrap())),
+            Either::B(As::new(Box::new(search.next().unwrap()))),
+        ],
+        ints: Items(Sequence(vec![
+            vec![Some(Ok(1)), None, Some(Err(error("item")))],
+            Vec::new(),
+        ])),
+    }
+}
+
+struct OwnedWrapped {
+    fail: bool,
+}
+
+#[greem::object(schema = crate::schema, type = "Query", context = App)]
+impl OwnedWrapped {
+    fn users(&self) -> Result<Vec<User>, Error> {
+        wrapped(self.fail).users
+    }
+
+    fn user(&self) -> Result<Option<User>, Error> {
+        wrapped(self.fail).user
+    }
+
+    fn node(&self) -> Option<Result<UserAs, Error>> {
+        wrapped(self.fail).node
+    }
+
+    fn search(&self) -> Vec<Either<UserAs, As<schema::types::User, Box<User>>>> {
+        wrapped(self.fail).search
+    }
+
+    fn ints(&self) -> Option<FallibleRows> {
+        Some(wrapped(self.fail).ints)
+    }
+}
+
+struct BorrowedWrapped(Wrapped);
+
+#[greem::object(schema = crate::schema, type = "Query", context = App)]
+impl BorrowedWrapped {
+    fn users(&self) -> &Result<Vec<User>, Error> {
+        &self.0.users
+    }
+
+    fn user(&self) -> &Result<Option<User>, Error> {
+        &self.0.user
+    }
+
+    fn node(&self) -> Option<&Result<UserAs, Error>> {
+        self.0.node.as_ref()
+    }
+
+    fn search(&self) -> &Vec<Either<UserAs, As<schema::types::User, Box<User>>>> {
+        &self.0.search
+    }
+
+    fn ints(&self) -> Option<&FallibleRows> {
+        Some(&self.0.ints)
+    }
+}
+
+#[test]
+fn borrowed_wrappers_complete_like_owned_ones() {
+    macro_rules! execute {
+        ($root:ty, $value:expr) => {{
+            let schema = schema::Schema::<App>::builder()
+                .query::<$root>()
+                .mutation::<MutationRoot>()
+                .build()
+                .unwrap();
+            let document = schema
+                .parse(
+                    r#"{ users { name } user(id: "2") { name } node(id: "1") { ... on User { name } }
+                         search { ... on User { name } } ints }"#,
+                )
+                .unwrap();
+            let output = block_on(schema.execute(
+                Roots {
+                    query: $value,
+                    mutation: MutationRoot,
+                },
+                App::default(),
+                Operation {
+                    document,
+                    operation_name: None,
+                    variables: Value::Null,
+                },
+                ExecuteOptions::default(),
+            ));
+            serde_json::from_slice::<Value>(&output.payloads[0].json).unwrap()
+        }};
+    }
+
+    for fail in [false, true] {
+        let owned = execute!(OwnedWrapped, OwnedWrapped { fail });
+        let borrowed = execute!(BorrowedWrapped, BorrowedWrapped(wrapped(fail)));
+        assert_eq!(owned, borrowed, "fail: {fail}");
+        if !fail {
+            assert_eq!(
+                borrowed["data"],
+                json!({
+                    "users": [{"name": "Ann"}, {"name": "Bob"}],
+                    "user": {"name": "Bob"},
+                    "node": {"name": "Ann"},
+                    "search": [{"name": "Ann"}, {"name": "Bob"}],
+                    "ints": [[1, null, null], []],
+                })
+            );
+            assert_eq!(borrowed["errors"][0]["path"], json!(["ints", 0, 2]));
+        } else {
+            assert_eq!(borrowed["data"]["user"], Value::Null);
+            assert_eq!(borrowed["data"]["node"], Value::Null);
+            assert_eq!(borrowed["errors"].as_array().unwrap().len(), 3);
+        }
+    }
 }
 
 #[test]

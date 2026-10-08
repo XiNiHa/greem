@@ -952,6 +952,85 @@ impl Gen<'_> {
                     }
                 }
             }
+            // Borrowed wrappers complete as the same wrappers around references.
+            impl<'r, M, T, C> rt::Completes<&'r ::greem::As<M, T>, C> for super::types::#tag
+            where super::types::#tag: rt::Completes<::greem::As<M, &'r T>, C>,
+            {
+                fn walk<'a>(w: &mut rt::Walker<'_, C>, node: rt::NodeId, leaf: &rt::Leaf) -> Result<(), rt::Abort>
+                where &'r ::greem::As<M, T>: 'a, C: 'a,
+                {
+                    <Self as rt::Completes<::greem::As<M, &'r T>, C>>::walk(w, node, leaf)
+                }
+                fn first_error(value: &&'r ::greem::As<M, T>, indices: &mut ::std::vec::Vec<u32>, wanted: &dyn Fn(&[u32]) -> bool) -> ::core::option::Option<::greem::Error> {
+                    <Self as rt::Completes<::greem::As<M, &'r T>, C>>::first_error(&::greem::As::new(&value.0), indices, wanted)
+                }
+
+                fn complete<'a>(values: Vec<&'r ::greem::As<M, T>>, positions: Vec<rt::Pos>, cc: &mut rt::Completion<'a, '_, C>)
+                where &'r ::greem::As<M, T>: 'a, C: 'a,
+                {
+                    let values = values.into_iter().map(|v| ::greem::As::new(&v.0)).collect();
+                    <Self as rt::Completes<::greem::As<M, &'r T>, C>>::complete(values, positions, cc)
+                }
+                rt::reference! {
+                    fn reference<'v, 's: 'v>(value: &'r ::greem::As<M, T>, rc: &rt::RefCompletion<'s, C>) -> rt::futures::future::BoxFuture<'v, rt::RefValue>
+                    where &'r ::greem::As<M, T>: 'v, C: 'v,
+                    {
+                        <Self as rt::Completes<::greem::As<M, &'r T>, C>>::reference(::greem::As::new(&value.0), rc)
+                    }
+                }
+            }
+            impl<'r, A, B, C> rt::Completes<&'r ::greem::Either<A, B>, C> for super::types::#tag
+            where super::types::#tag: rt::Completes<::greem::Either<&'r A, &'r B>, C>,
+            {
+                fn walk<'a>(w: &mut rt::Walker<'_, C>, node: rt::NodeId, leaf: &rt::Leaf) -> Result<(), rt::Abort>
+                where &'r ::greem::Either<A, B>: 'a, C: 'a,
+                {
+                    <Self as rt::Completes<::greem::Either<&'r A, &'r B>, C>>::walk(w, node, leaf)
+                }
+                fn first_error(value: &&'r ::greem::Either<A, B>, indices: &mut ::std::vec::Vec<u32>, wanted: &dyn Fn(&[u32]) -> bool) -> ::core::option::Option<::greem::Error> {
+                    <Self as rt::Completes<::greem::Either<&'r A, &'r B>, C>>::first_error(&rt::either_ref(value), indices, wanted)
+                }
+
+                fn complete<'a>(values: Vec<&'r ::greem::Either<A, B>>, positions: Vec<rt::Pos>, cc: &mut rt::Completion<'a, '_, C>)
+                where &'r ::greem::Either<A, B>: 'a, C: 'a,
+                {
+                    let values = values.into_iter().map(rt::either_ref).collect();
+                    <Self as rt::Completes<::greem::Either<&'r A, &'r B>, C>>::complete(values, positions, cc)
+                }
+                rt::reference! {
+                    fn reference<'v, 's: 'v>(value: &'r ::greem::Either<A, B>, rc: &rt::RefCompletion<'s, C>) -> rt::futures::future::BoxFuture<'v, rt::RefValue>
+                    where &'r ::greem::Either<A, B>: 'v, C: 'v,
+                    {
+                        <Self as rt::Completes<::greem::Either<&'r A, &'r B>, C>>::reference(rt::either_ref(value), rc)
+                    }
+                }
+            }
+            impl<'r, X, C> rt::Completes<&'r Result<X, ::greem::Error>, C> for super::types::#tag
+            where super::types::#tag: rt::Completes<Result<&'r X, ::greem::Error>, C>,
+            {
+                fn walk<'a>(w: &mut rt::Walker<'_, C>, node: rt::NodeId, leaf: &rt::Leaf) -> Result<(), rt::Abort>
+                where &'r Result<X, ::greem::Error>: 'a, C: 'a,
+                {
+                    <Self as rt::Completes<Result<&'r X, ::greem::Error>, C>>::walk(w, node, leaf)
+                }
+                fn first_error(value: &&'r Result<X, ::greem::Error>, indices: &mut ::std::vec::Vec<u32>, wanted: &dyn Fn(&[u32]) -> bool) -> ::core::option::Option<::greem::Error> {
+                    <Self as rt::Completes<Result<&'r X, ::greem::Error>, C>>::first_error(&value.as_ref().map_err(Clone::clone), indices, wanted)
+                }
+
+                fn complete<'a>(values: Vec<&'r Result<X, ::greem::Error>>, positions: Vec<rt::Pos>, cc: &mut rt::Completion<'a, '_, C>)
+                where &'r Result<X, ::greem::Error>: 'a, C: 'a,
+                {
+                    let values = values.into_iter().map(|v| v.as_ref().map_err(Clone::clone)).collect();
+                    <Self as rt::Completes<Result<&'r X, ::greem::Error>, C>>::complete(values, positions, cc)
+                }
+                rt::reference! {
+                    fn reference<'v, 's: 'v>(value: &'r Result<X, ::greem::Error>, rc: &rt::RefCompletion<'s, C>) -> rt::futures::future::BoxFuture<'v, rt::RefValue>
+                    where &'r Result<X, ::greem::Error>: 'v, C: 'v,
+                    {
+                        <Self as rt::Completes<Result<&'r X, ::greem::Error>, C>>::reference(value.as_ref().map_err(Clone::clone), rc)
+                    }
+                }
+            }
         }
     }
 

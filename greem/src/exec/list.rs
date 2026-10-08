@@ -70,6 +70,22 @@ macro_rules! borrowed_slice {
 }
 borrowed_slice!([T], Vec<T>, Box<[T]>, Arc<[T]>);
 
+/// A borrow of a borrowed list completes like the borrow it points to.
+impl<'x, L: ?Sized> ListOutput for &&'x L
+where
+    &'x L: ListOutput,
+{
+    type Item = <&'x L as ListOutput>::Item;
+
+    fn into_items(self) -> impl Iterator<Item = Self::Item> {
+        (*self).into_items()
+    }
+
+    fn items(&self) -> impl Iterator<Item = impl Borrow<Self::Item>> {
+        ListOutput::items(*self)
+    }
+}
+
 impl<I> ListOutput for Items<I>
 where
     I: IntoIterator,
@@ -83,5 +99,21 @@ where
 
     fn items(&self) -> impl Iterator<Item = impl Borrow<I::Item>> {
         (&self.0).into_iter()
+    }
+}
+
+/// Borrowed, the collection completes whatever it yields by reference.
+impl<'x, I> ListOutput for &'x Items<I>
+where
+    &'x I: IntoIterator,
+{
+    type Item = <&'x I as IntoIterator>::Item;
+
+    fn into_items(self) -> impl Iterator<Item = Self::Item> {
+        (&self.0).into_iter()
+    }
+
+    fn items(&self) -> impl Iterator<Item = impl Borrow<Self::Item>> {
+        (*self).into_items()
     }
 }

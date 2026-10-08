@@ -950,6 +950,65 @@ where
     }
 }
 
+impl<'x, T, Ty, C> Completes<&'x Result<Option<T>, Error>, C> for Nullable<Ty>
+where
+    &'x T: Outputs<Ty, C> + Send,
+    T: Sync,
+    C: Send + Sync,
+{
+    fn walk<'a>(w: &mut Walker<'_, C>, node: NodeId, leaf: &LeafPath) -> Result<(), Abort>
+    where
+        &'x Result<Option<T>, Error>: 'a,
+        C: 'a,
+    {
+        <&'x T as Outputs<Ty, C>>::__walk(w, node, leaf)
+    }
+
+    fn first_error(
+        value: &&'x Result<Option<T>, Error>,
+        indices: &mut Vec<u32>,
+        wanted: &dyn Fn(&[u32]) -> bool,
+    ) -> Option<Error> {
+        <Nullable<Ty> as Completes<Result<Option<&'x T>, Error>, C>>::first_error(
+            &value.as_ref().map(Option::as_ref).map_err(Clone::clone),
+            indices,
+            wanted,
+        )
+    }
+
+    fn complete<'a>(
+        values: Vec<&'x Result<Option<T>, Error>>,
+        positions: Vec<Pos>,
+        cc: &mut Completion<'a, '_, C>,
+    ) where
+        &'x Result<Option<T>, Error>: 'a,
+        C: 'a,
+    {
+        let values = values
+            .into_iter()
+            .map(|value| value.as_ref().map(Option::as_ref).map_err(Clone::clone))
+            .collect();
+        <Nullable<Ty> as Completes<Result<Option<&'x T>, Error>, C>>::complete(
+            values, positions, cc,
+        );
+    }
+
+    #[cfg(feature = "reference-executor")]
+    fn reference<'v, 's: 'v>(
+        value: &'x Result<Option<T>, Error>,
+        rc: &RefCompletion<'s, C>,
+    ) -> BoxFuture<'v, RefValue>
+    where
+        &'x Result<Option<T>, Error>: 'v,
+        C: 'v,
+    {
+        <Nullable<Ty> as Completes<Result<Option<&'x T>, Error>, C>>::reference(
+            value.as_ref().map(Option::as_ref).map_err(Clone::clone),
+            rc,
+        )
+    }
+}
+
 impl<L, Ty, C> Completes<L, C> for List<Ty>
 where
     L: ListOutput,
@@ -1089,6 +1148,62 @@ where
     }
 }
 
+impl<'x, X, Ty, C> Completes<&'x Result<X, Error>, C> for List<Ty>
+where
+    List<Ty>: Completes<&'x X, C>,
+    C: Send + Sync,
+{
+    fn walk<'a>(w: &mut Walker<'_, C>, node: NodeId, leaf: &LeafPath) -> Result<(), Abort>
+    where
+        &'x Result<X, Error>: 'a,
+        C: 'a,
+    {
+        <List<Ty> as Completes<&'x X, C>>::walk(w, node, leaf)
+    }
+
+    fn first_error(
+        value: &&'x Result<X, Error>,
+        indices: &mut Vec<u32>,
+        wanted: &dyn Fn(&[u32]) -> bool,
+    ) -> Option<Error> {
+        <List<Ty> as Completes<Result<&'x X, Error>, C>>::first_error(
+            &value.as_ref().map_err(Clone::clone),
+            indices,
+            wanted,
+        )
+    }
+
+    fn complete<'a>(
+        values: Vec<&'x Result<X, Error>>,
+        positions: Vec<Pos>,
+        cc: &mut Completion<'a, '_, C>,
+    ) where
+        &'x Result<X, Error>: 'a,
+        C: 'a,
+    {
+        let values = values
+            .into_iter()
+            .map(|value| value.as_ref().map_err(Clone::clone))
+            .collect();
+        <List<Ty> as Completes<Result<&'x X, Error>, C>>::complete(values, positions, cc);
+    }
+
+    #[cfg(feature = "reference-executor")]
+    fn reference<'v, 's: 'v>(
+        value: &'x Result<X, Error>,
+        rc: &RefCompletion<'s, C>,
+    ) -> BoxFuture<'v, RefValue>
+    where
+        &'x Result<X, Error>: 'v,
+        C: 'v,
+    {
+        <List<Ty> as Completes<Result<&'x X, Error>, C>>::reference(
+            value.as_ref().map_err(Clone::clone),
+            rc,
+        )
+    }
+}
+
 impl<S, T, Ty, C> Completes<Streamed<S, Result<T, Error>>, C> for List<Ty>
 where
     S: Stream<Item = Result<T, Error>> + Send,
@@ -1210,6 +1325,14 @@ pub fn complete_either<'a, Ty, A, B, C>(
     }
 }
 
+/// A borrowed `Either` as an `Either` of references.
+pub fn either_ref<A, B>(value: &Either<A, B>) -> Either<&A, &B> {
+    match value {
+        Either::A(a) => Either::A(a),
+        Either::B(b) => Either::B(b),
+    }
+}
+
 pub fn walk_either<'a, Ty, A, B, C>(
     w: &mut Walker<'_, C>,
     node: NodeId,
@@ -1278,6 +1401,15 @@ mod tests {
         // An error the caller does not want is skipped, not returned.
         assert_eq!(search(&|at| at[0] == 1), (true, vec![1, 0]));
         assert_eq!(search(&|_| false), (false, vec![]));
+        // Borrowed rows of a borrowed list find the same position.
+        let rows: Vec<&Vec<f64>> = value.iter().collect();
+        let mut indices = Vec::new();
+        let error = <List<List<Float>> as Completes<&Vec<&Vec<f64>>, ()>>::first_error(
+            &&rows,
+            &mut indices,
+            &|_| true,
+        );
+        assert_eq!((error.is_some(), indices), (true, vec![0, 1]));
     }
 
     #[test]
