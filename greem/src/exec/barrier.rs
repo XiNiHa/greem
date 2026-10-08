@@ -11,6 +11,7 @@ use crate::exec::run::Loop;
 use crate::exec::scope::{Activity, FieldState, Scope};
 use crate::exec::settle;
 use crate::exec::state::{ErrorBehavior, GroupId, GroupKind, GroupState, Groups, Shared};
+use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::sync::atomic::Ordering;
 
@@ -120,19 +121,39 @@ impl UnshippedItems {
     }
 }
 
-/// The objects whose deferred field sets run under `g`.
-fn group_roots(root: &mut Scope<'_>, g: GroupId) -> Vec<(Vec<Step>, u32)> {
-    let mut found = Vec::new();
-    walk_scopes_mut(root, &mut Vec::new(), &mut |path, scope| {
-        if scope.set != 0 {
-            for (o, &og) in scope.groups.iter().enumerate() {
-                if og == g {
-                    found.push((path.to_vec(), o as u32));
-                }
+/// The objects whose deferred field sets run under each group, in tree order.
+struct GroupRoots {
+    paths: Vec<Vec<Step>>,
+    objects: HashMap<GroupId, Vec<(usize, u32)>>,
+}
+
+impl GroupRoots {
+    fn collect(root: &mut Scope<'_>) -> Self {
+        let mut index = GroupRoots {
+            paths: Vec::new(),
+            objects: HashMap::new(),
+        };
+        walk_scopes_mut(root, &mut Vec::new(), &mut |path, scope| {
+            if scope.set == 0 {
+                return;
             }
-        }
-    });
-    found
+            let at = index.paths.len();
+            index.paths.push(path.to_vec());
+            for (o, &g) in scope.groups.iter().enumerate() {
+                index.objects.entry(g).or_default().push((at, o as u32));
+            }
+        });
+        index
+    }
+
+    fn of(&self, g: GroupId) -> Vec<(Vec<Step>, u32)> {
+        self.objects
+            .get(&g)
+            .into_iter()
+            .flatten()
+            .map(|&(at, o)| (self.paths[at].clone(), o))
+            .collect()
+    }
 }
 
 /// Every error recorded beneath `roots`, in response order.
@@ -469,6 +490,8 @@ pub(crate) fn barrier(
         initial: None,
         shipped: Vec::new(),
         ready_shared: Vec::new(),
+        live: None,
+        roots: None,
     };
     barrier.close_serial_root();
     if let ControlFlow::Break(errors) = barrier.ship_groups() {
@@ -501,6 +524,11 @@ struct Barrier<'r, 'a> {
     /// Shared field sets that settled at this barrier; each ships with the
     /// first member fragment that completes.
     ready_shared: Vec<GroupId>,
+    /// The groups with unfinished work and the roots of each group, gathered
+    /// on first use: a barrier neither starts nor finishes work, nor creates
+    /// scopes.
+    live: Option<HashSet<GroupId>>,
+    roots: Option<GroupRoots>,
 }
 
 /// Whether a released group can complete at this barrier.
@@ -579,7 +607,7 @@ impl Barrier<'_, '_> {
         ControlFlow::Continue(())
     }
 
-    fn readiness(&self, g: GroupId, is_initial: bool) -> Readiness {
+    fn readiness(&mut self, g: GroupId, is_initial: bool) -> Readiness {
         let halted = matches!(self.groups.get(g).state, GroupState::Halted(_));
         let sharing = if is_initial {
             Vec::new()
@@ -609,7 +637,7 @@ impl Barrier<'_, '_> {
         if halted {
             return Readiness::Ready { halted, sharing };
         }
-        if self.root.is_live_for(g, self.groups) {
+        if self.is_live(g) {
             return Readiness::Wait;
         }
         // A fragment completes together with the sets it shares.
@@ -623,6 +651,27 @@ impl Barrier<'_, '_> {
             return Readiness::Wait;
         }
         Readiness::Ready { halted, sharing }
+    }
+
+    fn is_live(&mut self, g: GroupId) -> bool {
+        let (root, groups) = (&*self.root, &*self.groups);
+        self.live
+            .get_or_insert_with(|| {
+                let mut live = HashSet::new();
+                let _ = root.live_groups(groups, &mut |g| {
+                    live.insert(g);
+                    ControlFlow::Continue(())
+                });
+                live
+            })
+            .contains(&g)
+    }
+
+    /// The objects whose deferred field sets run under `g`.
+    fn group_roots(&mut self, g: GroupId) -> Vec<(Vec<Step>, u32)> {
+        self.roots
+            .get_or_insert_with(|| GroupRoots::collect(self.root))
+            .of(g)
     }
 
     /// Null propagation over `roots` under `Propagate`: the error that
@@ -679,7 +728,7 @@ impl Barrier<'_, '_> {
             self.groups.fail_halted(g);
             return;
         }
-        let roots = group_roots(self.root, g);
+        let roots = self.group_roots(g);
         match self.settle(&roots) {
             Some(error) => self.groups.get_mut(g).state = GroupState::Failed(Some(*error)),
             None => self.ready_shared.push(g),
@@ -700,7 +749,7 @@ impl Barrier<'_, '_> {
             });
             return;
         }
-        let roots = group_roots(self.root, g);
+        let roots = self.group_roots(g);
         let errors = root_errors(self.root, &roots);
         let failure = self.settle(&roots);
         let id = self.groups.assign_wire_id(g).to_string();
@@ -729,7 +778,7 @@ impl Barrier<'_, '_> {
             }
             self.groups.get_mut(s).state = GroupState::Completed;
             self.shipped.push(s);
-            let roots = group_roots(self.root, s);
+            let roots = self.group_roots(s);
             let errors = root_errors(self.root, &roots);
             ship_roots(self.root, &roots, errors, &id, &group_path, &mut self.out);
         }

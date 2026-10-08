@@ -4,6 +4,7 @@ use crate::exec::state::{GroupId, GroupState, Groups, Shared};
 use crate::plan::PlanId;
 use crate::tree::UsageId;
 use futures::future::BoxFuture;
+use std::ops::ControlFlow;
 use std::task::{Context as TaskContext, Poll};
 
 pub type FieldFuture<'a> = BoxFuture<'a, Column<'a>>;
@@ -243,7 +244,7 @@ impl<'a> Scope<'a> {
                 column
                     .stream
                     .as_ref()
-                    .is_some_and(|d| d.is_live_for(group, groups))
+                    .is_some_and(|d| d.live_groups(groups, &mut finds(group)).is_break())
                     || column.turns.iter().any(|turn| {
                         turn.children
                             .iter()
@@ -363,47 +364,56 @@ impl<'a> Scope<'a> {
 
     /// True when the objects of `group` under this scope have unfinished work.
     pub fn is_live_for(&self, group: GroupId, groups: &Groups) -> bool {
+        self.live_groups(groups, &mut finds(group)).is_break()
+    }
+
+    /// Visits every group whose objects under this scope have unfinished
+    /// work. A group may come more than once.
+    pub fn live_groups(
+        &self,
+        groups: &Groups,
+        f: &mut dyn FnMut(GroupId) -> ControlFlow<()>,
+    ) -> ControlFlow<()> {
         if self.activity == Activity::Quiescent {
-            return false;
+            return ControlFlow::Continue(());
         }
-        let has_group = self.groups.contains(&group);
-        if has_group {
-            if self.meta.serial {
-                if self.cursor < self.fields.len() {
-                    return true;
-                }
-            } else if self
-                .fields
+        let working = if self.meta.serial {
+            self.cursor < self.fields.len()
+        } else {
+            self.fields
                 .iter()
                 .any(|f| matches!(f, FieldState::Pending(_)))
-            {
-                return true;
+        };
+        if working {
+            for &g in &self.groups {
+                f(g)?;
             }
         }
         for column in self.columns() {
-            if let Some(driver) = &column.stream
-                && driver.is_live_for(group, groups)
-            {
-                return true;
+            if let Some(driver) = &column.stream {
+                driver.live_groups(groups, f)?;
             }
             for turn in &column.turns {
                 if turn.retired {
                     continue;
                 }
-                if turn
-                    .children
-                    .iter()
-                    .any(|c| c.with_dependent(|_, s| s.is_live_for(group, groups)))
-                {
-                    return true;
+                for child in &turn.children {
+                    child.with_dependent(|_, s| s.live_groups(groups, f))?;
                 }
             }
         }
-        self.deferred.iter().any(|d| match &d.state {
-            DeferredSetState::Waiting(_) => d.groups.contains(&group),
-            DeferredSetState::Running(scope) => scope.is_live_for(group, groups),
-            DeferredSetState::Dropped => false,
-        })
+        for d in &self.deferred {
+            match &d.state {
+                DeferredSetState::Waiting(_) => {
+                    for &g in &d.groups {
+                        f(g)?;
+                    }
+                }
+                DeferredSetState::Running(scope) => scope.live_groups(groups, f)?,
+                DeferredSetState::Dropped => {}
+            }
+        }
+        ControlFlow::Continue(())
     }
 
     /// Every object of this scope, and every deferred set under it, is dead.
@@ -429,6 +439,17 @@ impl<'a> Scope<'a> {
             if let Some(scope) = deferred.scope_mut() {
                 scope.clear_fresh();
             }
+        }
+    }
+}
+
+/// A `live_groups` visitor that stops at `group`.
+fn finds(group: GroupId) -> impl FnMut(GroupId) -> ControlFlow<()> {
+    move |g| {
+        if g == group {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
         }
     }
 }

@@ -7,6 +7,7 @@ use crate::resolver::{Outputs, Shape};
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use std::marker::PhantomData;
+use std::ops::ControlFlow;
 use std::task::{Context as TaskContext, Poll};
 
 /// The type-erased driver of one streamed (or lazily drained) list column.
@@ -21,8 +22,14 @@ pub trait StreamDriver<'a>: Send {
     fn make_turn(&mut self, column: &mut Column<'a>) -> bool;
     /// All sources ended and nothing is buffered.
     fn is_done(&self) -> bool;
-    /// The parent whose stream group is `group` still has a live source or buffered items.
-    fn is_live_for(&self, group: GroupId, groups: &Groups) -> bool;
+    /// Visits the groups whose completion this driver still holds back:
+    /// each live parent's stream group, and the deferred groups it carries
+    /// whose field sets its items can still produce. A group may come twice.
+    fn live_groups(
+        &self,
+        groups: &Groups,
+        f: &mut dyn FnMut(GroupId) -> ControlFlow<()>,
+    ) -> ControlFlow<()>;
     fn groups(&self) -> &[GroupId];
     /// Whether `groups` are this driver's own stream groups. A lazily drained
     /// list holds its parents' groups instead, which are not its to announce,
@@ -402,28 +409,37 @@ where
         self.sources.iter().all(Option::is_none) && self.buffer.is_empty()
     }
 
-    fn is_live_for(&self, group: GroupId, groups: &Groups) -> bool {
+    fn live_groups(
+        &self,
+        groups: &Groups,
+        f: &mut dyn FnMut(GroupId) -> ControlFlow<()>,
+    ) -> ControlFlow<()> {
         // A live source may still produce items whose deferred field sets
         // belong to a group the parent object carries; that group cannot
         // complete before the stream does.
-        // A stream delivered under `group` (a descendant) cannot hold it back:
-        // it is only announced once `group` ships.
-        self.groups.iter().enumerate().any(|(p, &g)| {
-            let live = self.sources[p].is_some() || self.buffer.iter().any(|(q, _)| *q == p);
+        // A stream delivered under a carried group (a descendant) cannot hold
+        // it back: it is only announced once that group ships.
+        for (p, &g) in self.groups.iter().enumerate() {
+            if self.sources[p].is_none() && !self.buffer.iter().any(|(q, _)| *q == p) {
+                continue;
+            }
+            f(g)?;
             let parent = &self.cx.meta.objects[self.positions[p].object as usize];
-            // The parent carries `group` and this stream's items can still
-            // produce field sets deferred under that group's usage.
-            let carries = parent.pending.iter().any(|(_, pg)| *pg == group)
-                && !groups.is_ancestor(group, g)
-                && match &groups.get(group).kind {
-                    crate::exec::state::GroupKind::Defer { usage, .. } => self.cx.header.fields
-                        [self.field as usize]
+            for &(_, carried) in &parent.pending {
+                if groups.is_ancestor(carried, g) {
+                    continue;
+                }
+                if let crate::exec::state::GroupKind::Defer { usage, .. } =
+                    &groups.get(carried).kind
+                    && self.cx.header.fields[self.field as usize]
                         .beneath
-                        .contains(usage),
-                    _ => false,
-                };
-            live && (g == group || carries)
-        })
+                        .contains(usage)
+                {
+                    f(carried)?;
+                }
+            }
+        }
+        ControlFlow::Continue(())
     }
 
     fn groups(&self) -> &[GroupId] {
