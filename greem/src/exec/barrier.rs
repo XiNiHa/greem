@@ -8,7 +8,7 @@ use crate::exec::payload::{
     PendingEntry, Step,
 };
 use crate::exec::run::Loop;
-use crate::exec::scope::{Activity, FieldState, Scope};
+use crate::exec::scope::{Activity, FieldState, Scope, ScopeMeta};
 use crate::exec::settle;
 use crate::exec::state::{ErrorBehavior, GroupId, GroupKind, GroupState, Groups, Shared};
 use std::collections::{HashMap, HashSet};
@@ -96,10 +96,8 @@ impl UnshippedItems {
                 }
                 for range in column.turns.iter().skip(1).flat_map(|turn| &turn.ranges) {
                     if !range.shipped {
-                        let mut path = scope.meta.objects[range.object as usize].path.clone();
-                        path.push(PathSegment::Key(
-                            header.fields[column.field as usize].key.clone(),
-                        ));
+                        let key = &header.fields[column.field as usize].key;
+                        let path = scope.meta.path_to(range.object, key, &[]);
                         items.push((path, range.start_index, range.len));
                     }
                 }
@@ -108,8 +106,12 @@ impl UnshippedItems {
         UnshippedItems(items)
     }
 
-    /// Whether the object at `path` sits at or beneath one of these items.
-    fn contain(&self, path: &[PathSegment]) -> bool {
+    /// Whether `object` sits at or beneath one of these items.
+    fn contain(&self, meta: &ScopeMeta<'_>, object: u32) -> bool {
+        if self.0.is_empty() {
+            return false;
+        }
+        let path = meta.path(object);
         self.0.iter().any(|(list, start, len)| {
             path.len() > list.len()
                 && path[..list.len()] == list[..]
@@ -199,9 +201,7 @@ fn ship_roots(
     for (path, object) in roots {
         let object = *object;
         with_scope_at_mut(root, path, &mut |scope| settle::mark_alive(scope, object));
-        let object_path = with_scope_at_mut(root, path, &mut |scope| {
-            scope.meta.objects[object as usize].path.clone()
-        });
+        let object_path = with_scope_at_mut(root, path, &mut |scope| scope.meta.path(object));
         out.incremental.push(IncrementalEntry {
             id: id.to_owned(),
             depth: object_path.len(),
@@ -308,7 +308,7 @@ fn announce_children(
                 }
                 if !alive {
                     // The parent payload nulled this object: its groups never run.
-                    if !unshipped.contain(&meta.objects[object].path) {
+                    if !unshipped.contain(meta, object as u32) {
                         groups.get_mut(g).state = GroupState::Dropped;
                     }
                     continue;
@@ -358,7 +358,7 @@ fn announce_children(
                 }
                 let parent_object = driver.parent_object(p);
                 if !scope.alive[parent_object as usize] {
-                    if !unshipped.contain(&scope.meta.objects[parent_object as usize].path) {
+                    if !unshipped.contain(scope.meta, parent_object) {
                         groups.get_mut(g).state = GroupState::Dropped;
                     }
                     continue;

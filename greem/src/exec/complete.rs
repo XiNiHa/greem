@@ -3,11 +3,12 @@
 //! completion impl implements; `Outputs` is its user-facing bridge.
 
 use crate::context::{Context, HintAddr};
-use crate::error::{Error, GraphQLError, PathSegment};
+use crate::error::{Error, GraphQLError};
 use crate::exec::column::{Column, Inner, Slot, Turn};
 use crate::exec::list::ListOutput;
 use crate::exec::scope::{
-    Batch, DeferredSet, DeferredSetState, FieldFuture, Frame, ObjectMeta, Scope, ScopeMeta,
+    Batch, DeferredSet, DeferredSetState, FieldFuture, Frame, ObjectMeta, ParentLink, Scope,
+    ScopeMeta,
 };
 use crate::exec::state::{GroupId, GroupKind, Shared};
 use crate::exec::stream::StreamState;
@@ -44,7 +45,7 @@ pub struct FieldsCx<'a, C> {
     pub table: &'a PlanTable,
     pub header: &'a PlanHeader,
     pub entry: PlanId,
-    pub meta: &'a ScopeMeta,
+    pub meta: &'a ScopeMeta<'a>,
     pub contexts: &'a [Context<'a, C>],
     pub groups: Vec<GroupId>,
 }
@@ -159,9 +160,7 @@ impl<'a, C> Completion<'a, '_, C> {
         let group = self.cx.groups[pos.object as usize];
         self.cx.shared.halt(group, || {
             let field = &self.cx.header.fields[self.field as usize];
-            let mut path = self.cx.meta.objects[pos.object as usize].path.clone();
-            path.push(PathSegment::Key(field.key.clone()));
-            path.extend(pos.indices.iter().map(|&i| PathSegment::Index(i as usize)));
+            let path = self.cx.meta.path_to(pos.object, &field.key, &pos.indices);
             GraphQLError::from_error(&error, field.spans.clone(), path)
         });
         let id = self.column.record_error(
@@ -286,15 +285,11 @@ impl<'a, C: Send + Sync + 'a> Completion<'a, '_, C> {
             .lookup(node, &self.leaf)
             .expect("plan entry exists for every reachable (node, leaf)");
         let child_header = self.cx.table.header(entry);
-        let key = field.key.clone();
         let mut objects = Vec::with_capacity(values.len());
         {
             let mut groups = self.cx.shared.groups();
             for pos in &positions {
                 let parent = &self.cx.meta.objects[pos.object as usize];
-                let mut path = parent.path.clone();
-                path.push(PathSegment::Key(key.clone()));
-                path.extend(pos.indices.iter().map(|&i| PathSegment::Index(i as usize)));
                 let mut pending = parent.pending.clone();
                 let group = self.cx.groups[pos.object as usize];
                 for &usage in &child_header.introduced {
@@ -317,7 +312,7 @@ impl<'a, C: Send + Sync + 'a> Completion<'a, '_, C> {
                         GroupKind::Defer {
                             usage,
                             label: usage_def.label.clone(),
-                            path: path.clone(),
+                            path: self.cx.meta.path_to(pos.object, &field.key, &pos.indices),
                             after,
                         },
                         parent_group,
@@ -332,8 +327,7 @@ impl<'a, C: Send + Sync + 'a> Completion<'a, '_, C> {
                 objects.push(ObjectMeta {
                     group,
                     parent: pos.object,
-                    indices: pos.indices.to_vec(),
-                    path,
+                    indices: pos.indices.clone(),
                     pending,
                     shared,
                 });
@@ -359,6 +353,10 @@ impl<'a, C: Send + Sync + 'a> Completion<'a, '_, C> {
                 generation: self.generation + 1,
                 objects,
                 serial: false,
+                parent: Some(ParentLink {
+                    meta: self.cx.meta,
+                    key: &field.key,
+                }),
             },
             shared: self.cx.shared,
             app: self.cx.app,
@@ -401,19 +399,14 @@ impl<'a, C: Send + Sync + 'a> Completion<'a, '_, C> {
             positions
                 .iter()
                 .map(|pos| match &streamed {
-                    Some(info) => {
-                        let parent = &self.cx.meta.objects[pos.object as usize];
-                        let mut path = parent.path.clone();
-                        path.push(PathSegment::Key(field.key.clone()));
-                        table.alloc(
-                            GroupKind::Stream {
-                                node: field.child.unwrap_or(0),
-                                label: info.label.clone(),
-                                path,
-                            },
-                            self.cx.groups[pos.object as usize],
-                        )
-                    }
+                    Some(info) => table.alloc(
+                        GroupKind::Stream {
+                            node: field.child.unwrap_or(0),
+                            label: info.label.clone(),
+                            path: self.cx.meta.path_to(pos.object, &field.key, &[]),
+                        },
+                        self.cx.groups[pos.object as usize],
+                    ),
                     None => self.cx.groups[pos.object as usize],
                 })
                 .collect()
@@ -443,7 +436,7 @@ impl<'a, C: Send + Sync + 'a> Completion<'a, '_, C> {
 pub struct ObjectBatch<'a, T, Ty, C> {
     pub values: Vec<T>,
     pub contexts: Vec<Context<'a, C>>,
-    pub meta: ScopeMeta,
+    pub meta: ScopeMeta<'a>,
     pub shared: &'a Shared,
     pub app: &'a C,
     pub table: &'a PlanTable,

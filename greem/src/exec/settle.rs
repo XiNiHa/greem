@@ -1,7 +1,7 @@
 //! Post-hoc null propagation, liveness marking and error collection over the
 //! completed columns of a delivery group.
 
-use crate::error::{GraphQLError, PathSegment};
+use crate::error::GraphQLError;
 use crate::exec::column::{Column, ErrorId, Inner, Leaf, ObjSlot, Slot, TurnRange};
 use crate::exec::scope::{FieldState, Scope, ScopeMeta};
 use crate::plan::PlanTable;
@@ -12,21 +12,14 @@ pub(crate) type Settled = Result<(), Box<GraphQLError>>;
 
 pub(crate) fn error_of(
     table: &PlanTable,
-    meta: &ScopeMeta,
+    meta: &ScopeMeta<'_>,
     column: &Column<'_>,
     turn: usize,
     id: ErrorId,
 ) -> GraphQLError {
     let record = &column.turns[turn].errors[id as usize];
     let field = &table.header(meta.entry).fields[column.field as usize];
-    let mut path = meta.objects[record.object as usize].path.clone();
-    path.push(PathSegment::Key(field.key.clone()));
-    path.extend(
-        record
-            .indices
-            .iter()
-            .map(|&i| PathSegment::Index(i as usize)),
-    );
+    let path = meta.path_to(record.object, &field.key, &record.indices);
     GraphQLError::from_error(&record.error, field.spans.clone(), path)
 }
 
@@ -46,7 +39,7 @@ pub(crate) fn settle_object(scope: &mut Scope<'_>, object: u32) -> Settled {
 
 pub(crate) fn settle_column(
     table: &PlanTable,
-    meta: &ScopeMeta,
+    meta: &ScopeMeta<'_>,
     column: &mut Column<'_>,
     object: u32,
 ) -> Settled {
@@ -80,7 +73,7 @@ pub(crate) fn settle_column(
 /// Settles the items of one stream turn range; `Err` fails the stream group.
 pub(crate) fn settle_range(
     table: &PlanTable,
-    meta: &ScopeMeta,
+    meta: &ScopeMeta<'_>,
     column: &mut Column<'_>,
     turn: usize,
     range: TurnRange,
@@ -93,7 +86,7 @@ pub(crate) fn settle_range(
 
 fn settle_level(
     table: &PlanTable,
-    meta: &ScopeMeta,
+    meta: &ScopeMeta<'_>,
     column: &mut Column<'_>,
     turn: usize,
     level: usize,
@@ -125,7 +118,7 @@ fn settle_level(
 
 fn settle_inner(
     table: &PlanTable,
-    meta: &ScopeMeta,
+    meta: &ScopeMeta<'_>,
     column: &mut Column<'_>,
     turn: usize,
     slot: u32,

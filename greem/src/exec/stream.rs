@@ -76,13 +76,12 @@ impl<'a, T, Ty, C> StreamState<'a, T, Ty, C> {
         let object = self.positions[p].object;
         let field = &self.cx.header.fields[self.field as usize];
         self.cx.shared.halt(group, || {
-            let mut path = self.cx.meta.objects[object as usize].path.clone();
-            path.push(PathSegment::Key(field.key.clone()));
+            let mut path = self
+                .cx
+                .meta
+                .path_to(object, &field.key, &self.positions[p].indices);
             path.extend(
-                self.positions[p]
-                    .indices
-                    .iter()
-                    .chain(std::iter::once(&index))
+                std::iter::once(&index)
                     .chain(beneath)
                     .map(|&i| PathSegment::Index(i as usize)),
             );

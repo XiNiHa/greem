@@ -13,21 +13,70 @@ pub type FieldFuture<'a> = BoxFuture<'a, Column<'a>>;
 #[derive(Clone, Debug)]
 pub struct ObjectMeta {
     pub group: GroupId,
+    /// The parent scope's object this one hangs off, and the list indices
+    /// below it.
     pub parent: u32,
-    pub indices: Vec<u32>,
-    pub path: Vec<PathSegment>,
+    pub indices: SmallVec<[u32; 4]>,
     /// Deferred group instances this object participates in: (usage, group).
     pub pending: SmallVec<[(UsageId, GroupId); 2]>,
     /// The groups of the field sets several of those fragments share: (set, group).
     pub shared: Vec<(usize, GroupId)>,
 }
 
-pub struct ScopeMeta {
+pub struct ScopeMeta<'a> {
     pub entry: PlanId,
     pub generation: u32,
     pub objects: Vec<ObjectMeta>,
     /// Mutation root: resolve fields one at a time, each subtree to completion.
     pub serial: bool,
+    /// `None` at the root.
+    pub parent: Option<ParentLink<'a>>,
+}
+
+/// Where a scope hangs in the response: the parent scope's objects and the
+/// key of the field whose outputs it holds.
+#[derive(Clone, Copy)]
+pub struct ParentLink<'a> {
+    pub meta: &'a ScopeMeta<'a>,
+    pub key: &'a str,
+}
+
+impl ScopeMeta<'_> {
+    /// The response path of `object`, rebuilt from the parent links.
+    pub fn path(&self, object: u32) -> Vec<PathSegment> {
+        let mut path = Vec::with_capacity(self.depth(object));
+        self.push_path(object, &mut path);
+        path
+    }
+
+    /// The path of `object`'s field `key`, then the list `indices` below it.
+    pub fn path_to(&self, object: u32, key: &str, indices: &[u32]) -> Vec<PathSegment> {
+        let mut path = Vec::with_capacity(self.depth(object) + 1 + indices.len());
+        self.push_path(object, &mut path);
+        push_field(&mut path, key, indices);
+        path
+    }
+
+    /// The length of `object`'s path.
+    pub fn depth(&self, object: u32) -> usize {
+        self.parent.map_or(0, |link| {
+            let o = &self.objects[object as usize];
+            link.meta.depth(o.parent) + 1 + o.indices.len()
+        })
+    }
+
+    fn push_path(&self, object: u32, path: &mut Vec<PathSegment>) {
+        if let Some(link) = self.parent {
+            let o = &self.objects[object as usize];
+            link.meta.push_path(o.parent, path);
+            push_field(path, link.key, &o.indices);
+        }
+    }
+}
+
+fn push_field(path: &mut Vec<PathSegment>, key: &str, indices: &[u32]) {
+    path.push(PathSegment::Key(key.to_owned()));
+    path.extend(indices.iter().map(|&i| PathSegment::Index(i as usize)));
 }
 
 /// The owner half of a frame: the completed output batch a scope borrows.
@@ -98,7 +147,7 @@ pub enum Activity {
 }
 
 pub struct Scope<'a> {
-    pub meta: &'a ScopeMeta,
+    pub meta: &'a ScopeMeta<'a>,
     pub shared: &'a Shared,
     /// Which field set of the Plan entry this scope runs (0 = immediate).
     pub set: usize,
@@ -128,7 +177,7 @@ impl Drop for Scope<'_> {
 
 impl<'a> Scope<'a> {
     pub fn new(
-        meta: &'a ScopeMeta,
+        meta: &'a ScopeMeta<'a>,
         shared: &'a Shared,
         set: usize,
         groups: Vec<GroupId>,
