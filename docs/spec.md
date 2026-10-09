@@ -1,8 +1,7 @@
-# greem core: the walking skeleton
+# greem core
 
-Status: the core design is decided and runs end-to-end in this repository.
-This document is the map from the decisions to the code; the code is the
-source of truth. Read the generated schema module first when you want to see
+The core design as it runs in this repository; the code is the source of
+truth. Read the generated schema module first when you want to see
 what codegen emits: build any consumer and open `target/debug/build/<crate>-*/out/*.rs`
 (the compliance crate's `property.rs` is the largest example).
 
@@ -91,7 +90,7 @@ impl Resolver<schema::User::posts, App> for User {
 `#[greem::object(schema = crate::schema, type = "User", context = App)]` emits
 one `Resolver` impl per method, under the method's own `#[cfg]`/`#[cfg_attr]`
 (`&self` methods join per object; a leading `parents` parameter is set-based); `#[greem(name)]`, `#[greem(hints = "field")]`
-and `#[greem(plan = "field")]` as in ticket 11, each generated hook under its
+and `#[greem(plan = "field")]`, each generated hook under its
 hook method's own `#[cfg]`/`#[cfg_attr]`. See `examples/axum/src/main.rs`.
 
 ## What codegen emits
@@ -286,7 +285,9 @@ would cross a delivery boundary fails the group instead.
   completes with the same error. `IncrementalDelivery::Disabled` makes the
   tree ignore both directives: their arguments are not validated, though
   merged fields must still agree on `@stream` (its resolved arguments,
-  however the directive is written). A fragment spread reached through
+  however the directive is written; disagreement is a request error,
+  graphql-js's rule, which apollo-compiler does not check). A fragment
+  spread reached through
   several enclosing fragments is collected once per enclosing fragment, so
   each copy of its nested defers keeps its own dependency.
 - Deferred groups that depend on a stream outside their own delivery (a
@@ -312,9 +313,9 @@ has no setting.
 `greem-reference` walks depth-first with a one-element parent slice per object,
 builds `serde_json::Value` directly and bubbles nulls by returning `Err` up the
 recursion; it shares the tree, the plan walk and apollo's introspection with
-the BFS and nothing else. Its per-tag support is the `Completes::reference`
-method, which replaces the two support traits sketched in ticket 12 with one
-hidden method. It exists only under greem's `reference-executor` feature:
+the BFS and nothing else. Its per-tag support is the hidden
+`Completes::reference` method. It exists only under greem's
+`reference-executor` feature:
 codegen always emits it inside `greem::__private::reference!`, which keeps it
 when the feature is on and drops it otherwise, so the same generated module
 builds either way. `greem-reference` and `greem-compliance` enable the feature;
@@ -328,9 +329,9 @@ yield counts under a single-threaded executor) and checks: BFS ≡ DFS on ordere
 incremental stream (root lists and `drafts` may stream; stream capacity varies
 from 1 up to the default, so streams split into turns that finish at different
 barriers) folds to the Disabled result whenever no group failed and no
-error sits beneath a propagated null (ticket 10's precondition, since work under
-a null is dropped, not delivered). Ticket 11 adds a third precondition the
-harness does not exercise: hint writers must not read their delivery group,
+error sits beneath a propagated null (work under a null is dropped, not
+delivered). A third precondition the harness does not exercise: hint writers
+must not read their delivery group,
 because a group-sensitive hint may legitimately change a field's result between
 Enabled and Disabled without any error. The property generator never selects
 the schema's one group-reading writer (`User.tag`), so the property is
@@ -340,24 +341,3 @@ excluded behavior with the other two preconditions intact; BFS
 call count never exceeds the reference's;
 byte-identical output across runs and interleavings; the depth limit is exact
 and shared with the reference.
-
-## Deviations from the tickets
-
-- `Context` carries a request lifetime (`Context<'req, C>`) so the per-field
-  views are plain borrows; ticket 05 wrote it without one.
-- Reference support is `Completes::reference` plus `reference_object` /
-  `reference_field` helpers, not `ReferenceDispatch` / `ReferenceComplete`
-  (ticket 12).
-- Error ids are local to the column that owns the slot (ticket 08).
-- A finished subtree is marked quiescent at `advance` so later polls and
-  liveness checks skip it; without it 1,000 parked mutation roots were quadratic.
-- Merged fields whose occurrences carry different `@stream` directives are a
-  request error (graphql-js's rule; apollo-compiler does not check it).
-- The cardinality failure is a framework error only; no debug assertion.
-
-## Not in the skeleton
-
-Left as the map's follow-ups: `#[derive(greem::Abstract)]` (designed in ticket
-15), the graphql-js fixture port onto area schemas, `greem-bench`, the
-`onError` wire attribute, SSE transport, the dataloader primitive, and tree
-caching.
