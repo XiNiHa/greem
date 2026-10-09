@@ -6,11 +6,12 @@ use crate::context::{Context, HintAddr};
 use crate::error::{Error, GraphQLError};
 use crate::exec::column::{Column, ErrorId, ErrorRecord, Inner, Slot, Storage, Stored, Turn};
 use crate::exec::list::ListOutput;
+use crate::exec::payload::Step;
 use crate::exec::scope::{
     Batch, DeferredSet, DeferredSetState, FieldFuture, Frame, ObjectMeta, ParentLink, Scope,
-    ScopeMeta,
+    ScopeMeta, Signal,
 };
-use crate::exec::state::{GroupId, GroupKind, Shared};
+use crate::exec::state::{ErrorBehavior, GroupId, GroupKind, Shared};
 use crate::exec::stream::{StreamDriver, StreamState};
 use crate::plan::{Leaf as LeafPath, PlanHeader, PlanId, PlanTable, Walker};
 use crate::resolver::{
@@ -48,7 +49,12 @@ pub struct FieldsCx<'a, C> {
     pub entry: PlanId,
     pub meta: &'a ScopeMeta<'a>,
     pub contexts: &'a [Context<'a, C>],
-    pub groups: Vec<GroupId>,
+    /// Per object: the delivery group its outputs belong to.
+    pub groups: Arc<[GroupId]>,
+    /// The scope's path, which its child scopes extend.
+    pub path: Arc<[Step]>,
+    /// The scope's signal: what runs under it wakes and flags through it.
+    pub signal: Arc<Signal>,
     /// The frame owner's kept outputs, which turn 0 completes from.
     pub keep: &'a KeptOutputs<C>,
 }
@@ -64,6 +70,8 @@ impl<C> Clone for FieldsCx<'_, C> {
             meta: self.meta,
             contexts: self.contexts,
             groups: self.groups.clone(),
+            path: self.path.clone(),
+            signal: self.signal.clone(),
             keep: self.keep,
         }
     }
@@ -151,6 +159,8 @@ pub struct Completion<'a, 'c, C> {
     pub(crate) level: usize,
     pub(crate) leaf: LeafPath,
     pub(crate) generation: u32,
+    /// The turn being completed, which child scopes' paths name.
+    pub(crate) turn: u32,
 }
 
 impl<'a, 'c, C> Completion<'a, 'c, C> {
@@ -186,6 +196,7 @@ impl<'a, 'c, C> Completion<'a, 'c, C> {
             level: 0,
             leaf,
             generation,
+            turn: 0,
         }
     }
 }
@@ -218,6 +229,10 @@ impl<'a, C> Completion<'a, '_, C> {
 
     pub fn error(&mut self, pos: &Pos, error: Error) {
         let group = self.cx.groups[pos.object as usize];
+        if self.cx.shared.behavior == ErrorBehavior::Halt {
+            // A halted stream group is failed by the barrier at its column.
+            self.cx.signal.raise(crate::exec::scope::STREAM);
+        }
         self.cx.shared.halt(group, || {
             let field = &self.cx.header.fields[self.field as usize];
             let path = self.cx.meta.path_to(pos.object, &field.key, &pos.indices);
@@ -338,6 +353,18 @@ impl<'a, C: Send + Sync + 'a> Completion<'a, '_, C> {
             .lookup(node, &self.leaf)
             .expect("plan entry exists for every reachable (node, leaf)");
         let child_header = self.cx.table.header(entry);
+        let child = self.stored.children.len() as u32;
+        let path: Arc<[Step]> = self
+            .cx
+            .path
+            .iter()
+            .copied()
+            .chain(std::iter::once(Step::Child {
+                field: self.field,
+                turn: self.turn,
+                child,
+            }))
+            .collect();
         let mut objects = Vec::with_capacity(values.len());
         {
             let mut groups = self.cx.shared.groups();
@@ -370,6 +397,7 @@ impl<'a, C: Send + Sync + 'a> Completion<'a, '_, C> {
                         },
                         parent_group,
                     );
+                    groups.set_carrier(g, path.clone(), objects.len() as u32);
                     pending.push((usage, g));
                 }
                 groups.retain(group);
@@ -401,6 +429,8 @@ impl<'a, C: Send + Sync + 'a> Completion<'a, '_, C> {
         let batch: ObjectBatch<'a, T, Ty, C> = ObjectBatch {
             values,
             contexts,
+            path,
+            signal: Signal::child(&self.cx.signal),
             meta: ScopeMeta {
                 entry,
                 generation: self.generation + 1,
@@ -419,7 +449,6 @@ impl<'a, C: Send + Sync + 'a> Completion<'a, '_, C> {
             keep: KeptOutputs::new(),
             tag: PhantomData,
         };
-        let child = self.stored.children.len() as u32;
         self.stored
             .children
             .push(Frame::from_batch(Box::new(batch)));
@@ -496,6 +525,8 @@ impl<'a, C: Send + Sync + 'a> Completion<'a, '_, C> {
 pub struct ObjectBatch<'a, T, Ty, C> {
     pub values: Vec<T>,
     pub contexts: Vec<Context<'a, C>>,
+    pub path: Arc<[Step]>,
+    pub signal: Arc<Signal>,
     pub meta: ScopeMeta<'a>,
     pub shared: &'a Shared,
     pub app: &'a C,
@@ -510,9 +541,17 @@ pub struct ObjectBatch<'a, T, Ty, C> {
 impl<T, Ty, C> Drop for ObjectBatch<'_, T, Ty, C> {
     fn drop(&mut self) {
         if let Some(mut groups) = self.shared.groups_for_drop() {
+            let introduced = &self.header.introduced;
             for object in &self.meta.objects {
                 groups.release_ref(object.group);
-                for &(_, g) in &object.pending {
+                for &(usage, g) in &object.pending {
+                    // The groups this scope's objects carry lose their
+                    // carrier with it: a fragment with no field set of its
+                    // own does not keep the scope alive, and nothing is left
+                    // here to announce.
+                    if introduced.contains(&usage) {
+                        groups.clear_carrier(g);
+                    }
                     groups.release_ref(g);
                 }
                 for &(_, g) in &object.shared {
@@ -540,7 +579,9 @@ where
             entry: self.entry,
             meta: &self.meta,
             contexts: &self.contexts,
-            groups: base_groups.clone(),
+            groups: Arc::from(&base_groups[..]),
+            path: self.path.clone(),
+            signal: self.signal.clone(),
             keep: &self.keep,
         };
         let futures = T::__start_fields(&cx, &parents, 0);
@@ -568,8 +609,17 @@ where
                         shared.or(own).unwrap_or(o.group)
                     })
                     .collect();
+                let path: Arc<[Step]> = self
+                    .path
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(Step::Deferred(set as u32 - 1)))
+                    .collect();
+                let signal = Signal::child(&self.signal);
                 let cx = FieldsCx {
-                    groups: groups.clone(),
+                    groups: Arc::from(&groups[..]),
+                    path,
+                    signal: signal.clone(),
                     ..cx.clone()
                 };
                 let parents = parents.clone();
@@ -579,10 +629,21 @@ where
                     state: DeferredSetState::Waiting(Box::new(move || {
                         T::__start_fields(&cx, &parents, set)
                     })),
+                    held: false,
+                    signal,
                 }
             })
             .collect();
-        Scope::new(&self.meta, self.shared, 0, base_groups, futures, deferred)
+        Scope::new(
+            &self.meta,
+            self.shared,
+            self.path.clone(),
+            self.signal.clone(),
+            0,
+            base_groups,
+            futures,
+            deferred,
+        )
     }
 }
 

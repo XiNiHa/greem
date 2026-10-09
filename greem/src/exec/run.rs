@@ -2,9 +2,11 @@
 //! (null pass, payload, release), advance, repeat.
 
 use crate::exec::barrier::{barrier, stalled};
+use crate::exec::payload::Step;
 use crate::exec::pull::Ship;
-use crate::exec::scope::{Activity, DeferredSetState, FieldState, Scope};
+use crate::exec::scope::{Activity, DeferredSetState, FieldState, POLL, STREAM, Scope};
 use crate::exec::state::{GroupKind, GroupState, Shared};
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::task::Poll;
 
@@ -40,7 +42,6 @@ pub(crate) fn advance(root: &mut Scope<'_>, shared: &Shared) -> bool {
         }
     }
     advance_scope(root, shared, &mut changed);
-    root.clear_fresh();
     // Retired turns and finished scopes dropped their group references above;
     // terminal groups nobody references any more give their slots back.
     shared.groups().sweep();
@@ -50,10 +51,15 @@ pub(crate) fn advance(root: &mut Scope<'_>, shared: &Shared) -> bool {
 /// Advances one scope's subtree; a subtree that changed nothing and has no
 /// work left becomes quiescent, so later polls and barriers skip it.
 fn advance_scope(scope: &mut Scope<'_>, shared: &Shared, changed: &mut bool) {
+    // Quiescent is final: its holds went when it became so.
+    if scope.activity == Activity::Quiescent {
+        return;
+    }
     // Every object here belongs to a dead group: nothing it produces can be
     // delivered, so its pending futures are never polled again.
-    if scope.activity != Activity::Quiescent && scope.all_dead(&shared.groups()) {
+    if scope.all_dead(&shared.groups()) {
         scope.activity = Activity::Quiescent;
+        scope.release_holds(&mut shared.groups());
         return;
     }
     let mut local = false;
@@ -62,12 +68,18 @@ fn advance_scope(scope: &mut Scope<'_>, shared: &Shared, changed: &mut bool) {
         *changed = true;
     } else if scope.is_finished(&shared.groups()) {
         scope.activity = Activity::Quiescent;
+        scope.release_holds(&mut shared.groups());
     }
 }
 
 fn advance_scope_inner(scope: &mut Scope<'_>, shared: &Shared, changed: &mut bool) {
     if scope.activity == Activity::Quiescent {
         return;
+    }
+    if scope.activity == Activity::Fresh {
+        // Created in the generation that just ended; polled from the next.
+        scope.activity = Activity::Active;
+        scope.signal.raise(POLL);
     }
     for i in 0..scope.fields.len() {
         let FieldState::Done(column) = &mut scope.fields[i] else {
@@ -94,14 +106,25 @@ fn advance_scope_inner(scope: &mut Scope<'_>, shared: &Shared, changed: &mut boo
             };
             if released {
                 driver.release();
-                if driver.make_turn(column) {
+                if let Some(turn) = driver.make_turn(column) {
                     *changed = true;
+                    scope.signal.raise(STREAM);
+                    // Made between generations: the next one polls its scopes.
+                    column.turns[turn].each_child_mut(|s| {
+                        s.activity = Activity::Active;
+                        s.signal.raise(POLL);
+                    });
+                }
+                // A released stream is pumped every generation: its sources
+                // may have stopped at a full buffer rather than at a wake.
+                if !driver.is_done() {
+                    scope.signal.raise(POLL);
                 }
             }
             column.stream = Some(driver);
         }
     }
-    for deferred in &mut scope.deferred {
+    for (d, deferred) in scope.deferred.iter_mut().enumerate() {
         match &mut deferred.state {
             DeferredSetState::Waiting(_) => {}
             DeferredSetState::Running(inner) => {
@@ -150,6 +173,7 @@ fn advance_scope_inner(scope: &mut Scope<'_>, shared: &Shared, changed: &mut boo
         };
         if all_dead {
             deferred.state = DeferredSetState::Dropped;
+            deferred.release_hold(&mut shared.groups());
             continue;
         }
         if ready {
@@ -159,14 +183,33 @@ fn advance_scope_inner(scope: &mut Scope<'_>, shared: &Shared, changed: &mut boo
                 unreachable!()
             };
             let futures = start();
-            deferred.state = DeferredSetState::Running(Box::new(Scope::new(
+            let at: Arc<[Step]> = scope
+                .path
+                .iter()
+                .copied()
+                .chain(std::iter::once(Step::Deferred(d as u32)))
+                .collect();
+            {
+                let mut groups = shared.groups();
+                deferred.release_hold(&mut groups);
+                for (o, &g) in deferred.groups.iter().enumerate() {
+                    groups.register_root(g, at.clone(), o as u32);
+                }
+            }
+            let mut inner = Scope::new(
                 scope.meta,
                 scope.shared,
+                at,
+                deferred.signal.clone(),
                 deferred.set,
                 deferred.groups.clone(),
                 futures,
                 Vec::new(),
-            )));
+            );
+            // Started between generations: the next one polls it.
+            inner.activity = Activity::Active;
+            inner.signal.raise(POLL);
+            deferred.state = DeferredSetState::Running(Box::new(inner));
             *changed = true;
         }
     }
@@ -182,7 +225,7 @@ pub(crate) async fn run_loop<'a>(root: &mut Scope<'a>, shared: &Shared, sink: &m
         let progress = futures::future::poll_fn(|cx| match root.poll_generation(cx) {
             Poll::Ready(true) => Poll::Ready(true),
             Poll::Ready(false) => {
-                if root.has_live_streams() && state.initial_shipped {
+                if shared.live_streams.load(Ordering::Relaxed) > 0 && state.initial_shipped {
                     Poll::Pending
                 } else {
                     Poll::Ready(false)
@@ -202,7 +245,7 @@ pub(crate) async fn run_loop<'a>(root: &mut Scope<'a>, shared: &Shared, sink: &m
         // Nothing runs until the consumer takes the payload.
         futures::future::poll_fn(|_| sink.poll_taken()).await;
         let changed = advance(root, shared);
-        let stuck = !progress && !changed && !root.has_live_streams();
+        let stuck = !progress && !changed && shared.live_streams.load(Ordering::Relaxed) == 0;
         debug_assert!(!stuck, "execution stalled: nothing can make progress");
         if stuck {
             // End the response anyway so the client is not left hanging.

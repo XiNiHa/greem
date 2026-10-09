@@ -1,12 +1,16 @@
 use crate::error::PathSegment;
 use crate::exec::column::Column;
+use crate::exec::payload::Step;
 use crate::exec::state::{GroupId, GroupState, Groups, Shared};
 use crate::plan::PlanId;
 use crate::tree::UsageId;
 use futures::future::BoxFuture;
+use futures::task::AtomicWaker;
 use smallvec::SmallVec;
 use std::ops::ControlFlow;
-use std::task::{Context as TaskContext, Poll};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::task::{Context as TaskContext, Poll, Wake, Waker};
 
 pub type FieldFuture<'a> = BoxFuture<'a, Column<'a>>;
 
@@ -79,6 +83,76 @@ fn push_field(path: &mut Vec<PathSegment>, key: &str, indices: &[u32]) {
     path.extend(indices.iter().map(|&i| PathSegment::Index(i as usize)));
 }
 
+/// A future or source beneath the scope woke, or a scope beneath it is new:
+/// the next poll descends here.
+pub const POLL: u8 = 1;
+/// An object beneath the scope was decided at this barrier: its pending
+/// groups are announced or dropped.
+pub const ANNOUNCE: u8 = 2;
+/// A stream beneath the scope has something for the barrier: a new turn, a
+/// source that ended, a halt, or a child scope that finished.
+pub const STREAM: u8 = 4;
+
+/// The flags of one scope. Raising a flag raises it on every ancestor too,
+/// so a pass over the tree descends only into subtrees where something
+/// changed, clearing the flags as it goes. The root's flag doubles as the
+/// executor's waker: raising `POLL` anywhere wakes the request.
+pub struct Signal {
+    bits: AtomicU8,
+    parent: Option<Arc<Signal>>,
+    /// The request's waker; only the root's is registered.
+    outer: AtomicWaker,
+}
+
+impl Signal {
+    pub fn root() -> Arc<Self> {
+        Arc::new(Signal {
+            bits: AtomicU8::new(POLL),
+            parent: None,
+            outer: AtomicWaker::new(),
+        })
+    }
+
+    pub fn child(parent: &Arc<Signal>) -> Arc<Self> {
+        Arc::new(Signal {
+            bits: AtomicU8::new(POLL),
+            parent: Some(parent.clone()),
+            outer: AtomicWaker::new(),
+        })
+    }
+
+    pub fn raise(&self, bits: u8) {
+        let mut node = self;
+        loop {
+            node.bits.fetch_or(bits, Ordering::Relaxed);
+            match &node.parent {
+                Some(parent) => node = parent,
+                None => {
+                    if bits & POLL != 0 {
+                        node.outer.wake();
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Clears `bit` here and reports whether it was set.
+    pub fn take(&self, bit: u8) -> bool {
+        self.bits.fetch_and(!bit, Ordering::Relaxed) & bit != 0
+    }
+}
+
+impl Wake for Signal {
+    fn wake(self: Arc<Self>) {
+        self.raise(POLL);
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.raise(POLL);
+    }
+}
+
 /// The owner half of a frame: the completed output batch a scope borrows.
 pub trait Batch: Send {
     fn start<'this>(&'this self) -> Scope<'this>;
@@ -111,6 +185,21 @@ pub struct DeferredSet<'a> {
     pub set: usize,
     pub groups: Vec<GroupId>,
     pub state: DeferredSetState<'a>,
+    /// Holds its groups while waiting: a released fragment cannot complete
+    /// before its field set has run.
+    pub held: bool,
+    /// The scope's signal once it runs; its field futures wake through it.
+    pub signal: Arc<Signal>,
+}
+
+impl DeferredSet<'_> {
+    pub fn release_hold(&mut self, table: &mut Groups) {
+        if std::mem::replace(&mut self.held, false) {
+            for &g in &self.groups {
+                table.unhold(g);
+            }
+        }
+    }
 }
 
 pub enum DeferredSetState<'a> {
@@ -149,6 +238,12 @@ pub enum Activity {
 pub struct Scope<'a> {
     pub meta: &'a ScopeMeta<'a>,
     pub shared: &'a Shared,
+    /// Where this scope hangs in the tree, from the root.
+    pub path: Arc<[Step]>,
+    pub signal: Arc<Signal>,
+    waker: Waker,
+    /// What the last poll found: a future beneath still pending.
+    pending_beneath: bool,
     /// Which field set of the Plan entry this scope runs (0 = immediate).
     pub set: usize,
     /// Per-object delivery group.
@@ -158,12 +253,18 @@ pub struct Scope<'a> {
     pub deferred: Vec<DeferredSet<'a>>,
     /// Per object: reachable from a delivered payload (not nulled away).
     pub alive: Vec<bool>,
+    /// Objects whose group shipped at this barrier, alive or nulled; their
+    /// pending groups are announced or dropped, then the list is cleared.
+    pub decided: Vec<u32>,
     pub activity: Activity,
+    /// Holds every object's group while this scope has unfinished fields.
+    working_held: bool,
 }
 
 impl Drop for Scope<'_> {
     fn drop(&mut self) {
         if let Some(mut table) = self.shared.groups_for_drop() {
+            self.release_holds(&mut table);
             for &g in self
                 .groups
                 .iter()
@@ -176,15 +277,20 @@ impl Drop for Scope<'_> {
 }
 
 impl<'a> Scope<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         meta: &'a ScopeMeta<'a>,
         shared: &'a Shared,
+        path: Arc<[Step]>,
+        signal: Arc<Signal>,
         set: usize,
         groups: Vec<GroupId>,
         futures: Vec<FieldFuture<'a>>,
         deferred: Vec<DeferredSet<'a>>,
     ) -> Self {
         let n = meta.objects.len();
+        let working = !futures.is_empty();
+        let mut deferred = deferred;
         {
             let mut table = shared.groups();
             for &g in groups
@@ -193,17 +299,79 @@ impl<'a> Scope<'a> {
             {
                 table.retain(g);
             }
+
+            if working {
+                for &g in &groups {
+                    table.hold(g);
+                }
+            }
+            for d in &mut deferred {
+                if matches!(d.state, DeferredSetState::Waiting(_)) && !d.held {
+                    d.held = true;
+                    for &g in &d.groups {
+                        table.hold(g);
+                    }
+                }
+            }
         }
         Self {
             meta,
             shared,
+            path,
+            waker: Waker::from(signal.clone()),
+            signal,
+            pending_beneath: false,
             set,
             groups,
             fields: futures.into_iter().map(FieldState::Pending).collect(),
             cursor: 0,
             deferred,
             alive: vec![false; n],
+            decided: Vec::new(),
             activity: Activity::Fresh,
+            working_held: working,
+        }
+    }
+
+    /// Whether a field of this scope's own has yet to resolve.
+    pub fn working(&self) -> bool {
+        if self.meta.serial {
+            self.cursor < self.fields.len()
+        } else {
+            self.fields
+                .iter()
+                .any(|f| matches!(f, FieldState::Pending(_)))
+        }
+    }
+
+    /// Drops the holds of this scope's own fields once they resolved. A
+    /// stream range above may be ready now.
+    pub fn release_work(&mut self, table: &mut Groups) {
+        if self.working_held && !self.working() {
+            self.working_held = false;
+            for &g in &self.groups {
+                table.unhold(g);
+            }
+            self.signal.raise(STREAM);
+        }
+    }
+
+    /// Drops every hold under this scope: it is quiescent or being dropped,
+    /// so nothing beneath it counts as unfinished work any more.
+    pub fn release_holds(&mut self, table: &mut Groups) {
+        if std::mem::replace(&mut self.working_held, false) {
+            for &g in &self.groups {
+                table.unhold(g);
+            }
+            self.signal.raise(STREAM);
+        }
+        for d in &mut self.deferred {
+            d.release_hold(table);
+        }
+        for column in self.columns_mut() {
+            if let Some(driver) = &mut column.stream {
+                driver.release_holds(table);
+            }
         }
     }
 
@@ -225,13 +393,31 @@ impl<'a> Scope<'a> {
         self.columns().find(|c| c.field == field)
     }
 
-    /// Advances this scope's subtree by one generation. `Ready(progress)` when
-    /// nothing under it is pending; `progress` says whether a future completed
-    /// or a stream has items waiting for a turn.
+    /// Advances the tree by one generation from the root. `Ready(progress)`
+    /// when nothing under it is pending; `progress` says whether a future
+    /// completed or a stream has items waiting for a turn.
     pub fn poll_generation(&mut self, cx: &mut TaskContext<'_>) -> Poll<bool> {
+        self.signal.outer.register(cx.waker());
+        self.poll_scope()
+    }
+
+    /// Polls what woke beneath this scope. A scope nothing woke under
+    /// reports what its last poll found.
+    fn poll_scope(&mut self) -> Poll<bool> {
         if self.activity == Activity::Quiescent {
             return Poll::Ready(false);
         }
+        if !self.signal.take(POLL) {
+            return if self.pending_beneath {
+                Poll::Pending
+            } else {
+                Poll::Ready(false)
+            };
+        }
+        #[cfg(debug_assertions)]
+        crate::__private::SCOPES_POLLED.fetch_add(1, Ordering::Relaxed);
+        let waker = self.waker.clone();
+        let cx = &mut TaskContext::from_waker(&waker);
         let mut progress = false;
         let mut pending = false;
         let serial = self.meta.serial;
@@ -249,6 +435,10 @@ impl<'a> Scope<'a> {
                 }
             }
         }
+        if progress && self.working_held && !self.working() {
+            let shared = self.shared;
+            self.release_work(&mut shared.groups());
+        }
         for column in self.columns_mut() {
             for turn in &mut column.turns {
                 if turn.retired {
@@ -258,7 +448,7 @@ impl<'a> Scope<'a> {
                     if scope.activity == Activity::Fresh {
                         return;
                     }
-                    match scope.poll_generation(cx) {
+                    match scope.poll_scope() {
                         Poll::Ready(p) => progress |= p,
                         Poll::Pending => pending = true,
                     }
@@ -273,12 +463,13 @@ impl<'a> Scope<'a> {
                 if scope.activity == Activity::Fresh {
                     continue;
                 }
-                match scope.poll_generation(cx) {
+                match scope.poll_scope() {
                     Poll::Ready(p) => progress |= p,
                     Poll::Pending => pending = true,
                 }
             }
         }
+        self.pending_beneath = pending;
         if pending {
             Poll::Pending
         } else {
@@ -301,32 +492,6 @@ impl<'a> Scope<'a> {
             }
             None => true,
         }
-    }
-
-    /// A released stream that may still yield items exists under this scope.
-    pub fn has_live_streams(&self) -> bool {
-        if self.activity == Activity::Quiescent {
-            return false;
-        }
-        for column in self.columns() {
-            if column
-                .stream
-                .as_ref()
-                .is_some_and(|d| d.is_released() && !d.is_done())
-            {
-                return true;
-            }
-            if column
-                .turns
-                .iter()
-                .any(|turn| turn.any_child(|s| s.has_live_streams()))
-            {
-                return true;
-            }
-        }
-        self.deferred
-            .iter()
-            .any(|d| d.scope().is_some_and(|s| s.has_live_streams()))
     }
 
     /// True when no future under this scope (same or nested group) is pending
@@ -419,14 +584,7 @@ impl<'a> Scope<'a> {
         if self.activity == Activity::Quiescent {
             return ControlFlow::Continue(());
         }
-        let working = if self.meta.serial {
-            self.cursor < self.fields.len()
-        } else {
-            self.fields
-                .iter()
-                .any(|f| matches!(f, FieldState::Pending(_)))
-        };
-        if working {
+        if self.working() {
             for &g in &self.groups {
                 f(g)?;
             }
@@ -467,22 +625,6 @@ impl<'a> Scope<'a> {
             .iter()
             .chain(self.deferred.iter().flat_map(|d| d.groups.iter()))
             .all(|&g| groups.is_dead(g))
-    }
-
-    pub fn clear_fresh(&mut self) {
-        if self.activity == Activity::Fresh {
-            self.activity = Activity::Active;
-        }
-        for column in self.columns_mut() {
-            for turn in &mut column.turns {
-                turn.each_child_mut(|scope| scope.clear_fresh());
-            }
-        }
-        for deferred in &mut self.deferred {
-            if let Some(scope) = deferred.scope_mut() {
-                scope.clear_fresh();
-            }
-        }
     }
 }
 

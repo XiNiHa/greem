@@ -3,7 +3,7 @@
 
 use crate::error::GraphQLError;
 use crate::exec::column::{Column, ErrorId, Inner, Leaf, ObjSlot, Slot, TurnRange};
-use crate::exec::scope::{FieldState, Scope, ScopeMeta};
+use crate::exec::scope::{ANNOUNCE, FieldState, Scope, ScopeMeta};
 use crate::plan::PlanTable;
 use std::collections::BTreeMap;
 
@@ -161,20 +161,35 @@ pub(crate) fn for_each_child_of(
     nulled: bool,
     f: &mut dyn FnMut(u32, u32),
 ) {
+    for_each_child_marked(column, turn, object, &mut |child, index, delivered| {
+        if delivered || nulled {
+            f(child, index)
+        }
+    });
+}
+
+/// Calls `f(child, index, delivered)` for every child object of `object`
+/// in `column`'s turn 0, delivered or nulled by propagation on the way.
+fn for_each_child_marked(
+    column: &Column<'_>,
+    turn: usize,
+    object: u32,
+    f: &mut dyn FnMut(u32, u32, bool),
+) {
     let depth = column.depth();
     if depth == 0 {
-        visit_inner(column, turn, object, nulled, f);
+        visit_inner(column, turn, object, true, f);
         return;
     }
     match column.level0[object as usize] {
         Slot::Items { start, len } => {
             for slot in start..start + len {
-                visit_level(column, turn, 1, slot, nulled, f);
+                visit_level(column, turn, 1, slot, true, f);
             }
         }
-        Slot::Propagated { start, len } if nulled => {
+        Slot::Propagated { start, len } => {
             for slot in start..start + len {
-                visit_level(column, turn, 1, slot, nulled, f);
+                visit_level(column, turn, 1, slot, false, f);
             }
         }
         _ => {}
@@ -189,7 +204,18 @@ pub(crate) fn for_each_child_in_range(
     f: &mut dyn FnMut(u32, u32),
 ) {
     for slot in range.start_slot..range.start_slot + range.len {
-        visit_level(column, turn, 1, slot, nulled, f);
+        visit_level(
+            column,
+            turn,
+            1,
+            slot,
+            true,
+            &mut |child, index, delivered| {
+                if delivered || nulled {
+                    f(child, index)
+                }
+            },
+        );
     }
 }
 
@@ -198,22 +224,22 @@ fn visit_level(
     turn: usize,
     level: usize,
     slot: u32,
-    nulled: bool,
-    f: &mut dyn FnMut(u32, u32),
+    delivered: bool,
+    f: &mut dyn FnMut(u32, u32, bool),
 ) {
     if level == column.depth() {
-        visit_inner(column, turn, slot, nulled, f);
+        visit_inner(column, turn, slot, delivered, f);
         return;
     }
     match column.turns[turn].levels[level - 1][slot as usize] {
         Slot::Items { start, len } => {
             for s in start..start + len {
-                visit_level(column, turn, level + 1, s, nulled, f);
+                visit_level(column, turn, level + 1, s, delivered, f);
             }
         }
-        Slot::Propagated { start, len } if nulled => {
+        Slot::Propagated { start, len } => {
             for s in start..start + len {
-                visit_level(column, turn, level + 1, s, nulled, f);
+                visit_level(column, turn, level + 1, s, false, f);
             }
         }
         _ => {}
@@ -224,54 +250,75 @@ fn visit_inner(
     column: &Column<'_>,
     turn: usize,
     slot: u32,
-    nulled: bool,
-    f: &mut dyn FnMut(u32, u32),
+    delivered: bool,
+    f: &mut dyn FnMut(u32, u32, bool),
 ) {
     column.turns[turn].with_stored(|stored| {
         if let Inner::Objects(objects) = &stored.inner {
             match objects[slot as usize] {
-                ObjSlot::Object { child, index } => f(child, index),
-                ObjSlot::Propagated { child, index } if nulled => f(child, index),
+                ObjSlot::Object { child, index } => f(child, index, delivered),
+                ObjSlot::Propagated { child, index } => f(child, index, false),
                 _ => {}
             }
         }
     });
 }
 
-/// Marks every object reachable from `object` through delivered (non-null)
-/// slots as alive, so pending delivery groups on nulled objects are dropped.
+/// Decides every object beneath `object`, which its group just shipped:
+/// the ones reachable through delivered (non-null) slots are alive, the
+/// rest were nulled away. Each decided object is listed on its scope for
+/// the announcement of its pending groups.
 pub(crate) fn mark_alive(scope: &mut Scope<'_>, object: u32) {
-    mark_alive_with(scope, object, &mut Vec::new());
+    decide_with(scope, object, true, &mut Vec::new());
 }
 
 /// `mark_alive` with one target stack for the whole subtree: each level
 /// pushes its children above its caller's and truncates back when done.
-fn mark_alive_with(scope: &mut Scope<'_>, object: u32, targets: &mut Vec<(u32, u32)>) {
-    scope.alive[object as usize] = true;
+fn decide_with(
+    scope: &mut Scope<'_>,
+    object: u32,
+    alive: bool,
+    targets: &mut Vec<(u32, u32, bool)>,
+) {
+    if alive {
+        scope.alive[object as usize] = true;
+    }
+    if scope.decided.is_empty() {
+        scope.signal.raise(ANNOUNCE);
+    }
+    scope.decided.push(object);
     for i in 0..scope.fields.len() {
         let FieldState::Done(column) = &mut scope.fields[i] else {
             continue;
         };
         let start = targets.len();
-        for_each_child_of(column, 0, object, false, &mut |child, index| {
-            targets.push((child, index))
+        for_each_child_marked(column, 0, object, &mut |child, index, delivered| {
+            targets.push((child, index, alive && delivered))
         });
         for t in start..targets.len() {
-            let (child, index) = targets[t];
-            column.turns[0].with_child_mut(child, |s| mark_alive_with(s, index, targets));
+            let (child, index, alive) = targets[t];
+            column.turns[0].with_child_mut(child, |s| decide_with(s, index, alive, targets));
         }
         targets.truncate(start);
     }
 }
 
+/// Decides the items of a stream turn range that just shipped, like `mark_alive`.
 pub(crate) fn mark_alive_range(column: &mut Column<'_>, turn: usize, range: TurnRange) {
     let mut targets = Vec::new();
-    for_each_child_in_range(column, turn, range, false, &mut |child, index| {
-        targets.push((child, index))
-    });
+    for slot in range.start_slot..range.start_slot + range.len {
+        visit_level(
+            column,
+            turn,
+            1,
+            slot,
+            true,
+            &mut |child, index, delivered| targets.push((child, index, delivered)),
+        );
+    }
     for t in 0..targets.len() {
-        let (child, index) = targets[t];
-        column.turns[turn].with_child_mut(child, |s| mark_alive_with(s, index, &mut targets));
+        let (child, index, alive) = targets[t];
+        column.turns[turn].with_child_mut(child, |s| decide_with(s, index, alive, &mut targets));
     }
 }
 

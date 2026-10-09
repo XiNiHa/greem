@@ -38,6 +38,14 @@ _Avoid_: Finish, complete, block
 Dropping a parked chain's storage, at the first barrier after the last payload that reads its data has shipped. Not "release", which is what happens to a delivery group.
 _Avoid_: Release, unwind, drop, free
 
+**Signal**:
+The flags of one scope, raised on it and every ancestor by its futures, sources and the barrier, so polls and barrier passes descend only where something changed. The root's signal is the request's waker.
+_Avoid_: Ready queue, dirty bit, wake list
+
+**Hold**:
+One unit of unfinished work that delivers under a delivery group: an object of a working scope, a waiting deferred set, a live stream parent. A group is examined for completion when its last hold goes.
+_Avoid_: Reference (that is `refs`, which keeps the group's slot), liveness flag, pin
+
 **Execution depth**:
 The number of nested generation frames an operation can require, fixed at tree build: one per nested composite selection, one per deferred fragment, one per streamed list; lists, fragments, aliases, partition and introspection add none, and mutation root fields take the maximum, not the sum.
 _Avoid_: Query depth, nesting, generation count

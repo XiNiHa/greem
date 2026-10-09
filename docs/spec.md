@@ -162,14 +162,19 @@ absent; apollo-compiler validates documents against them.
    entry for one field set. Its field futures are joined; completion writes
    columns and creates child scopes as `Frame`s (`self_cell`: owner = the
    output batch and per-field `Context` views, dependent = the child scope
-   borrowing them). The top-level loop polls the whole tree one generation at a
-   time; children created in a generation start in the next.
+   borrowing them). Field futures and stream sources wake through their
+   scope's signal, which flags the scope and its ancestors, so a poll descends
+   only into flagged scopes, one generation at a time; children created in a
+   generation start in the next.
 4. **Barrier** (`exec/barrier.rs`): close a finished serial root field, then
-   for each released delivery group with no live scopes, collect errors,
+   for each delivery group queued for examination (released, its last hold of
+   unfinished work gone, a group it waits on finished, a set it shares
+   settled) that nothing holds, collect errors,
    settle (null pass), mark alive objects, build the payload (`Payload<'p>`
    borrows the frames; the caller's encoder turns it into the stream's item in
    place, and the loop waits until the consumer pulls it, `exec/pull.rs`); ship finished stream
-   item ranges; announce child groups. Then `advance` (`exec/run.rs`): release announced groups, start
+   item ranges; announce the groups pending on the objects those payloads
+   decided. Then `advance` (`exec/run.rs`): release announced groups, start
    deferred field sets, turn buffered stream items into turns, retire shipped
    turns (children, slots, values and kept outputs are freed and the slot is
    reused by the next turn, so memory follows in-flight work rather than
@@ -354,6 +359,5 @@ and shared with the reference.
 
 Left as the map's follow-ups: `#[derive(greem::Abstract)]` (designed in ticket
 15), the graphql-js fixture port onto area schemas, `greem-bench`, the
-`onError` wire attribute, SSE transport, the dataloader primitive,
-tree caching, and per-generation polling efficiency (every poll traverses the
-non-quiescent tree; a ready queue is the obvious next step).
+`onError` wire attribute, SSE transport, the dataloader primitive, and tree
+caching.

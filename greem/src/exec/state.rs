@@ -1,7 +1,8 @@
 use crate::error::{GraphQLError, PathSegment};
+use crate::exec::payload::Step;
 use crate::plan::PlanTable;
 use crate::tree::{NodeId, UsageId};
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 pub type GroupId = u32;
@@ -91,6 +92,16 @@ pub struct Group {
     /// Live references from objects, scopes, drivers and child groups; a
     /// terminal group with none is reclaimed at the next barrier.
     pub refs: u32,
+    /// Holds from unfinished work that delivers under this group: one per
+    /// object of a working scope, per waiting deferred set object, and per
+    /// live stream parent. The group cannot complete while any remain.
+    live: u32,
+    /// A shared field set that settled: its members may ship it.
+    settled: bool,
+    /// The object this group is pending on, as its scope's path and its
+    /// index there; the nested groups it carries are announced when this
+    /// one ships.
+    carrier: Option<Root>,
     /// The live shared field sets this group is a member of, by ascending id.
     sharing: Vec<GroupId>,
     /// The groups whose fate follows this one's: its children, and the
@@ -103,6 +114,7 @@ pub struct Group {
     reclaim_queued: bool,
     /// Listed in `Groups::died`, not yet settled by a barrier.
     died_pending: bool,
+    examine_queued: bool,
 }
 
 /// The group table, with what changed since each consumer last looked:
@@ -125,7 +137,18 @@ pub struct Groups {
     /// May be reclaimable: references reached zero, became terminal, or
     /// an ancestor died.
     reclaim: Vec<GroupId>,
+    /// Whose readiness to complete may have changed: released or halted,
+    /// its last hold gone, a group it waits on finished, or a set it
+    /// shares settled or failed.
+    examine: Vec<GroupId>,
+    /// The objects whose deferred field sets run under each group, in tree
+    /// order, as the path of their scope and the object's index in it.
+    roots: HashMap<GroupId, Vec<Root>>,
 }
+
+/// One object whose deferred field set runs under a group: the path of
+/// its scope and its index there.
+pub(crate) type Root = (Arc<[Step]>, u32);
 
 fn is_open(state: &GroupState) -> bool {
     matches!(
@@ -150,14 +173,20 @@ impl Groups {
             state: GroupState::Released,
             wire_id: None,
             refs: 0,
+            live: 0,
+            settled: false,
+            carrier: None,
             sharing: Vec::new(),
             dependents: Vec::new(),
             parent_slot: 0,
             after_slot: 0,
             reclaim_queued: false,
             died_pending: false,
+            examine_queued: false,
         }));
         groups.open = 1;
+        // Released from the start, so no state change ever queues it.
+        groups.queue_examine(0);
         groups
     }
 
@@ -189,12 +218,16 @@ impl Groups {
             state: GroupState::Unreleased,
             wire_id: None,
             refs: 0,
+            live: 0,
+            settled: false,
+            carrier: None,
             sharing: Vec::new(),
             dependents: Vec::new(),
             parent_slot,
             after_slot,
             reclaim_queued: false,
             died_pending: false,
+            examine_queued: false,
         };
         if id as usize == self.list.len() {
             self.list.push(Some(group));
@@ -260,7 +293,102 @@ impl Groups {
             for s in self.get(id).sharing.clone() {
                 self.queue_reclaim(s);
             }
+            // The fragments delivered after it waited for it to complete.
+            for d in self.get(id).dependents.clone() {
+                self.queue_examine(d);
+            }
         }
+        if now_open {
+            self.queue_examine(id);
+        }
+        // A fragment completes together with the sets it shares, or fails
+        // with one.
+        if let GroupKind::Shared { members } = &self.get(id).kind {
+            for m in members.clone() {
+                self.queue_examine(m);
+            }
+        }
+    }
+
+    /// Adds a hold on `id`: work that must finish before it can complete.
+    pub fn hold(&mut self, id: GroupId) {
+        self.get_mut(id).live += 1;
+    }
+
+    pub fn unhold(&mut self, id: GroupId) {
+        let group = self.get_mut(id);
+        group.live -= 1;
+        if group.live == 0 {
+            self.queue_examine(id);
+        }
+    }
+
+    /// Whether unfinished work still delivers under `id`.
+    pub fn is_live(&self, id: GroupId) -> bool {
+        self.get(id).live > 0
+    }
+
+    /// Records that shared field set `id` settled, which lets its members
+    /// ship it.
+    pub fn mark_settled(&mut self, id: GroupId) {
+        self.get_mut(id).settled = true;
+        if let GroupKind::Shared { members } = &self.get(id).kind {
+            for m in members.clone() {
+                self.queue_examine(m);
+            }
+        }
+    }
+
+    pub fn is_settled(&self, id: GroupId) -> bool {
+        self.get(id).settled
+    }
+
+    pub fn queue_examine(&mut self, id: GroupId) {
+        let group = self.get_mut(id);
+        if !std::mem::replace(&mut group.examine_queued, true) {
+            self.examine.push(id);
+        }
+    }
+
+    /// The groups whose readiness may have changed since the last call.
+    pub fn take_examine(&mut self) -> Vec<GroupId> {
+        let examine = std::mem::take(&mut self.examine);
+        for &g in &examine {
+            self.get_mut(g).examine_queued = false;
+        }
+        examine
+    }
+
+    /// Records that `object` of the deferred-set scope at `path` runs under `id`.
+    pub(crate) fn register_root(&mut self, id: GroupId, path: Arc<[Step]>, object: u32) {
+        self.roots.entry(id).or_default().push((path, object));
+    }
+
+    pub(crate) fn set_carrier(&mut self, id: GroupId, path: Arc<[Step]>, object: u32) {
+        self.get_mut(id).carrier = Some((path, object));
+    }
+
+    /// Where the groups whose parent is `id` are pending: each one's
+    /// carrier scope path and object, for those still carried.
+    pub(crate) fn child_carriers(&self, id: GroupId) -> Vec<Root> {
+        self.get(id)
+            .dependents
+            .iter()
+            .filter(|&&d| self.get(d).parent == Some(id))
+            .filter_map(|&d| self.get(d).carrier.clone())
+            .collect()
+    }
+
+    /// The carrier scope is gone; tolerates a group already reclaimed.
+    pub fn clear_carrier(&mut self, id: GroupId) {
+        if let Some(group) = self.list.get_mut(id as usize).and_then(Option::as_mut) {
+            group.carrier = None;
+        }
+    }
+
+    /// The objects whose deferred field sets run under `id`, in tree order.
+    pub(crate) fn roots_of(&self, id: GroupId) -> &[Root] {
+        self.roots.get(&id).map_or(&[], Vec::as_slice)
     }
 
     /// Whether any group is announced, released or halted.
@@ -381,11 +509,15 @@ impl Groups {
     fn free_group(&mut self, id: GroupId) {
         let group = self.list[id as usize].take().expect("live group");
         self.free.push(id);
+        self.roots.remove(&id);
         // A group dropped and reclaimed between two barriers: the slot may be
         // reused before the barrier settles the dead, and it has no
         // dependents left to settle.
         if group.died_pending {
             self.died.retain(|&d| d != id);
+        }
+        if group.examine_queued {
+            self.examine.retain(|&e| e != id);
         }
         if let Some(parent) = group.parent {
             self.remove_dependent(parent, id, group.parent_slot);
@@ -529,6 +661,8 @@ pub struct Shared {
     pub introspection: Option<serde_json::Value>,
     /// Set once any stream driver exists, so barriers without streams skip the walk.
     pub has_streams: std::sync::atomic::AtomicBool,
+    /// Released stream drivers that may still yield items.
+    pub live_streams: std::sync::atomic::AtomicUsize,
     /// Under `Halt`: an error was recorded and a barrier must run at once.
     pub halted: std::sync::atomic::AtomicBool,
 }

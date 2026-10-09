@@ -8,18 +8,27 @@ use crate::exec::payload::{
     PendingEntry, Step,
 };
 use crate::exec::run::Loop;
-use crate::exec::scope::{Activity, FieldState, Scope, ScopeMeta};
+use crate::exec::scope::{ANNOUNCE, Activity, FieldState, STREAM, Scope};
 use crate::exec::settle;
 use crate::exec::state::{ErrorBehavior, GroupId, GroupKind, GroupState, Groups, Shared};
-use std::collections::{HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashSet};
 use std::ops::ControlFlow;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-fn walk_scopes_mut(
+/// Visits every scope flagged with `bit`, clearing it: a flag is raised on
+/// a scope and all its ancestors, so the walk descends only where one is
+/// set.
+fn walk_flagged(
     scope: &mut Scope<'_>,
+    bit: u8,
     path: &mut Vec<Step>,
     f: &mut dyn for<'a> FnMut(&[Step], &mut Scope<'a>),
 ) {
+    if !scope.signal.take(bit) {
+        return;
+    }
     f(path, scope);
     if scope.activity == Activity::Quiescent {
         return;
@@ -37,7 +46,7 @@ fn walk_scopes_mut(
                         turn: t as u32,
                         child: c as u32,
                     });
-                    child.with_dependent_mut(|_, s| walk_scopes_mut(s, path, f));
+                    child.with_dependent_mut(|_, s| walk_flagged(s, bit, path, f));
                     path.pop();
                 }
             });
@@ -46,7 +55,7 @@ fn walk_scopes_mut(
     for d in 0..scope.deferred.len() {
         if let Some(inner) = scope.deferred[d].scope_mut() {
             path.push(Step::Deferred(d as u32));
-            walk_scopes_mut(inner, path, f);
+            walk_flagged(inner, bit, path, f);
             path.pop();
         }
     }
@@ -83,92 +92,15 @@ pub(crate) struct Entries {
     pub completed: Vec<CompletedEntry>,
 }
 
-/// The stream items that exist in a turn but have not shipped yet, as
-/// `(path of the list, first index, count)`.
-struct UnshippedItems(Vec<(Vec<PathSegment>, u32, u32)>);
-
-impl UnshippedItems {
-    fn collect(root: &mut Scope<'_>) -> Self {
-        let mut items = Vec::new();
-        walk_scopes_mut(root, &mut Vec::new(), &mut |_, scope| {
-            let header = scope.shared.table.header(scope.meta.entry);
-            for column in scope.columns() {
-                if !column.stream.as_ref().is_some_and(|d| d.owns_groups()) {
-                    continue;
-                }
-                for range in column.turns.iter().skip(1).flat_map(|turn| &turn.ranges) {
-                    if !range.shipped {
-                        let key = &header.fields[column.field as usize].key;
-                        let path = scope.meta.path_to(range.object, key, &[]);
-                        items.push((path, range.start_index, range.len));
-                    }
-                }
-            }
-        });
-        UnshippedItems(items)
-    }
-
-    /// Whether `object` sits at or beneath one of these items.
-    fn contain(&self, meta: &ScopeMeta<'_>, object: u32) -> bool {
-        if self.0.is_empty() {
-            return false;
-        }
-        let path = meta.path(object);
-        self.0.iter().any(|(list, start, len)| {
-            path.len() > list.len()
-                && path[..list.len()] == list[..]
-                && matches!(
-                    path[list.len()],
-                    PathSegment::Index(i) if (*start as usize..(*start + *len) as usize).contains(&i)
-                )
-        })
-    }
-}
-
-/// The objects whose deferred field sets run under each group, in tree order.
-struct GroupRoots {
-    paths: Vec<Vec<Step>>,
-    objects: HashMap<GroupId, Vec<(usize, u32)>>,
-}
-
-impl GroupRoots {
-    fn collect(root: &mut Scope<'_>) -> Self {
-        let mut index = GroupRoots {
-            paths: Vec::new(),
-            objects: HashMap::new(),
-        };
-        walk_scopes_mut(root, &mut Vec::new(), &mut |path, scope| {
-            if scope.set == 0 {
-                return;
-            }
-            let at = index.paths.len();
-            index.paths.push(path.to_vec());
-            for (o, &g) in scope.groups.iter().enumerate() {
-                index.objects.entry(g).or_default().push((at, o as u32));
-            }
-        });
-        index
-    }
-
-    fn of(&self, g: GroupId) -> Vec<(Vec<Step>, u32)> {
-        self.objects
-            .get(&g)
-            .into_iter()
-            .flatten()
-            .map(|&(at, o)| (self.paths[at].clone(), o))
-            .collect()
-    }
-}
-
 /// Every error recorded beneath `roots`, in response order.
-fn root_errors(root: &mut Scope<'_>, roots: &[(Vec<Step>, u32)]) -> Vec<GraphQLError> {
-    // The walk lists a scope's objects consecutively; collect each scope
+fn root_errors(root: &mut Scope<'_>, roots: &[(Arc<[Step]>, u32)]) -> Vec<GraphQLError> {
+    // The roots list a scope's objects consecutively; collect each scope
     // once with all of them so its errors come out field by field.
-    let mut by_scope: Vec<(Vec<Step>, Vec<u32>)> = Vec::new();
+    let mut by_scope: Vec<(&[Step], Vec<u32>)> = Vec::new();
     for (path, object) in roots {
         match by_scope.last_mut() {
-            Some((last, objects)) if last == path => objects.push(*object),
-            _ => by_scope.push((path.clone(), vec![*object])),
+            Some((last, objects)) if *last == &path[..] => objects.push(*object),
+            _ => by_scope.push((path, vec![*object])),
         }
     }
     let mut errs = settle::ErrorSink::default();
@@ -181,7 +113,7 @@ fn root_errors(root: &mut Scope<'_>, roots: &[(Vec<Step>, u32)]) -> Vec<GraphQLE
 }
 
 /// Null propagation over `roots`: the error that reaches their boundary, if any.
-fn settle_roots(root: &mut Scope<'_>, roots: &[(Vec<Step>, u32)]) -> Option<Box<GraphQLError>> {
+fn settle_roots(root: &mut Scope<'_>, roots: &[(Arc<[Step]>, u32)]) -> Option<Box<GraphQLError>> {
     roots.iter().find_map(|(path, object)| {
         with_scope_at_mut(root, path, &mut |scope| {
             settle::settle_object(scope, *object)
@@ -194,7 +126,7 @@ fn settle_roots(root: &mut Scope<'_>, roots: &[(Vec<Step>, u32)]) -> Option<Box<
 /// first entry carries `errors`.
 fn ship_roots(
     root: &mut Scope<'_>,
-    roots: &[(Vec<Step>, u32)],
+    roots: &[(Arc<[Step]>, u32)],
     mut errors: Vec<GraphQLError>,
     id: &str,
     group_path: &[PathSegment],
@@ -210,7 +142,7 @@ fn ship_roots(
             sub_path: sub_path(&object_path, group_path),
             errors: std::mem::take(&mut errors),
             source: EntrySource::Defer {
-                path: path.clone(),
+                path: path.to_vec(),
                 object,
             },
         });
@@ -315,18 +247,30 @@ fn fail_dependents(groups: &mut Groups, candidates: &[GroupId], out: &mut Entrie
 
 /// Announces every unreleased group whose parent shipped at this barrier:
 /// assigns wire ids and emits `pending` entries in tree order over alive objects.
+///
+/// Only the objects decided at this barrier are looked at: a group's
+/// parent shipped when the object carrying it was just marked alive or
+/// nulled. Objects under a stream item that has not shipped are decided
+/// when it does.
 fn announce_children(
     root: &mut Scope<'_>,
     shipped: &[GroupId],
     groups: &mut Groups,
     out: &mut Entries,
 ) {
-    // A stream group ships item by item: objects under an item that has not
-    // shipped are not alive yet, and are decided when it does.
-    let unshipped = UnshippedItems::collect(root);
-    walk_scopes_mut(root, &mut Vec::new(), &mut |_, scope| {
+    let shipped: HashSet<GroupId> = shipped.iter().copied().collect();
+    walk_flagged(root, ANNOUNCE, &mut Vec::new(), &mut |_, scope| {
+        let mut decided = std::mem::take(&mut scope.decided);
+        if decided.is_empty() {
+            return;
+        }
+        decided.sort_unstable();
+        decided.dedup();
+        #[cfg(debug_assertions)]
+        crate::__private::OBJECTS_ANNOUNCED.fetch_add(decided.len(), Ordering::Relaxed);
         let meta = scope.meta;
-        for object in 0..meta.objects.len() {
+        for &object in &decided {
+            let object = object as usize;
             let alive = scope.alive[object];
             for &(_, g) in &meta.objects[object].pending {
                 let group = groups.get(g);
@@ -338,9 +282,7 @@ fn announce_children(
                 }
                 if !alive {
                     // The parent payload nulled this object: its groups never run.
-                    if !unshipped.contain(meta, object as u32) {
-                        groups.set_state(g, GroupState::Dropped);
-                    }
+                    groups.set_state(g, GroupState::Dropped);
                     continue;
                 } // Its enclosing fragment already failed: it is never announced.
                 if let GroupKind::Defer {
@@ -372,8 +314,11 @@ fn announce_children(
             let Some(driver) = column.stream.as_ref().filter(|d| d.owns_groups()) else {
                 continue;
             };
-            let parent_groups: Vec<(usize, GroupId)> = driver.groups().enumerate().collect();
-            for (p, g) in parent_groups {
+            for &parent_object in &decided {
+                let Some(p) = driver.parent_of(parent_object) else {
+                    continue;
+                };
+                let g = driver.group(p);
                 let group = groups.get(g);
                 if !matches!(group.kind, GroupKind::Stream { .. })
                     || !matches!(group.state, GroupState::Unreleased)
@@ -385,11 +330,8 @@ fn announce_children(
                 {
                     continue;
                 }
-                let parent_object = driver.parent_object(p);
                 if !scope.alive[parent_object as usize] {
-                    if !unshipped.contain(scope.meta, parent_object) {
-                        groups.set_state(g, GroupState::Dropped);
-                    }
+                    groups.set_state(g, GroupState::Dropped);
                     continue;
                 }
                 // The list itself was nulled (an item error reached it) or
@@ -514,9 +456,6 @@ pub(crate) fn barrier(
         out: Entries::default(),
         initial: None,
         shipped: Vec::new(),
-        ready_shared: Vec::new(),
-        live: None,
-        roots: None,
     };
     barrier.close_serial_root();
     if let ControlFlow::Break(errors) = barrier.ship_groups() {
@@ -546,14 +485,6 @@ struct Barrier<'r, 'a> {
     initial: Option<(Data, Vec<GraphQLError>)>,
     /// Groups whose data shipped at this barrier; their children are announced.
     shipped: Vec<GroupId>,
-    /// Shared field sets that settled at this barrier; each ships with the
-    /// first member fragment that completes.
-    ready_shared: Vec<GroupId>,
-    /// The groups with unfinished work and the roots of each group, gathered
-    /// on first use: a barrier neither starts nor finishes work, nor creates
-    /// scopes.
-    live: Option<HashSet<GroupId>>,
-    roots: Option<GroupRoots>,
 }
 
 /// Whether a released group can complete at this barrier.
@@ -595,29 +526,46 @@ impl Barrier<'_, '_> {
             }
         }
         root.cursor = if stop { root.fields.len() } else { cursor + 1 };
+        root.release_work(self.groups);
+        // The next root field is polled from the next generation.
+        root.signal.raise(crate::exec::scope::POLL);
     }
 
-    /// Released, non-stream groups in wire-id (announcement) order, so the
-    /// output never depends on internal allocation order. Shared field sets
-    /// have no wire id and sort ahead of the fragments.
-    fn candidates(&self) -> Vec<GroupId> {
-        let mut candidates: Vec<(Option<u32>, GroupId)> = self
-            .groups
-            .iter()
-            .filter(|(_, g)| {
-                matches!(g.state, GroupState::Released | GroupState::Halted(_))
-                    && !matches!(g.kind, GroupKind::Stream { .. })
-            })
-            .map(|(id, g)| (g.wire_id, id))
-            .collect();
-        candidates.sort_by_key(|(wire, id)| (wire.is_some(), *wire, *id));
-        candidates.into_iter().map(|(_, id)| id).collect()
+    /// The order a scan of the table would examine candidates in: wire-id
+    /// (announcement) order, so the output never depends on internal
+    /// allocation order. Shared field sets have no wire id and sort ahead
+    /// of the fragments.
+    fn candidate_key(&self, g: GroupId) -> Option<(bool, Option<u32>, GroupId)> {
+        let group = self.groups.get(g);
+        (matches!(group.state, GroupState::Released | GroupState::Halted(_))
+            && !matches!(group.kind, GroupKind::Stream { .. }))
+        .then_some((group.wire_id.is_some(), group.wire_id, g))
     }
 
     /// Completes or fails every released group whose work is done. Breaks
     /// with the operation's errors when the initial group halted.
+    ///
+    /// Only the groups queued for examination are looked at, in candidate
+    /// order. A group queued while an earlier one is handled joins this
+    /// barrier when it sorts after it, as a scan would reach it, and waits
+    /// for the next one otherwise.
     fn ship_groups(&mut self) -> ControlFlow<Vec<GraphQLError>> {
-        for g in self.candidates() {
+        let mut queue: BinaryHeap<Reverse<(bool, Option<u32>, GroupId)>> = BinaryHeap::new();
+        for g in self.groups.take_examine() {
+            if let Some(key) = self.candidate_key(g) {
+                queue.push(Reverse(key));
+            }
+        }
+        let mut later = Vec::new();
+        while let Some(Reverse(key)) = queue.pop() {
+            let g = key.2;
+            // Queued again while in the queue, or handled by an earlier
+            // group: its state has moved on.
+            if self.candidate_key(g) != Some(key) {
+                continue;
+            }
+            #[cfg(debug_assertions)]
+            crate::__private::GROUPS_EXAMINED.fetch_add(1, Ordering::Relaxed);
             let kind = &self.groups.get(g).kind;
             let is_initial = matches!(kind, GroupKind::Initial);
             let is_shared = matches!(kind, GroupKind::Shared { .. });
@@ -628,6 +576,16 @@ impl Barrier<'_, '_> {
                 Readiness::Ready { halted, .. } if is_shared => self.settle_shared_set(g, halted),
                 Readiness::Ready { halted, sharing } => self.ship_fragment(g, halted, sharing),
             }
+            for queued in self.groups.take_examine() {
+                match self.candidate_key(queued) {
+                    Some(next) if next > key => queue.push(Reverse(next)),
+                    Some(_) => later.push(queued),
+                    None => {}
+                }
+            }
+        }
+        for g in later {
+            self.groups.queue_examine(g);
         }
         ControlFlow::Continue(())
     }
@@ -662,12 +620,12 @@ impl Barrier<'_, '_> {
         if halted {
             return Readiness::Ready { halted, sharing };
         }
-        if self.is_live(g) {
+        if self.groups.is_live(g) {
             return Readiness::Wait;
         }
         // A fragment completes together with the sets it shares.
         if sharing.iter().any(|s| {
-            !self.ready_shared.contains(s)
+            !self.groups.is_settled(*s)
                 && matches!(
                     self.groups.get(*s).state,
                     GroupState::Unreleased | GroupState::Released | GroupState::Halted(_)
@@ -678,30 +636,14 @@ impl Barrier<'_, '_> {
         Readiness::Ready { halted, sharing }
     }
 
-    fn is_live(&mut self, g: GroupId) -> bool {
-        let (root, groups) = (&*self.root, &*self.groups);
-        self.live
-            .get_or_insert_with(|| {
-                let mut live = HashSet::new();
-                let _ = root.live_groups(groups, &mut |g| {
-                    live.insert(g);
-                    ControlFlow::Continue(())
-                });
-                live
-            })
-            .contains(&g)
-    }
-
     /// The objects whose deferred field sets run under `g`.
-    fn group_roots(&mut self, g: GroupId) -> Vec<(Vec<Step>, u32)> {
-        self.roots
-            .get_or_insert_with(|| GroupRoots::collect(self.root))
-            .of(g)
+    fn group_roots(&mut self, g: GroupId) -> Vec<(Arc<[Step]>, u32)> {
+        self.groups.roots_of(g).to_vec()
     }
 
     /// Null propagation over `roots` under `Propagate`: the error that
     /// reaches their boundary, if any.
-    fn settle(&mut self, roots: &[(Vec<Step>, u32)]) -> Option<Box<GraphQLError>> {
+    fn settle(&mut self, roots: &[(Arc<[Step]>, u32)]) -> Option<Box<GraphQLError>> {
         if self.shared.behavior == ErrorBehavior::Propagate {
             settle_roots(self.root, roots)
         } else {
@@ -734,7 +676,7 @@ impl Barrier<'_, '_> {
             }
             return ControlFlow::Break(vec![error]);
         }
-        let roots = [(Vec::new(), 0)];
+        let roots = [(Arc::from(Vec::new()), 0)];
         let errors = root_errors(self.root, &roots);
         let failure = self.settle(&roots);
         self.groups.set_state(g, GroupState::Completed);
@@ -749,7 +691,7 @@ impl Barrier<'_, '_> {
     }
 
     /// A shared field set settles on its own but ships with a member
-    /// fragment: it fails here, or waits in `ready_shared` for one.
+    /// fragment: it fails here, or is marked settled for one to ship.
     fn settle_shared_set(&mut self, g: GroupId, halted: bool) {
         if halted {
             self.groups.fail_halted(g);
@@ -758,7 +700,7 @@ impl Barrier<'_, '_> {
         let roots = self.group_roots(g);
         match self.settle(&roots) {
             Some(error) => self.groups.set_state(g, GroupState::Failed(Some(*error))),
-            None => self.ready_shared.push(g),
+            None => self.groups.mark_settled(g),
         }
     }
 
@@ -796,9 +738,21 @@ impl Barrier<'_, '_> {
         };
         self.shipped.push(g);
         ship_roots(self.root, &roots, errors, &id, &group_path, &mut self.out);
+        // Its payload announces the groups beneath it. Those on objects it
+        // delivered were decided above; a nested fragment on the very object
+        // carrying it, or one whose fields all ran in a shared set, sits on
+        // an object decided earlier, so that object is listed again.
+        for (path, object) in self.groups.child_carriers(g) {
+            with_scope_at_mut(self.root, &path, &mut |scope| {
+                if scope.decided.is_empty() {
+                    scope.signal.raise(ANNOUNCE);
+                }
+                scope.decided.push(object);
+            });
+        }
         // The shared sets that settled ship under this fragment's id.
         for s in sharing {
-            if !self.ready_shared.contains(&s) {
+            if !self.groups.is_settled(s) {
                 continue;
             }
             if !matches!(self.groups.get(s).state, GroupState::Released) {
@@ -823,7 +777,7 @@ impl Barrier<'_, '_> {
             return;
         }
         let mut columns: Vec<(Vec<Step>, u32)> = Vec::new();
-        walk_scopes_mut(self.root, &mut Vec::new(), &mut |path, scope| {
+        walk_flagged(self.root, STREAM, &mut Vec::new(), &mut |path, scope| {
             for column in scope.columns() {
                 if column.stream.as_ref().is_some_and(|d| d.owns_groups()) {
                     columns.push((path.to_vec(), column.field));
@@ -1051,10 +1005,14 @@ impl Barrier<'_, '_> {
             id,
             errors: vec![error],
         });
+        let GroupKind::Stream { parent, .. } = self.groups.get(g).kind else {
+            unreachable!("stream group")
+        };
+        let groups = &mut *self.groups;
         with_scope_at_mut(self.root, path, &mut |scope| {
             let column = scope.columns_mut().find(|c| c.field == field).unwrap();
             if let Some(driver) = &mut column.stream {
-                driver.drop_group(g);
+                driver.drop_parent(parent as usize, groups);
             }
         });
     }

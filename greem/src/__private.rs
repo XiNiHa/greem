@@ -28,6 +28,18 @@ pub static MAX_LIVE_TURNS: std::sync::atomic::AtomicUsize = std::sync::atomic::A
 /// evidence that completed groups are reclaimed.
 pub static MAX_LIVE_GROUPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// Work counters: evidence that polls and barriers visit what changed, not
+/// the whole tree or group table. Scopes polled, groups examined for
+/// completion, and objects looked at for announcement, in this process.
+/// Counted in debug builds only.
+pub static SCOPES_POLLED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub static GROUPS_EXAMINED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub static OBJECTS_ANNOUNCED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+/// Stream parents visited by pumps and hold releases, in this process.
+pub static STREAM_PARENTS_VISITED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// The per-field argument payload stored in a typed Plan entry.
 pub type FieldArgs<F> = Result<crate::resolver::Args<F>, crate::error::Error>;
 

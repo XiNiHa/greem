@@ -537,6 +537,7 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
             table: table.clone(),
             introspection,
             has_streams: std::sync::atomic::AtomicBool::new(false),
+            live_streams: std::sync::atomic::AtomicUsize::new(0),
             halted: std::sync::atomic::AtomicBool::new(false),
         };
         let Roots { query, mutation } = roots;
@@ -602,6 +603,7 @@ where
                 },
                 parent_group,
             );
+            groups.set_carrier(g, std::sync::Arc::from(Vec::new()), 0);
             pending.push((usage, g));
         }
         groups.retain(0);
@@ -625,6 +627,8 @@ where
     ObjectBatch {
         values: vec![value],
         contexts,
+        path: std::sync::Arc::from(Vec::new()),
+        signal: crate::exec::scope::Signal::root(),
         meta: ScopeMeta {
             entry,
             generation: 0,

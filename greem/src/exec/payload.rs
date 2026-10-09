@@ -10,7 +10,7 @@ use serde::{Serialize, Serializer};
 
 /// A step from one scope to a nested one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Step {
+pub enum Step {
     Child { field: u32, turn: u32, child: u32 },
     Deferred(u32),
 }
