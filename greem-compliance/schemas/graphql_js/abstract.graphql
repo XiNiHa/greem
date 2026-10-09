@@ -1,0 +1,22 @@
+"""The area schema for graphql-js v17.0.2 src/execution/__tests__/abstract-test.ts."""
+type Query {
+  pets: [Pet]
+  """`pets` over the union: 'isTypeOf used to resolve runtime type for Union' and 'resolve Union type using __typename on source object'."""
+  unionPets: [PetUnion]
+}
+
+interface Pet {
+  name: String
+}
+
+type Dog implements Pet {
+  name: String
+  woofs: Boolean
+}
+
+type Cat implements Pet {
+  name: String
+  meows: Boolean
+}
+
+union PetUnion = Dog | Cat

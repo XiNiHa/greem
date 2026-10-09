@@ -1,0 +1,36 @@
+"""The area schema for graphql-js v17.0.2 src/execution/__tests__/subscribe-test.ts."""
+type Query {
+  inbox: Inbox
+  """The `DummyQueryType` of the Initialization Phase cases."""
+  dummy: String
+}
+
+type Inbox {
+  total: Int
+  unread: Int
+  emails: [Email]
+}
+
+type Email {
+  from: String
+  subject: String
+  """`subject`, read after one yield."""
+  asyncSubject: String
+  message: String
+  unread: Boolean
+}
+
+type EmailEvent {
+  email: Email
+  inbox: Inbox
+}
+
+type Subscription {
+  importantEmail(priority: Int): EmailEvent
+  """The Initialization Phase source; `arg` is for 'resolves to an error if variables were wrong type'."""
+  foo(arg: Int): String
+  """Declared but never subscribed: the multi-field cases."""
+  bar: String
+  """The message source of the last two Publish Phase cases."""
+  newMessage: String
+}

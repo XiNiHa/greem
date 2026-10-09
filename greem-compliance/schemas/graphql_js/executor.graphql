@@ -1,0 +1,104 @@
+"""The area schema for graphql-js v17.0.2 src/execution/__tests__/executor-test.ts."""
+type Query implements DataType & Type {
+  a: String
+  b: String
+  c: String
+  d: String
+  e: String
+  f: String
+  pic(size: Int): String
+  deep: DeepDataType
+  """`DataType.promise`: the root again, after one yield."""
+  promise: DataType
+  deepType: Type
+  """'does not include arguments that were not set': echoes the arguments that were set."""
+  field(a: Boolean, b: Boolean, c: Boolean, d: Int, e: Int): String
+  """'nulls out error subtrees'; `asyncError` also fails 'handles async bubbling errors combined with non-bubbling errors'."""
+  sync: String
+  syncError: String
+  syncRawError: String
+  syncReturnError: String
+  syncReturnErrorList: [String]
+  async: String
+  asyncReject: String
+  asyncRejectWithExtensions: String
+  asyncRawReject: String
+  asyncEmptyReject: String
+  asyncError: String
+  asyncRawError: String
+  asyncReturnError: String
+  asyncReturnErrorWithExtensions: String
+  """'nulls error subtree for promise rejection #1071': fails after one yield."""
+  foods: [Food]
+  """'handles async bubbling errors combined with non-bubbling errors': fails after one yield."""
+  asyncNonNullError: String!
+  """'Full response path is included for non-nullable fields'."""
+  nullableA: A
+  """`a: SomeType` of 'ignores missing sub selections on fields'; suffixed since `a` is a String."""
+  aObject: SomeType
+  """'executes ignoring invalid non-executable definitions'."""
+  foo: String
+}
+
+"""
+The root type of 'executes arbitrary code'. An interface the root implements,
+so the case's fragments on `DataType` spread at the root.
+"""
+interface DataType {
+  a: String
+  b: String
+  c: String
+  d: String
+  e: String
+  f: String
+  pic(size: Int): String
+  deep: DeepDataType
+  promise: DataType
+}
+
+type DeepDataType {
+  a: String
+  b: String
+  c: [String]
+  deeper: [DataType]
+}
+
+"""
+The `Type` root of 'merges parallel fragments', 'correct field ordering
+despite execution order', 'Avoids recursion' and the operation-selection
+cases. An interface the root implements, so fragments on `Type` spread at the
+root.
+"""
+interface Type {
+  a: String
+  b: String
+  c: String
+  d: String
+  e: String
+  """`Type.deep` of 'merges parallel fragments'; suffixed since `DataType.deep` has another type."""
+  deepType: Type
+}
+
+type Food {
+  name: String
+}
+
+type A {
+  nullableA: A
+  nonNullA: A!
+  throws: String!
+}
+
+type SomeType {
+  b: String
+}
+
+type Mutation {
+  """'uses the mutation schema for mutations'."""
+  c: String
+}
+
+type Subscription {
+  """'uses the query schema for queries' and 'uses the subscription schema for subscriptions'."""
+  a: String
+}

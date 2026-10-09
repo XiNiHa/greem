@@ -1,21 +1,21 @@
-#![allow(dead_code)]
+#![allow(dead_code, unused_imports)]
 
-use futures::executor::block_on;
-use greem::{ExecuteOptions, IncrementalDelivery, Operation, Roots};
-use greem_compliance::world::{MutationRoot, QueryRoot, World, build_schema};
+use greem::{ExecuteOptions, IncrementalDelivery};
+use greem_compliance::harness::Area;
+pub use greem_compliance::harness::{Calls, assert_equivalent, sorted_errors};
+use greem_compliance::world::World;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
-pub type Calls = Vec<(&'static str, usize)>;
-
-/// Runs the BFS executor; returns every payload as JSON and the resolver call log.
+/// Runs the BFS executor over the property schema; returns every payload as
+/// JSON and the resolver call log.
 pub fn run(
     world: World,
     query: &str,
     variables: Value,
     options: ExecuteOptions,
 ) -> (Vec<Value>, Calls) {
-    run_at_capacity(world, query, variables, options, None)
+    world.run(query, variables, options)
 }
 
 /// [`run`] with the items buffered per stream turn set (`None`: the default).
@@ -26,99 +26,24 @@ pub fn run_at_capacity(
     options: ExecuteOptions,
     stream_capacity: Option<usize>,
 ) -> (Vec<Value>, Calls) {
-    let schema = match stream_capacity {
-        Some(capacity) => greem_compliance::schema::Schema::<World>::builder()
-            .query::<QueryRoot>()
-            .mutation::<MutationRoot>()
-            .stream_capacity(capacity)
-            .build()
-            .expect("property schema builds"),
-        None => build_schema(),
-    };
-    let document = match schema.parse(query) {
-        Ok(d) => d,
-        Err(e) => {
-            return (
-                vec![serde_json::from_slice(&e.into_payload().json).unwrap()],
-                Vec::new(),
-            );
-        }
-    };
-    let calls = world.calls.clone();
-    let output = block_on(schema.execute(
-        Roots {
-            query: QueryRoot,
-            mutation: MutationRoot,
-        },
-        world,
-        Operation {
-            document: document.clone(),
-            operation_name: None,
-            variables,
-        },
-        options,
-    ));
-    let payloads = output
-        .payloads
-        .iter()
-        .map(|p| serde_json::from_slice(&p.json).unwrap())
-        .collect();
-    let calls = calls.lock().unwrap().clone();
-    (payloads, calls)
+    world.run_at_capacity(query, variables, options, stream_capacity)
 }
 
 /// Drives the execution with a no-op waker until it stalls or finishes, and
 /// returns the payloads shipped so far: for queries that never complete.
 pub fn run_until_stalled(world: World, query: &str, options: ExecuteOptions) -> Vec<Value> {
-    use futures::Stream;
-    use std::task::{Context, Poll};
-    let schema = build_schema();
-    let document = schema.parse(query).unwrap();
-    let mut payloads = Vec::new();
-    let stream = schema.execute_stream(
-        Roots {
-            query: QueryRoot,
-            mutation: MutationRoot,
-        },
-        world,
-        Operation {
-            document,
-            operation_name: None,
-            variables: Value::Null,
-        },
-        options,
-        |payload| serde_json::to_value(&payload).unwrap(),
-    );
-    let mut stream = std::pin::pin!(stream);
-    let waker = futures::task::noop_waker();
-    let mut cx = Context::from_waker(&waker);
-    for _ in 0..1000 {
-        match stream.as_mut().poll_next(&mut cx) {
-            Poll::Ready(Some(payload)) => payloads.push(payload),
-            Poll::Ready(None) => break,
-            Poll::Pending => {}
-        }
-    }
-    payloads
+    world.run_until_stalled(query, options)
 }
 
-/// The BFS single (non-incremental) response.
+/// The BFS single (non-incremental) response, checked against the reference
+/// executor where that is safe (see [`Area::single`]).
 pub fn single(
     world: World,
     query: &str,
     variables: Value,
     options: ExecuteOptions,
 ) -> (Value, Calls) {
-    let (mut payloads, calls) = run(
-        world,
-        query,
-        variables,
-        ExecuteOptions {
-            incremental: IncrementalDelivery::Disabled,
-            ..options
-        },
-    );
-    (payloads.remove(0), calls)
+    world.single(query, variables, options)
 }
 
 /// The reference executor's response and call count.
@@ -128,49 +53,27 @@ pub fn reference(
     variables: Value,
     options: ExecuteOptions,
 ) -> (Value, u64) {
-    let schema = build_schema();
-    let document = match schema.parse(query) {
-        Ok(d) => d,
-        Err(e) => return (serde_json::from_slice(&e.into_payload().json).unwrap(), 0),
-    };
-    let out = block_on(greem_reference::execute(
-        &schema,
-        Roots {
-            query: QueryRoot,
-            mutation: MutationRoot,
-        },
-        world,
-        Operation {
-            document: document.clone(),
-            operation_name: None,
-            variables,
-        },
-        options,
-    ));
-    (out.response, out.calls)
+    world.reference(query, variables, options)
 }
 
-pub fn sorted_errors(v: &Value) -> Vec<Value> {
-    let mut errors = v
-        .get("errors")
-        .and_then(|e| e.as_array())
-        .cloned()
-        .unwrap_or_default();
-    errors.sort_by_key(|e| e.to_string());
-    errors
+/// `ExecuteOptions` with incremental delivery on.
+pub fn incremental() -> ExecuteOptions {
+    ExecuteOptions {
+        incremental: IncrementalDelivery::Enabled,
+        ..Default::default()
+    }
 }
 
-pub fn assert_equivalent(bfs: &Value, reference: &Value) {
-    assert_eq!(
-        bfs.get("data"),
-        reference.get("data"),
-        "data differs\nbfs: {bfs}\nref: {reference}"
-    );
-    assert_eq!(
-        sorted_errors(bfs),
-        sorted_errors(reference),
-        "errors differ\nbfs: {bfs}\nref: {reference}"
-    );
+/// Asserts a payload sequence against the one written for it, as a line
+/// diff of both pretty-printed: one differing key or value is one line.
+pub fn assert_payloads(actual: &[Value], expected: &[Value]) {
+    let pretty = |payloads: &[Value]| serde_json::to_string_pretty(payloads).unwrap();
+    pretty_assertions::assert_eq!(pretty(actual), pretty(expected), "payloads differ");
+}
+
+/// [`assert_payloads`] for one response.
+pub fn assert_response(actual: &Value, expected: &Value) {
+    assert_payloads(std::slice::from_ref(actual), std::slice::from_ref(expected));
 }
 
 /// Folds an incremental payload stream into one response: each `data` entry

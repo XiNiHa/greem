@@ -1,0 +1,19 @@
+"""The area schema for graphql-js v17.0.2 src/execution/__tests__/mutations-test.ts."""
+type Query {
+  numberHolder: NumberHolder
+}
+
+type NumberHolder {
+  theNumber: Int
+  """`theNumber`, read after one yield."""
+  promiseToGetTheNumber: Int
+}
+
+type Mutation {
+  immediatelyChangeTheNumber(newNumber: Int): NumberHolder
+  """Changes the number after one yield."""
+  promiseToChangeTheNumber(newNumber: Int): NumberHolder
+  failToChangeTheNumber(newNumber: Int): NumberHolder
+  """Fails after one yield."""
+  promiseAndFailToChangeTheNumber(newNumber: Int): NumberHolder
+}

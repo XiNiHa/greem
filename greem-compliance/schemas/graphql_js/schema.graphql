@@ -1,0 +1,27 @@
+"""The area schema for graphql-js v17.0.2 src/execution/__tests__/schema-test.ts."""
+type Query {
+  article(id: ID): Article
+  feed: [Article]
+}
+
+type Article {
+  id: String!
+  isPublished: Boolean
+  author: Author
+  title: String
+  body: String
+  keywords: [String]
+}
+
+type Author {
+  id: String
+  name: String
+  pic(width: Int, height: Int): Image
+  recentArticle: Article
+}
+
+type Image {
+  url: String
+  width: Int
+  height: Int
+}

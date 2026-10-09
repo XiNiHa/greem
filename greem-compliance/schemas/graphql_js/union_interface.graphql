@@ -1,0 +1,69 @@
+"""The area schema for graphql-js v17.0.2 src/execution/__tests__/union-interface-test.ts."""
+schema {
+  query: Person
+}
+
+interface Named {
+  name: String
+}
+
+interface Life {
+  progeny: [Life]
+}
+
+interface Mammal implements Life {
+  progeny: [Mammal]
+  mother: Mammal
+  father: Mammal
+}
+
+type Dog implements Mammal & Life & Named {
+  name: String
+  barks: Boolean
+  progeny: [Dog]
+  mother: Dog
+  father: Dog
+}
+
+type Cat implements Mammal & Life & Named {
+  name: String
+  meows: Boolean
+  progeny: [Cat]
+  mother: Cat
+  father: Cat
+}
+
+"""The root type, as upstream's `new GraphQLSchema({ query: PersonType })`."""
+type Person implements Named & Mammal & Life {
+  name: String
+  pets: [Pet]
+  friends: [Named]
+  responsibilities: [PetOrPlantType]
+  progeny: [Person]
+  mother: Person
+  father: Person
+  """From `schemaWithSearchable`: 'handles promises from isTypeOf correctly when a later type matches synchronously'."""
+  search(id: String): Searchable
+}
+
+type Plant implements Named {
+  name: String
+}
+
+union Pet = Dog | Cat
+
+union PetOrPlantType = Plant | Dog | Cat
+
+interface Searchable {
+  id: String
+}
+
+type TypeA implements Searchable {
+  id: String
+  nameA: String
+}
+
+type TypeB implements Searchable {
+  id: String
+  nameB: String
+}

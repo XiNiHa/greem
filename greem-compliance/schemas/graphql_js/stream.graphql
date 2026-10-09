@@ -1,0 +1,26 @@
+"""The area schema for graphql-js v17.0.2 src/execution/incremental/__tests__/stream-test.ts."""
+type Query {
+  scalarList: [String]
+  scalarListList: [[String]]
+  friendList: [Friend]
+  nonNullFriendList: [Friend!]
+  nestedObject: NestedObject
+}
+
+type Friend {
+  id: ID
+  name: String
+  nonNullName: String!
+}
+
+type NestedObject {
+  scalarField: String
+  nonNullScalarField: String!
+  nestedFriendList: [Friend]
+  deeperNestedObject: DeeperNestedObject
+}
+
+type DeeperNestedObject {
+  nonNullScalarField: String!
+  deeperNestedFriendList: [Friend]
+}

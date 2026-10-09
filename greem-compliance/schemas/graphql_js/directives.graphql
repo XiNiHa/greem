@@ -1,0 +1,9 @@
+"""The area schema for graphql-js v17.0.2 src/execution/__tests__/directives-test.ts."""
+schema {
+  query: TestType
+}
+
+type TestType {
+  a: String
+  b: String
+}

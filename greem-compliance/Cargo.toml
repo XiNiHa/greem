@@ -17,3 +17,6 @@ proptest = "1"
 
 [build-dependencies]
 greem-build = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = "1"

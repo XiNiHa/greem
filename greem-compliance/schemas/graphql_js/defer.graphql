@@ -1,0 +1,80 @@
+"""
+The area schema for graphql-js v17.0.2 src/execution/incremental/__tests__/defer-test.ts.
+Upstream's lowercase object types `a`, `b`, `c`, `e`, `g` are `A`, `B`, `C`, `E`, `G`
+here; their fields keep upstream's names.
+"""
+type Query {
+  hero: Hero
+  a: A
+  g: G
+  """
+  `Stops late initial-path completion before publishing a deferred response` and
+  `Stops late deferred payload completion after deferred null bubbling`: their
+  per-case `LateInitialParent`/`LateDeferredParent` schemas, merged.
+  """
+  parent: LateParent
+}
+
+type Hero {
+  id: ID
+  name: String
+  nonNullName: String!
+  friends: [Friend]
+  nestedObject: NestedObject
+  anotherNestedObject: AnotherNestedObject
+}
+
+type Friend {
+  id: ID
+  name: String
+  nonNullName: String!
+}
+
+type NestedObject {
+  deeperObject: DeeperObject
+  name: String
+}
+
+type AnotherNestedObject {
+  deeperObject: DeeperObject
+}
+
+type DeeperObject {
+  foo: String
+  bar: String
+  baz: String
+  bak: String
+}
+
+type A {
+  b: B
+  someField: String
+  nonNullErrorField: String!
+}
+
+type B {
+  c: C
+  e: E
+}
+
+type C {
+  d: String
+  nonNullErrorField: String!
+}
+
+type E {
+  f: String
+}
+
+type G {
+  h: String
+}
+
+type LateParent {
+  boom: String!
+  side: LateSide
+}
+
+type LateSide {
+  value: String
+}
