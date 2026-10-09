@@ -1558,11 +1558,12 @@ fn nested_defers_under_a_streamed_item_are_delivered_before_the_end() {
 
 #[test]
 fn a_defer_nested_in_stream_items_depends_on_its_own_enclosing_fragment() {
-    // A and B both select the streamed drafts; C is nested under A only.
-    // A fails (name is non-null), so C is dropped even though B completes.
+    // A streams the drafts with C nested in its items; B streams them again
+    // under an alias (one streamed field cannot be selected twice). A fails
+    // (name is non-null), so C is dropped even though B completes.
     let query = "{ users(first: 1) { id \
         ... @defer(label: \"A\") { name drafts @stream(initialCount: 0) { ... @defer(label: \"C\") { title } } } \
-        ... @defer(label: \"B\") { drafts @stream(initialCount: 0) { id } } } }";
+        ... @defer(label: \"B\") { b: drafts @stream(initialCount: 0) { id } } } }";
     let (payloads, _) = run(
         failing(1, 1, &[("User", "name", 0)]),
         query,
@@ -1585,37 +1586,6 @@ fn a_defer_nested_in_stream_items_depends_on_its_own_enclosing_fragment() {
             .sum()
     };
     assert_eq!(count("pending"), count("completed"), "{payloads:?}");
-    // A deeper A fails a barrier after the items announced C: the client was
-    // told to expect C, so it completes with A's error instead of vanishing.
-    let late = query.replace(
-        "{ name drafts",
-        "{ posts(first: 1) { author { friends { friends { friends { id } } } name } } drafts",
-    );
-    let (payloads, _) = run(
-        failing(3, 1, &[("User", "name", 0)]),
-        &late,
-        Value::Null,
-        incremental(),
-    );
-    let pending_c = payloads
-        .iter()
-        .filter_map(|p| p["pending"].as_array())
-        .flatten()
-        .find(|p| p["label"] == json!("C"))
-        .expect("C is announced with the items");
-    let completed_c = payloads
-        .iter()
-        .filter_map(|p| p["completed"].as_array())
-        .flatten()
-        .find(|c| c["id"] == pending_c["id"])
-        .expect("C is completed");
-    assert_eq!(
-        completed_c["errors"][0]["path"],
-        json!(["users", 0, "posts", 0, "author", "name"]),
-        "{payloads:?}"
-    );
-    assert!(!serde_json::to_string(&payloads).unwrap().contains("title"));
-    assert_eq!(payloads.last().unwrap()["hasNext"], json!(false));
     // With A intact, C delivers.
     let (payloads, _) = run(world(1, 1), query, Value::Null, incremental());
     assert_eq!(
@@ -1648,10 +1618,9 @@ fn a_field_shared_by_two_fragments_survives_one_of_them_failing() {
     };
     let name_fails = || failing(1, 0, &[("User", "name", 0)]);
     // `users` is selected by A and B; only A's own `bad` fails. Whichever
-    // fragment comes first, and streamed or not, B still gets `users`.
+    // fragment comes first, B still gets `users`. (A streamed field cannot
+    // be shared: two selections of it do not merge.)
     for query in [
-        "{ ... @defer(label: \"B\") { users @stream(initialCount: 0) { id } } ... @defer(label: \"A\") { bad: users { name } users @stream(initialCount: 0) { id } } }",
-        "{ ... @defer(label: \"A\") { bad: users { name } users @stream(initialCount: 0) { id } } ... @defer(label: \"B\") { users @stream(initialCount: 0) { id } } }",
         "{ ... @defer(label: \"B\") { users { id } } ... @defer(label: \"A\") { bad: users { name } users { id } } }",
         "{ ... @defer(label: \"A\") { bad: users { name } users { id } } ... @defer(label: \"B\") { users { id } } }",
     ] {
@@ -1705,10 +1674,10 @@ fn a_nested_defer_with_only_shared_fields_still_waits_for_its_enclosing_fragment
     // fragment A completes early; CB's fragment B fails later. CB must not
     // report success on the strength of the shared data alone.
     let query = "{ users(first: 1) { id \
-        ... @defer(label: \"A\") { friends @stream(initialCount: 0) { ... @defer(label: \"CA\") { email } } } \
+        ... @defer(label: \"A\") { friends { ... @defer(label: \"CA\") { email } } } \
         ... @defer(label: \"B\") { \
             posts(first: 1) { author { friends { friends { friends { id } } } name } } \
-            friends @stream(initialCount: 0) { ... @defer(label: \"CB\") { email } } } } }";
+            friends { ... @defer(label: \"CB\") { email } } } } }";
     let (payloads, _) = run(
         failing(3, 1, &[("User", "name", 0)]),
         query,
@@ -1763,10 +1732,10 @@ fn a_nested_defer_failing_with_its_shared_fields_still_waits_for_its_enclosing_f
     // The shared `id` fails for friend 1, which fails CA and CB there. CB's
     // enclosing fragment B is still running: CB's failure waits for it too.
     let query = "{ users(first: 1) { uuid \
-        ... @defer(label: \"A\") { friends @stream(initialCount: 0) { ... @defer(label: \"CA\") { id } } } \
+        ... @defer(label: \"A\") { friends { ... @defer(label: \"CA\") { id } } } \
         ... @defer(label: \"B\") { \
             posts(first: 1) { author { friends { friends { friends { uuid } } } } } \
-            friends @stream(initialCount: 0) { ... @defer(label: \"CB\") { id } } } } }";
+            friends { ... @defer(label: \"CB\") { id } } } } }";
     let (payloads, _) = run(
         failing(3, 1, &[("User", "id", 1)]),
         query,
@@ -1806,12 +1775,12 @@ fn a_nested_defer_failing_with_its_shared_fields_still_waits_for_its_enclosing_f
 
 #[test]
 fn a_reused_fragment_keeps_each_enclosing_defer_context() {
-    // A and B both stream friends through F. F's deferred email depends on
+    // A and B both select friends through F. F's deferred email depends on
     // A in one occurrence and on B in the other: A failing must not take
     // B's copy with it.
     let query = "{ users(first: 1) { id \
-        ... @defer(label: \"A\") { name friends @stream(initialCount: 0) { ...F } } \
-        ... @defer(label: \"B\") { friends @stream(initialCount: 0) { ...F } } } } \
+        ... @defer(label: \"A\") { name friends { ...F } } \
+        ... @defer(label: \"B\") { friends { ...F } } } } \
         fragment F on User { id ... @defer(label: \"E\") { email } }";
     // The same operation with F expanded in place behaves the same.
     let inline = query[..query.find("fragment F").unwrap()]
@@ -1837,20 +1806,27 @@ fn a_reused_fragment_keeps_each_enclosing_defer_context() {
 }
 
 #[test]
-fn equivalent_stream_directives_merge() {
-    // The same arguments in another order, or spelled through defaults.
-    for options in [incremental(), ExecuteOptions::default()] {
-        let (payloads, _) = run(
-            world(1, 0),
-            "{ numbers @stream(initialCount: 0, if: true) numbers @stream(if: true, initialCount: 0) numbers @stream }",
-            Value::Null,
-            options,
-        );
-        assert_eq!(
-            fold(&payloads)["data"],
-            json!({"numbers": [1, 2, 3]}),
-            "{payloads:?}"
-        );
+fn overlapping_stream_directives_never_merge() {
+    // The RFC's HasNoOverlappingStreams: however the directives are written,
+    // even identically or switched off, and whether or not delivery is
+    // incremental, two selections of a streamed field are a request error.
+    for query in [
+        "{ numbers @stream(initialCount: 0, if: true) numbers @stream(if: true, initialCount: 0) }",
+        "{ numbers @stream numbers }",
+        "{ numbers @stream(if: false) numbers @stream(if: false) }",
+    ] {
+        for options in [incremental(), ExecuteOptions::default()] {
+            let (payloads, calls) = run(world(1, 0), query, Value::Null, options);
+            assert_eq!(
+                payloads,
+                [json!({"errors": [{
+                    "message": "fields `numbers` conflict because they have overlapping stream directives",
+                    "locations": [{"line": 1, "column": 3}],
+                }]})],
+                "{query}"
+            );
+            assert!(calls.is_empty());
+        }
     }
 }
 
@@ -1882,7 +1858,7 @@ fn disabled_delivery_ignores_stream_arguments_but_not_merge_conflicts() {
         v["errors"][0]["message"]
             .as_str()
             .unwrap()
-            .contains("differing stream directives"),
+            .contains("overlapping stream directives"),
         "{v}"
     );
     assert!(calls.is_empty());

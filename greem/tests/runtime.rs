@@ -1278,3 +1278,53 @@ fn negative_initial_count_is_an_execution_error() {
         })]
     );
 }
+
+#[test]
+fn overlapping_streams_cannot_merge_even_with_equal_arguments() {
+    // The RFC's HasNoOverlappingStreams, a validation rule: two selections
+    // of one response name cannot merge when either has `@stream`, however
+    // it is written, whatever `@skip`/`@include` or a variable would do at
+    // run time, and whether or not delivery is incremental. The error
+    // points at the first streamed occurrence in document order.
+    let schema = build_schema();
+    for (query, column) in [
+        (
+            "{ users @stream(initialCount: 1) { id } users @stream(initialCount: 1) { name } }",
+            3,
+        ),
+        (
+            "{ users { id } users @stream(initialCount: 1) { name } }",
+            16,
+        ),
+        ("{ users @stream(if: false) { id } users { name } }", 3),
+        ("{ users @stream @skip(if: true) { id } users { name } }", 3),
+        (
+            "query($s: Boolean!) { users @stream @skip(if: $s) { id } users { name } }",
+            23,
+        ),
+        // Reached through the spread first, so the error points into `F`.
+        (
+            "{ ...F ... on Query { users @stream { name } } } fragment F on Query { users @stream { id } }",
+            72,
+        ),
+        // Two fragments spread on the same object, one in a nested set.
+        (
+            "{ user(id: \"1\") { ...P ... on User { posts @stream { id } } } } fragment P on User { posts { title } }",
+            38,
+        ),
+    ] {
+        let errors = schema
+            .parse(query)
+            .err()
+            .unwrap_or_else(|| panic!("{query}"));
+        let v = serde_json::from_slice::<Value>(&errors.into_payload().json).unwrap();
+        assert_eq!(
+            v,
+            json!({"errors": [{
+                "message": format!("fields `{}` conflict because they have overlapping stream directives", if column == 38 { "posts" } else { "users" }),
+                "locations": [{"line": 1, "column": column}],
+            }]}),
+            "{query}"
+        );
+    }
+}

@@ -284,9 +284,12 @@ would cross a delivery boundary fails the group instead.
   nested fragment is dropped; if it fails afterwards the nested fragment
   completes with the same error. `IncrementalDelivery::Disabled` makes the
   tree ignore both directives: their arguments are not validated, though
-  merged fields must still agree on `@stream` (its resolved arguments,
-  however the directive is written; disagreement is a request error,
-  graphql-js's rule, which apollo-compiler does not check). A fragment
+  two selections of one response name still cannot merge when either
+  carries `@stream`, however it is written (the RFC's
+  `HasNoOverlappingStreams`; graphql-js validates it and apollo-compiler
+  does not, so `Schema::parse` checks it over every selection set of the
+  document, ignoring `@skip`, `@include`, variables and type conditions
+  like the rest of validation). A fragment
   spread reached through
   several enclosing fragments is collected once per enclosing fragment, so
   each copy of its nested defers keeps its own dependency.
