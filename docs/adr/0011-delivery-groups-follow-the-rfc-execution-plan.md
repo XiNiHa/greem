@@ -1,0 +1,12 @@
+# Delivery groups follow the RFC's execution plan
+
+Fields under a shared parent used to be grouped relative to the usages that parent was delivered under: once two fragments shared `hero`, `hero { id }` of one and `hero { name }` of the other were both immediate beneath it, ran in the shared set and shipped together under whichever fragment completed first, and a non-null error in one of them nulled the nearest nullable ancestor inside the shared subtree before it was delivered. The graphql-js execution suite (#24) showed that the RFC's `BuildExecutionPlan` partitions every field by its own filtered usage set, and that graphql-js does the same, so we now key each deferred set by the fragments that select its fields, however far above they were spread, and make a set immediate only when its usage set is its parent field's. Such a set delivers into its fragment with a `subPath`, and a non-null error inside it fails that fragment alone. With it come the RFC's announcement rules: a nested fragment hangs off the fragment enclosing it and is announced when that one completes, a fragment with nothing left to deliver at that moment is never announced and its children take its place, and a set whose objects were nulled before its fragment shipped delivers nothing for them.
+
+## Considered options
+
+- Keep the relative grouping and record it as a deliberate deviation: it batches sibling fragments' subfields into one set-based call, but it attributes one fragment's data to another on the wire, loses a sibling's data when a non-null error crosses the undelivered shared subtree, and contradicts the RFC and graphql-js on 24 upstream cases.
+- Announce every fragment and complete the empty ones a payload later: simpler than tracking whether a fragment has work, but the RFC emits no `pending` entry for them and clients see phantom groups.
+
+## Consequences
+
+The group model of [Incremental delivery as tagged scopes](0003-incremental-delivery-as-tagged-scopes.md) is unchanged: a group is still `(usage, object)`, shared sets still run once under their own record. Sets keyed by an ancestor fragment are one more frame each, so the static depth check counts a non-immediate set as at least one level. A fragment is announced only when a set of its own holds it or a set it shares is pending, which is also what drops a fragment whose only set sat beneath a position the initial payload nulled. Fields selected by one fragment under a parent several share resolve in a scope of their own, one set-based call per such fragment instead of one for all.

@@ -121,8 +121,6 @@ pub struct Tree {
     pub(crate) incremental: bool,
     pub(crate) max_depth: u32,
     collected: HashMap<(NodeId, String), Arc<Collected>>,
-    /// The innermost usage every contributor of the node being collected sits under.
-    outer_usage: Option<UsageId>,
 }
 
 /// The RFC's HasNoOverlappingStreams, which apollo-compiler does not check:
@@ -281,7 +279,6 @@ impl Tree {
             incremental,
             max_depth,
             collected: HashMap::new(),
-            outer_usage: None,
         }
     }
 
@@ -338,38 +335,23 @@ impl Tree {
                 )?;
             }
             Source::Fields(occurrences) => {
-                // The usages the producing field is delivered under already own
-                // this node's objects; fields are grouped relative to them.
-                let base = self.nodes[node as usize].base.clone();
                 // One visited set for every occurrence merged into this node,
                 // as CollectSubfields shares it across the merged fields.
                 let mut visited = Vec::new();
                 for occ in occurrences.clone() {
-                    // Everything up to the last base usage on the path is already delivered.
-                    let cut = occ
-                        .usages
-                        .iter()
-                        .rposition(|u| base.contains(u))
-                        .map_or(0, |i| i + 1);
-                    let relative: Vec<UsageId> = occ.usages[cut..].to_vec();
-                    // Defers nested here sit under the usage this occurrence
-                    // was collected under, not under another fragment's that
-                    // merely selects the same field.
-                    self.outer_usage = occ.usages[..cut]
-                        .last()
-                        .copied()
-                        .or(base.iter().copied().max());
+                    // Each occurrence keeps the usages it was collected under,
+                    // so a nested defer sits under the fragment that reached
+                    // it, not under another one that merely selects the field.
                     self.collect_set(
                         &occ.field.selection_set,
                         typename,
-                        &relative,
+                        &occ.usages,
                         &mut groups,
                         &mut introduced,
                         node,
                         &mut visited,
                     )?;
                 }
-                self.outer_usage = None;
             }
         }
         let parent_depth = self.nodes[node as usize].depth;
@@ -383,7 +365,12 @@ impl Tree {
                 "__schema" | "__type" if node == 0 => FieldKind::Introspection,
                 _ => FieldKind::Normal,
             };
-            let usages = self.field_usages(&occurrences);
+            // The RFC's BuildExecutionPlan: a field whose filtered usage set
+            // is its parent's runs with the parent's set; any other set is a
+            // deferred set of its own, keyed by the fragments that select
+            // the field, which may all be ancestors already delivering here.
+            let set = self.field_usages(&occurrences);
+            let usages = if set == base { Vec::new() } else { set.clone() };
             let directive = if kind == FieldKind::Normal {
                 self.stream_arguments(first)?
             } else {
@@ -410,7 +397,7 @@ impl Tree {
             let mut depth = parent_depth
                 + usages
                     .iter()
-                    .map(|&u| self.defer_levels(u, &base))
+                    .map(|&u| self.defer_levels(u, &base).max(1))
                     .max()
                     .unwrap_or(0);
             if kind == FieldKind::Normal {
@@ -438,7 +425,7 @@ impl Tree {
                     parent: Some(node),
                     depth,
                     stream: stream.clone(),
-                    base: usages.clone(),
+                    base: set,
                     source: Source::Fields(occurrences.clone()),
                 });
                 Some(id)
@@ -510,7 +497,7 @@ impl Tree {
         groups: &mut IndexMap<String, Vec<Occurrence>>,
         introduced: &mut Vec<UsageId>,
         node: NodeId,
-        visited: &mut Vec<(Name, Vec<UsageId>, Option<UsageId>)>,
+        visited: &mut Vec<(Name, Vec<UsageId>)>,
     ) -> Result<(), Abort> {
         for selection in &set.selections {
             if !self.included(selection.directives())? {
@@ -552,11 +539,7 @@ impl Tree {
                     // under, which its nested defers depend on. A deferred
                     // spread is its own usage every time.
                     if path.len() == usage_path.len() {
-                        let marker = (
-                            spread.fragment_name.clone(),
-                            usage_path.to_vec(),
-                            self.outer_usage,
-                        );
+                        let marker = (spread.fragment_name.clone(), usage_path.to_vec());
                         if visited.contains(&marker) {
                             continue;
                         }
@@ -602,7 +585,7 @@ impl Tree {
             id,
             node,
             label,
-            parent: usage_path.last().copied().or(self.outer_usage),
+            parent: usage_path.last().copied(),
         });
         introduced.push(id);
         let mut path = usage_path.to_vec();
@@ -994,6 +977,74 @@ mod tests {
                 InputValue::Int(2)
             )]))
         );
+    }
+
+    /// A helper for the grouping tests: the tree of `query` over `sdl` with
+    /// incremental delivery on.
+    fn tree_of(sdl: &str, query: &str) -> Tree {
+        let sdl = format!(
+            "directive @defer(if: Boolean! = true, label: String) on FRAGMENT_SPREAD | INLINE_FRAGMENT\n\
+            directive @stream(if: Boolean! = true, label: String, initialCount: Int = 0) on FIELD\n{sdl}"
+        );
+        let schema = Arc::new(ApolloSchema::parse_and_validate(sdl, "s.graphql").unwrap());
+        let doc = ExecutableDocument::parse_and_validate(&schema, query, "q.graphql").unwrap();
+        let operation = doc.operations.get(None).unwrap().clone();
+        let variables =
+            apollo_compiler::request::coerce_variable_values(&schema, &operation, &JsonMap::new())
+                .unwrap();
+        Tree::new(
+            schema,
+            Arc::new(Document { doc }),
+            operation,
+            variables,
+            true,
+            32,
+        )
+    }
+
+    fn usages_of(collected: &Collected) -> Vec<(&str, Vec<UsageId>)> {
+        collected
+            .fields
+            .iter()
+            .map(|f| (f.key.as_str(), f.usages.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn fields_are_grouped_by_their_own_usage_set_not_their_parents() {
+        // The RFC's BuildExecutionPlan: `hero` is shared by both fragments,
+        // and each subfield only one of them selects is a set of its own
+        // keyed by that fragment, not part of the shared set.
+        let mut tree = tree_of(
+            "type Query { hero: Hero } type Hero { id: ID name: String both: Int }",
+            "{ ... @defer { hero { id both } } ... @defer { hero { name both } } }",
+        );
+        let root = tree.collect(0, "Query").unwrap();
+        assert_eq!(root.introduced, vec![0, 1]);
+        assert_eq!(usages_of(&root), vec![("hero", vec![0, 1])]);
+        let hero = root.fields[0].child.unwrap();
+        let hero = tree.collect(hero, "Hero").unwrap();
+        assert_eq!(
+            usages_of(&hero),
+            vec![("id", vec![0]), ("both", vec![]), ("name", vec![1])]
+        );
+    }
+
+    #[test]
+    fn a_field_under_one_fragment_only_is_immediate_relative_to_it() {
+        let mut tree = tree_of(
+            "type Query { hero: Hero } type Hero { id: ID name: String }",
+            "{ hero { id } ... @defer { hero { name ... @defer { id } } } }",
+        );
+        let root = tree.collect(0, "Query").unwrap();
+        assert_eq!(usages_of(&root), vec![("hero", vec![])]);
+        let hero = root.fields[0].child.unwrap();
+        let hero = tree.collect(hero, "Hero").unwrap();
+        // `id` is immediate; `name` is the outer fragment's own set; the
+        // inner fragment selects only `id`, which the initial set already
+        // delivers, so it introduces a usage with no set.
+        assert_eq!(usages_of(&hero), vec![("id", vec![]), ("name", vec![0])]);
+        assert_eq!(hero.introduced, vec![1]);
     }
 
     #[test]

@@ -243,9 +243,15 @@ would cross a delivery boundary fails the group instead.
   completing until it has settled. One member failing does not touch it; its
   own failure fails every member; it is dropped once no member can deliver it. Its
   record outlives its objects until every member has completed, since a
-  member may read the outcome later. Fields are grouped relative to the
-  usages the producing field is delivered under, with the ancestor rule from
-  the spec.
+  member may read the outcome later. Fields are partitioned as the RFC's
+  `BuildExecutionPlan` does (ADR 0011): each field's usage set is the
+  fragments that select it, pruned by the ancestor rule; a field whose set
+  is its parent field's runs with the parent's set, any other set is a
+  deferred set of its own, keyed by those fragments however far above they
+  were spread, and delivered into them with a `subPath`. So once two
+  fragments share `hero`, `hero { id }` of one and `hero { name }` of the
+  other are sets of their own, and a non-null error in one fails that
+  fragment alone.
 - `Streamed<S>` at the outermost list level becomes a driver (`exec/stream.rs`):
   `initialCount` items are pulled inside the immediate scope; the pump fills a
   capacity-bounded buffer while other work is pending; each turn is one

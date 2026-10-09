@@ -1328,3 +1328,41 @@ fn overlapping_streams_cannot_merge_even_with_equal_arguments() {
         );
     }
 }
+
+fn incremental() -> ExecuteOptions {
+    ExecuteOptions {
+        incremental: IncrementalDelivery::Enabled,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn sibling_fragments_sharing_a_field_deliver_their_own_subfields() {
+    // The RFC's execution plan: `user` is one shared set, and each subfield
+    // only one fragment selects ships under that fragment with a subPath.
+    let (p, _) = run(
+        App::default(),
+        r#"{ ... @defer { user(id: "1") { id } } ... @defer { user(id: "1") { name } } }"#,
+        Value::Null,
+        incremental(),
+    );
+    assert_eq!(
+        p,
+        vec![
+            json!({
+                "data": {},
+                "pending": [{"id": "0", "path": []}, {"id": "1", "path": []}],
+                "hasNext": true,
+            }),
+            json!({
+                "incremental": [
+                    {"id": "0", "data": {"user": {}}},
+                    {"id": "0", "subPath": ["user"], "data": {"id": "1"}},
+                    {"id": "1", "subPath": ["user"], "data": {"name": "Ann"}},
+                ],
+                "completed": [{"id": "0"}, {"id": "1"}],
+                "hasNext": false,
+            }),
+        ]
+    );
+}
