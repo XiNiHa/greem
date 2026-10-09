@@ -453,12 +453,14 @@ impl<'a, C: Send + Sync + 'a> Completion<'a, '_, C> {
             let mut table = self.cx.shared.groups();
             positions
                 .iter()
-                .map(|pos| match &streamed {
+                .enumerate()
+                .map(|(p, pos)| match &streamed {
                     Some(info) => table.alloc(
                         GroupKind::Stream {
                             node: field.child.unwrap_or(0),
                             label: info.label.clone(),
                             path: self.cx.meta.path_to(pos.object, &field.key, &[]),
+                            parent: p as u32,
                         },
                         self.cx.groups[pos.object as usize],
                     ),

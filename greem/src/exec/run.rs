@@ -20,29 +20,22 @@ pub(crate) fn advance(root: &mut Scope<'_>, shared: &Shared) -> bool {
     let mut changed = false;
     {
         let mut groups = shared.groups();
-        for (_, group) in groups.iter_mut() {
-            if matches!(group.state, GroupState::Announced) {
-                group.state = GroupState::Released;
-                // The next barrier can ship it, even when it starts no work
-                // itself (a fragment whose only content is a nested defer).
-                changed = true;
-            }
-        }
-        // A shared field set runs as soon as one member fragment may.
-        for g in groups.ids() {
-            let group = groups.get(g);
-            if !matches!(group.state, GroupState::Unreleased) {
+        for g in groups.take_announced() {
+            if !matches!(groups.get(g).state, GroupState::Announced) {
                 continue;
             }
-            let GroupKind::Shared { members } = &group.kind else {
+            groups.set_state(g, GroupState::Released);
+            // The next barrier can ship it, even when it starts no work
+            // itself (a fragment whose only content is a nested defer).
+            changed = true;
+            if groups.is_dead(g) {
                 continue;
-            };
-            if members
-                .iter()
-                .any(|&m| groups.is_released(m) && !groups.is_dead(m))
-            {
-                groups.get_mut(g).state = GroupState::Released;
-                changed = true;
+            }
+            // A shared field set runs as soon as one member fragment may.
+            for s in groups.sharing(g) {
+                if matches!(groups.get(s).state, GroupState::Unreleased) {
+                    groups.set_state(s, GroupState::Released);
+                }
             }
         }
     }
@@ -93,7 +86,7 @@ fn advance_scope_inner(scope: &mut Scope<'_>, shared: &Shared, changed: &mut boo
             }
         }
         if let Some(mut driver) = column.stream.take() {
-            let released = {
+            let released = driver.is_released() || {
                 let groups = shared.groups();
                 driver
                     .groups()
@@ -131,7 +124,7 @@ fn advance_scope_inner(scope: &mut Scope<'_>, shared: &Shared, changed: &mut boo
                     )
                     && matches!(groups.get(g).state, GroupState::Unreleased)
                 {
-                    groups.get_mut(g).state = GroupState::Dropped;
+                    groups.set_state(g, GroupState::Dropped);
                 }
             }
             let all_dead = deferred.groups.iter().all(|&g| groups.is_dead(g));
@@ -139,7 +132,7 @@ fn advance_scope_inner(scope: &mut Scope<'_>, shared: &Shared, changed: &mut boo
                 // Abandoned deferred work: make its groups terminal so they reclaim.
                 for &g in &deferred.groups {
                     if matches!(groups.get(g).state, GroupState::Unreleased) {
-                        groups.get_mut(g).state = GroupState::Dropped;
+                        groups.set_state(g, GroupState::Dropped);
                     }
                 }
             }

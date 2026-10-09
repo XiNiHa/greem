@@ -217,10 +217,39 @@ fn ship_roots(
     }
 }
 
+/// Settles what the groups that died since the last barrier take with
+/// them: their announced dependents fail, the shared field sets nobody can
+/// deliver any more are dropped, and whatever an ancestor's death made
+/// reclaimable is queued for the sweep. Repeats while that kills more.
+fn settle_dead(groups: &mut Groups, out: &mut Entries) {
+    loop {
+        let died = groups.take_died();
+        if died.is_empty() {
+            break;
+        }
+        // Everything beneath a dead group is dead too; collect it once, in
+        // id order, so the entries come out as a scan would emit them.
+        let mut affected: Vec<GroupId> = died.clone();
+        for &g in &died {
+            affected.extend(groups.descendants(g));
+        }
+        affected.sort_unstable();
+        affected.dedup();
+        for &g in &affected {
+            groups.queue_reclaim(g);
+        }
+        fail_dependents(groups, &affected, out);
+        drop_orphaned_shared(groups, &affected);
+    }
+}
+
 /// Drops every shared field set none of whose member fragments can still
-/// deliver it.
-fn drop_orphaned_shared(groups: &mut Groups) {
-    for g in groups.ids() {
+/// deliver it. Only the sets of `dead` groups can have become so.
+fn drop_orphaned_shared(groups: &mut Groups, dead: &[GroupId]) {
+    let mut sets: Vec<GroupId> = dead.iter().flat_map(|&g| groups.sharing(g)).collect();
+    sets.sort_unstable();
+    sets.dedup();
+    for g in sets {
         let group = groups.get(g);
         if !matches!(
             group.state,
@@ -232,20 +261,19 @@ fn drop_orphaned_shared(groups: &mut Groups) {
             continue;
         };
         if members.iter().all(|&m| groups.is_dead(m)) {
-            groups.get_mut(g).state = GroupState::Dropped;
+            groups.set_state(g, GroupState::Dropped);
         }
     }
 }
 
-/// Fails every announced group that can no longer deliver because the
-/// fragment enclosing it (its `after` dependency) or an ancestor failed or was
-/// dropped: the client was told to expect it, so it completes with that
-/// group's error. Repeats for chains of dependents.
-fn fail_dependents(groups: &mut Groups, out: &mut Entries) {
-    let ids = groups.ids();
+/// Fails every announced group among `candidates` that can no longer
+/// deliver because the fragment enclosing it (its `after` dependency) or an
+/// ancestor failed or was dropped: the client was told to expect it, so it
+/// completes with that group's error. Repeats for chains of dependents.
+fn fail_dependents(groups: &mut Groups, candidates: &[GroupId], out: &mut Entries) {
     loop {
         let mut failed = false;
-        for &g in &ids {
+        for &g in candidates {
             let group = groups.get(g);
             let after = match group.kind {
                 GroupKind::Defer { after, .. } => after,
@@ -272,7 +300,7 @@ fn fail_dependents(groups: &mut Groups, out: &mut Entries) {
                 continue;
             };
             let id = groups.assign_wire_id(g).to_string();
-            groups.get_mut(g).state = GroupState::Failed(failure.clone());
+            groups.set_state(g, GroupState::Failed(failure.clone()));
             out.completed.push(CompletedEntry {
                 id,
                 errors: failure.into_iter().collect(),
@@ -311,7 +339,7 @@ fn announce_children(
                 if !alive {
                     // The parent payload nulled this object: its groups never run.
                     if !unshipped.contain(meta, object as u32) {
-                        groups.get_mut(g).state = GroupState::Dropped;
+                        groups.set_state(g, GroupState::Dropped);
                     }
                     continue;
                 } // Its enclosing fragment already failed: it is never announced.
@@ -323,7 +351,7 @@ fn announce_children(
                         GroupState::Failed(_) | GroupState::Dropped
                     )
                 {
-                    groups.get_mut(g).state = GroupState::Dropped;
+                    groups.set_state(g, GroupState::Dropped);
                     continue;
                 }
 
@@ -332,7 +360,7 @@ fn announce_children(
                     _ => continue,
                 };
                 let id = groups.assign_wire_id(g);
-                groups.get_mut(g).state = GroupState::Announced;
+                groups.set_state(g, GroupState::Announced);
                 out.pending.push(PendingEntry {
                     id: id.to_string(),
                     path,
@@ -360,18 +388,18 @@ fn announce_children(
                 let parent_object = driver.parent_object(p);
                 if !scope.alive[parent_object as usize] {
                     if !unshipped.contain(scope.meta, parent_object) {
-                        groups.get_mut(g).state = GroupState::Dropped;
+                        groups.set_state(g, GroupState::Dropped);
                     }
                     continue;
                 }
                 // The list itself was nulled (an item error reached it) or
                 // never was a list: there is no position to stream into.
                 if !matches!(column.level0[parent_object as usize], Slot::Items { .. }) {
-                    groups.get_mut(g).state = GroupState::Dropped;
+                    groups.set_state(g, GroupState::Dropped);
                     continue;
                 }
                 if driver.source_ended(p) {
-                    groups.get_mut(g).state = GroupState::Completed;
+                    groups.set_state(g, GroupState::Completed);
                     continue;
                 }
                 let (path, label) = match &group.kind {
@@ -379,7 +407,7 @@ fn announce_children(
                     _ => unreachable!(),
                 };
                 let id = groups.assign_wire_id(g);
-                groups.get_mut(g).state = GroupState::Announced;
+                groups.set_state(g, GroupState::Announced);
                 out.pending.push(PendingEntry {
                     id: id.to_string(),
                     path,
@@ -456,7 +484,7 @@ pub(crate) fn stalled(groups: &mut Groups, initial_shipped: bool) -> BarrierOutp
     let mut entries = Entries::default();
     for g in open {
         let id = groups.assign_wire_id(g).to_string();
-        groups.get_mut(g).state = GroupState::Failed(Some(error.clone()));
+        groups.set_state(g, GroupState::Failed(Some(error.clone())));
         entries.completed.push(CompletedEntry {
             id,
             errors: vec![error.clone()],
@@ -683,7 +711,8 @@ impl Barrier<'_, '_> {
 
     fn fail_with_shared(&mut self, g: GroupId, failure: Option<GraphQLError>) {
         let id = self.groups.assign_wire_id(g).to_string();
-        self.groups.get_mut(g).state = GroupState::Failed(failure.clone());
+        self.groups
+            .set_state(g, GroupState::Failed(failure.clone()));
         self.out.completed.push(CompletedEntry {
             id,
             errors: failure.into_iter().collect(),
@@ -697,9 +726,10 @@ impl Barrier<'_, '_> {
             // The error that halted the group was captured when it was
             // recorded; it may still sit inside a pending column.
             let error = self.groups.fail_halted(g);
-            for (id, other) in self.groups.iter_mut() {
+            let others: Vec<GroupId> = self.groups.iter().map(|(id, _)| id).collect();
+            for id in others {
                 if id != g {
-                    other.state = GroupState::Dropped;
+                    self.groups.set_state(id, GroupState::Dropped);
                 }
             }
             return ControlFlow::Break(vec![error]);
@@ -707,7 +737,7 @@ impl Barrier<'_, '_> {
         let roots = [(Vec::new(), 0)];
         let errors = root_errors(self.root, &roots);
         let failure = self.settle(&roots);
-        self.groups.get_mut(g).state = GroupState::Completed;
+        self.groups.set_state(g, GroupState::Completed);
         if failure.is_some() {
             self.initial = Some((Data::Null, errors));
         } else {
@@ -727,7 +757,7 @@ impl Barrier<'_, '_> {
         }
         let roots = self.group_roots(g);
         match self.settle(&roots) {
-            Some(error) => self.groups.get_mut(g).state = GroupState::Failed(Some(*error)),
+            Some(error) => self.groups.set_state(g, GroupState::Failed(Some(*error))),
             None => self.ready_shared.push(g),
         }
     }
@@ -751,14 +781,15 @@ impl Barrier<'_, '_> {
         let failure = self.settle(&roots);
         let id = self.groups.assign_wire_id(g).to_string();
         if let Some(error) = failure {
-            self.groups.get_mut(g).state = GroupState::Failed(Some((*error).clone()));
+            self.groups
+                .set_state(g, GroupState::Failed(Some((*error).clone())));
             self.out.completed.push(CompletedEntry {
                 id,
                 errors: vec![*error],
             });
             return;
         }
-        self.groups.get_mut(g).state = GroupState::Completed;
+        self.groups.set_state(g, GroupState::Completed);
         let group_path = match &self.groups.get(g).kind {
             GroupKind::Defer { path, .. } => path.clone(),
             _ => Vec::new(),
@@ -773,7 +804,7 @@ impl Barrier<'_, '_> {
             if !matches!(self.groups.get(s).state, GroupState::Released) {
                 continue;
             }
-            self.groups.get_mut(s).state = GroupState::Completed;
+            self.groups.set_state(s, GroupState::Completed);
             self.shipped.push(s);
             let roots = self.group_roots(s);
             let errors = root_errors(self.root, &roots);
@@ -805,6 +836,7 @@ impl Barrier<'_, '_> {
             let shipped = self.ship_ranges(&path, field, ranges);
             self.complete_streams(&path, field, &shipped);
         }
+        self.groups.clear_halted();
     }
 
     /// The unshipped item ranges of one streamed column that may ship now,
@@ -864,19 +896,36 @@ impl Barrier<'_, '_> {
     /// released, whether its items made a turn yet or their children are
     /// still pending.
     fn fail_halted_streams(&mut self, path: &[Step], field: u32) {
-        let driver_groups: Vec<GroupId> = with_scope_at_mut(self.root, path, &mut |scope| {
-            let column = scope.column(field).expect("streamed column");
-            column.stream.as_ref().expect("driver").groups().collect()
-        });
-        let mut halted = Vec::new();
-        for g in driver_groups {
-            if let GroupState::Halted(error) = &self.groups.get(g).state {
-                let error = error.clone();
-                let id = self.groups.assign_wire_id(g).to_string();
-                halted.push((g, id, error));
-            }
+        if self.groups.halted().is_empty() {
+            return;
         }
-        for (g, id, error) in halted {
+        // A halted stream group names its driver parent; it is this column's
+        // when that parent carries it.
+        let groups = &*self.groups;
+        let mut mine: Vec<(usize, GroupId)> = with_scope_at_mut(self.root, path, &mut |scope| {
+            let column = scope.column(field).expect("streamed column");
+            let driver = column.stream.as_ref().expect("driver");
+            groups
+                .halted()
+                .iter()
+                .filter_map(|&g| match groups.get(g).kind {
+                    GroupKind::Stream { parent, .. }
+                        if (parent as usize) < driver.parent_count()
+                            && driver.group(parent as usize) == g =>
+                    {
+                        Some((parent as usize, g))
+                    }
+                    _ => None,
+                })
+                .collect()
+        });
+        mine.sort_unstable();
+        for (_, g) in mine {
+            let GroupState::Halted(error) = &self.groups.get(g).state else {
+                continue;
+            };
+            let error = error.clone();
+            let id = self.groups.assign_wire_id(g).to_string();
             self.fail_stream_group(path, field, g, id, error);
         }
     }
@@ -972,7 +1021,7 @@ impl Barrier<'_, '_> {
                 match group.state {
                     GroupState::Released => {
                         let id = self.groups.assign_wire_id(g).to_string();
-                        self.groups.get_mut(g).state = GroupState::Completed;
+                        self.groups.set_state(g, GroupState::Completed);
                         self.out.completed.push(CompletedEntry {
                             id,
                             errors: Vec::new(),
@@ -996,7 +1045,8 @@ impl Barrier<'_, '_> {
         id: String,
         error: GraphQLError,
     ) {
-        self.groups.get_mut(g).state = GroupState::Failed(Some(error.clone()));
+        self.groups
+            .set_state(g, GroupState::Failed(Some(error.clone())));
         self.out.completed.push(CompletedEntry {
             id,
             errors: vec![error],
@@ -1013,8 +1063,7 @@ impl Barrier<'_, '_> {
     /// shared field sets nobody can deliver, and announces the children of
     /// whatever shipped.
     fn announce(&mut self) {
-        fail_dependents(self.groups, &mut self.out);
-        drop_orphaned_shared(self.groups);
+        settle_dead(self.groups, &mut self.out);
         if !self.shipped.is_empty() {
             announce_children(self.root, &self.shipped, self.groups, &mut self.out);
         }
@@ -1036,12 +1085,7 @@ impl Barrier<'_, '_> {
     /// subsequent payload whenever there is an entry to send, and always for
     /// the last one.
     fn finish(self, state: &mut Loop) -> Option<BarrierOutput> {
-        let has_next = self.groups.iter().any(|(_, g)| {
-            matches!(
-                g.state,
-                GroupState::Announced | GroupState::Released | GroupState::Halted(_)
-            )
-        }) || !self.out.pending.is_empty();
+        let has_next = self.groups.any_open() || !self.out.pending.is_empty();
         if !state.initial_shipped {
             let (data, errors) = self.initial?;
             state.initial_shipped = true;
@@ -1097,6 +1141,7 @@ mod tests {
             node: 0,
             label: None,
             path: Vec::new(),
+            parent: 0,
         }
     }
 
@@ -1106,7 +1151,7 @@ mod tests {
         fn announced(groups: &mut Groups, kind: GroupKind, state: GroupState) -> GroupId {
             let g = groups.alloc(kind, 0);
             groups.assign_wire_id(g);
-            groups.get_mut(g).state = state;
+            groups.set_state(g, state);
             g
         }
         let released = announced(&mut groups, defer(), GroupState::Released);
@@ -1128,7 +1173,7 @@ mod tests {
             },
             0,
         );
-        groups.get_mut(shared).state = GroupState::Released;
+        groups.set_state(shared, GroupState::Released);
 
         let output = stalled(&mut groups, true);
         assert_eq!(output.kind, PayloadKind::Subsequent);
