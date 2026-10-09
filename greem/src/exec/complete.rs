@@ -374,18 +374,23 @@ impl<'a, C: Send + Sync + 'a> Completion<'a, '_, C> {
                 let group = self.cx.groups[pos.object as usize];
                 for &usage in &child_header.introduced {
                     let usage_def = &self.cx.table.usages[usage as usize];
-                    // A nested fragment ships after whichever is deeper: the
-                    // group delivering this object, or its parent fragment's group.
-                    // The group delivering this object creates the position; the
-                    // enclosing fragment's group must ship first too. Whichever is
-                    // deeper is the parent; unrelated ones become an `after` dependency.
+                    // A nested fragment is announced when the fragment
+                    // enclosing it completes, which is after the group
+                    // delivering this object shipped, since that fragment
+                    // selects the field producing it. Inside stream items the
+                    // position comes from the stream, which delivers them
+                    // after the enclosing fragment completed: the stream group
+                    // is the parent and the enclosing fragment an `after`
+                    // dependency.
                     let outer = usage_def
                         .parent
                         .and_then(|p| pending.iter().find(|(u, _)| *u == p).map(|(_, g)| *g));
+                    let streamed = matches!(groups.get(group).kind, GroupKind::Stream { .. });
                     let (parent_group, after) = match outer {
                         Some(outer) if groups.is_ancestor(outer, group) => (group, None),
                         Some(outer) if groups.is_ancestor(group, outer) => (outer, None),
-                        Some(outer) => (group, Some(outer)),
+                        Some(outer) if streamed => (group, Some(outer)),
+                        Some(outer) => (outer, None),
                         None => (group, None),
                     };
                     let g = groups.alloc(
@@ -629,6 +634,7 @@ where
                 let parents = parents.clone();
                 DeferredSet {
                     set,
+                    excluded: vec![false; groups.len()],
                     groups,
                     state: DeferredSetState::Waiting(Box::new(move || {
                         T::__start_fields(&cx, &parents, set)

@@ -1669,10 +1669,10 @@ fn a_field_shared_by_two_fragments_survives_one_of_them_failing() {
 }
 
 #[test]
-fn a_nested_defer_with_only_shared_fields_still_waits_for_its_enclosing_fragment() {
+fn a_nested_defer_whose_enclosing_fragment_fails_is_never_announced() {
     // CA and CB share `email`, so neither has a field set of its own. CA's
-    // fragment A completes early; CB's fragment B fails later. CB must not
-    // report success on the strength of the shared data alone.
+    // fragment A completes early and announces CA, which delivers the shared
+    // field; CB's fragment B fails later, so CB is never announced.
     let query = "{ users(first: 1) { id \
         ... @defer(label: \"A\") { friends { ... @defer(label: \"CA\") { email } } } \
         ... @defer(label: \"B\") { \
@@ -1705,15 +1705,11 @@ fn a_nested_defer_with_only_shared_fields_still_waits_for_its_enclosing_fragment
     assert_eq!(outcomes("A"), [false], "{payloads:?}");
     assert_eq!(outcomes("B"), [true], "{payloads:?}");
     let ca = outcomes("CA");
-    let cb = outcomes("CB");
     assert!(
         !ca.is_empty() && ca.iter().all(|failed| !failed),
         "{payloads:?}"
     );
-    assert!(
-        !cb.is_empty() && cb.iter().all(|failed| *failed),
-        "{payloads:?}"
-    );
+    assert!(outcomes("CB").is_empty(), "{payloads:?}");
     // A's copy still delivered the shared field.
     let friends = &fold(&payloads)["data"]["users"][0]["friends"];
     assert!(
@@ -1728,9 +1724,10 @@ fn a_nested_defer_with_only_shared_fields_still_waits_for_its_enclosing_fragment
 }
 
 #[test]
-fn a_nested_defer_failing_with_its_shared_fields_still_waits_for_its_enclosing_fragment() {
-    // The shared `id` fails for friend 1, which fails CA and CB there. CB's
-    // enclosing fragment B is still running: CB's failure waits for it too.
+fn a_nested_defer_settled_before_its_enclosing_fragment_ships_is_never_announced() {
+    // The shared `id` fails for friend 1, which fails CA there and lets it
+    // deliver for friend 2. CB's enclosing fragment B ships after that set
+    // settled, so CB has nothing left to deliver and is never announced.
     let query = "{ users(first: 1) { uuid \
         ... @defer(label: \"A\") { friends { ... @defer(label: \"CA\") { id } } } \
         ... @defer(label: \"B\") { \
@@ -1767,9 +1764,12 @@ fn a_nested_defer_failing_with_its_shared_fields_still_waits_for_its_enclosing_f
     let b = completions("B");
     assert_eq!(b.len(), 1, "{payloads:?}");
     assert!(!b[0].1, "{payloads:?}");
-    let cb = completions("CB");
-    assert!(cb.iter().any(|(_, failed)| *failed), "{payloads:?}");
-    assert!(cb.iter().all(|(at, _)| *at >= b[0].0), "{payloads:?}");
+    let ca: Vec<bool> = completions("CA")
+        .into_iter()
+        .map(|(_, failed)| failed)
+        .collect();
+    assert_eq!(ca, [true, false], "{payloads:?}");
+    assert!(completions("CB").is_empty(), "{payloads:?}");
     assert_eq!(payloads.last().unwrap()["hasNext"], json!(false));
 }
 

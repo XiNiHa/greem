@@ -12,7 +12,7 @@ what codegen emits: build any consumer and open `target/debug/build/<crate>-*/ou
 | `cargo test -p greem --test runtime` | The runtime against `greem-test-app`'s generated module and hand-written resolvers: queries, nested lists, interfaces, unions, null propagation in all three error behaviors, serial mutations, introspection, variables, depth limit, `@defer`, `@stream`, and the pulled payload stream (no work ahead of the consumer, cancellation on drop). |
 | `cargo test -p greem-macros` | `#[greem::object]` per-object and set-based sugar, hints and plan routing. |
 | `cargo test -p greem-reference` | The depth-first reference executor and its equivalence to the BFS on hand-picked queries. |
-| `cargo test -p greem-compliance` | Generated code compiled from `schemas/property.graphql` through `build.rs`; property-based BFS≡DFS over generated documents, worlds and interleavings; the incremental fold property; breadth-first call counts; determinism; hand-written spec cases; depth, cancellation and panic evidence on a 2 MiB stack; 1,000 stream turns and 1,000 mutation roots. |
+| `cargo test -p greem-compliance` | Generated code compiled from `schemas/property.graphql` and one area schema per ported graphql-js suite through `build.rs`; property-based BFS≡DFS over generated documents, worlds and interleavings; the incremental fold property; breadth-first call counts; determinism; hand-written spec cases; the graphql-js v17.0.2 execution suites one-to-one under `tests/graphql_js`; depth, cancellation and panic evidence on a 2 MiB stack; 1,000 stream turns and 1,000 mutation roots. |
 | `cargo test -p greem-example-axum` | The axum example: `build.rs` codegen, hand-written and sugared resolvers, a lookbehind hint, JSON and `multipart/mixed` responses over the router. |
 | `cargo run -p greem-example-axum` | Serves `POST /graphql` on `127.0.0.1:8080`. |
 
@@ -29,7 +29,7 @@ counterexample found so far.
 | `greem-build` | Schema compilation from `build.rs`: SDL → generated module in `OUT_DIR`. | `greem_build::compile`, `configure()` (`file_name`, `scalar`, `absent_aware`) |
 | `greem-macros` | Per-type resolver sugar, re-exported by `greem`. | `#[greem::object]` |
 | `greem-reference` | Unpublished naive depth-first executor, the oracle. | `greem_reference::execute` |
-| `greem-compliance` | Unpublished harness: property schema, world, generators, evidence tests. | |
+| `greem-compliance` | Unpublished: the harness every world embeds, the property schema and world, the generators, one area per ported graphql-js suite, evidence tests. | |
 | `greem-test-app` | Unpublished: the module `greem-build` generates from its `schema.graphql`, and hand-written resolvers over it, shared by the runtime, macro and reference integration tests. | `schema`, `app::build_schema` |
 | `examples/axum` | The one framework example. | `router`, `build_schema` |
 
@@ -251,7 +251,12 @@ would cross a delivery boundary fails the group instead.
   were spread, and delivered into them with a `subPath`. So once two
   fragments share `hero`, `hero { id }` of one and `hero { name }` of the
   other are sets of their own, and a non-null error in one fails that
-  fragment alone.
+  fragment alone. A nested fragment's group hangs off the fragment
+  enclosing it, so it is announced when that one completes; a fragment with
+  nothing left to deliver when its parent completes (no set of its own
+  waiting or running, no shared set pending) is never announced and its
+  children are announced in its place; a set whose objects were nulled
+  before its fragment shipped delivers nothing for them.
 - `Streamed<S>` at the outermost list level becomes a driver (`exec/stream.rs`):
   `initialCount` items are pulled inside the immediate scope; the pump fills a
   capacity-bounded buffer while other work is pending; each turn is one
@@ -276,9 +281,7 @@ would cross a delivery boundary fails the group instead.
   internal allocation order. One update result per barrier, with its
   incremental entries ordered so the entries that create positions come first
   (shallower paths, and a stream's items before data deferred on them);
-  `hasNext` is false once no group is live; releasing a group counts as
-  progress, so a fragment whose only content is a nested defer still leads to
-  its descendants.
+  `hasNext` is false once no group is live.
 - A fragment nested inside another fragment but delivered inside stream items
   gets the stream group as its delivery parent and the enclosing fragment's
   group as an `after` dependency: it is announced with the items and released

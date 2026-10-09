@@ -1366,3 +1366,91 @@ fn sibling_fragments_sharing_a_field_deliver_their_own_subfields() {
         ]
     );
 }
+
+#[test]
+fn a_fragment_with_no_set_of_its_own_is_never_announced() {
+    // The outer fragment selects nothing the inner one does not; the inner
+    // one is announced in its place, in the initial payload.
+    let (p, _) = run(
+        App::default(),
+        r#"{ user(id: "1") { id ... @defer { ... @defer { name } } } }"#,
+        Value::Null,
+        incremental(),
+    );
+    assert_eq!(
+        p,
+        vec![
+            json!({
+                "data": {"user": {"id": "1"}},
+                "pending": [{"id": "0", "path": ["user"]}],
+                "hasNext": true,
+            }),
+            json!({
+                "incremental": [{"id": "0", "data": {"name": "Ann"}}],
+                "completed": [{"id": "0"}],
+                "hasNext": false,
+            }),
+        ]
+    );
+}
+
+#[test]
+fn a_deferred_set_beneath_a_nulled_position_is_dropped() {
+    // `name` fails and nulls `user` in the initial payload; the fragment's
+    // only set sits beneath that null, so nothing is announced.
+    let (p, _) = run(
+        App {
+            fail_name: true,
+            ..Default::default()
+        },
+        r#"{ user(id: "2") { name } ... @defer { user(id: "2") { email } } }"#,
+        Value::Null,
+        incremental(),
+    );
+    assert_eq!(
+        p,
+        vec![json!({
+            "data": {"user": null},
+            "errors": [{
+                "message": "name failed",
+                "locations": [{"line": 1, "column": 19}],
+                "path": ["user", "name"],
+            }],
+        })]
+    );
+}
+
+#[test]
+fn an_empty_fragment_completing_late_still_announces_its_children() {
+    // The outer fragment has work of its own, so the middle one is only
+    // examined when it ships; the middle one has none, and its child is
+    // carried by `user`, decided back in the initial payload. The child
+    // must still be announced in the middle one's place.
+    let (p, _) = run(
+        App::default(),
+        r#"{ user(id: "1") { id } ... @defer { ints ... @defer { user(id: "1") { ... @defer { email } } } } }"#,
+        Value::Null,
+        incremental(),
+    );
+    assert_eq!(
+        p,
+        vec![
+            json!({
+                "data": {"user": {"id": "1"}},
+                "pending": [{"id": "0", "path": []}],
+                "hasNext": true,
+            }),
+            json!({
+                "pending": [{"id": "1", "path": ["user"]}],
+                "incremental": [{"id": "0", "data": {"ints": [[1, null], []]}}],
+                "completed": [{"id": "0"}],
+                "hasNext": true,
+            }),
+            json!({
+                "incremental": [{"id": "1", "data": {"email": "ann@x"}}],
+                "completed": [{"id": "1"}],
+                "hasNext": false,
+            }),
+        ]
+    );
+}

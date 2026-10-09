@@ -171,7 +171,7 @@ fn advance_scope_inner(scope: &mut Scope<'_>, shared: &Shared, changed: &mut boo
                 });
             (all_dead, ready)
         };
-        if all_dead {
+        if all_dead || deferred.excluded.iter().all(|&x| x) {
             deferred.state = DeferredSetState::Dropped;
             deferred.release_hold(&mut shared.groups());
             continue;
@@ -192,8 +192,8 @@ fn advance_scope_inner(scope: &mut Scope<'_>, shared: &Shared, changed: &mut boo
             {
                 let mut groups = shared.groups();
                 deferred.release_hold(&mut groups);
-                for (o, &g) in deferred.groups.iter().enumerate() {
-                    groups.register_root(g, at.clone(), o as u32);
+                for (o, g) in deferred.live_objects() {
+                    groups.register_root(g, at.clone(), o);
                 }
             }
             let mut inner = Scope::new(

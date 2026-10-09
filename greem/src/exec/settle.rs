@@ -3,7 +3,8 @@
 
 use crate::error::GraphQLError;
 use crate::exec::column::{Column, ErrorId, Inner, Leaf, ObjSlot, Slot, TurnRange};
-use crate::exec::scope::{ANNOUNCE, FieldState, Scope, ScopeMeta};
+use crate::exec::scope::{ANNOUNCE, DeferredSetState, FieldState, Scope, ScopeMeta};
+use crate::exec::state::Groups;
 use crate::plan::PlanTable;
 use smallvec::SmallVec;
 
@@ -266,11 +267,17 @@ fn visit_inner(
 
 /// Decides every object beneath `object`, which its group just shipped:
 /// the ones reachable through delivered (non-null) slots are alive, the
-/// rest were nulled away. Each decided object is listed on its scope for
-/// the announcement of its pending groups.
-pub(crate) fn mark_alive(scope: &mut Scope<'_>, object: u32, targets: &mut Vec<Target>) {
+/// rest were nulled away and leave the deferred sets still waiting on
+/// them. Each decided object is listed on its scope for the announcement
+/// of its pending groups.
+pub(crate) fn mark_alive(
+    scope: &mut Scope<'_>,
+    object: u32,
+    targets: &mut Vec<Target>,
+    groups: &mut Groups,
+) {
     targets.clear();
-    decide_with(scope, object, true, targets);
+    decide_with(scope, object, true, targets, groups);
 }
 
 /// A child object to decide: its scope's index in the turn, its index
@@ -279,9 +286,21 @@ pub(crate) type Target = (u32, u32, bool);
 
 /// `mark_alive` with one target stack for the whole subtree: each level
 /// pushes its children above its caller's and truncates back when done.
-fn decide_with(scope: &mut Scope<'_>, object: u32, alive: bool, targets: &mut Vec<Target>) {
+fn decide_with(
+    scope: &mut Scope<'_>,
+    object: u32,
+    alive: bool,
+    targets: &mut Vec<Target>,
+    groups: &mut Groups,
+) {
     if alive {
         scope.alive[object as usize] = true;
+    } else {
+        for d in &mut scope.deferred {
+            if matches!(d.state, DeferredSetState::Waiting(_)) {
+                d.exclude(object, groups);
+            }
+        }
     }
     if scope.decided.is_empty() {
         scope.signal.raise(ANNOUNCE);
@@ -297,7 +316,8 @@ fn decide_with(scope: &mut Scope<'_>, object: u32, alive: bool, targets: &mut Ve
         });
         for t in start..targets.len() {
             let (child, index, alive) = targets[t];
-            column.turns[0].with_child_mut(child, |s| decide_with(s, index, alive, targets));
+            column.turns[0]
+                .with_child_mut(child, |s| decide_with(s, index, alive, targets, groups));
         }
         targets.truncate(start);
     }
@@ -309,6 +329,7 @@ pub(crate) fn mark_alive_range(
     turn: usize,
     range: TurnRange,
     targets: &mut Vec<Target>,
+    groups: &mut Groups,
 ) {
     targets.clear();
     for slot in range.start_slot..range.start_slot + range.len {
@@ -323,7 +344,7 @@ pub(crate) fn mark_alive_range(
     }
     for t in 0..targets.len() {
         let (child, index, alive) = targets[t];
-        column.turns[turn].with_child_mut(child, |s| decide_with(s, index, alive, targets));
+        column.turns[turn].with_child_mut(child, |s| decide_with(s, index, alive, targets, groups));
     }
 }
 
