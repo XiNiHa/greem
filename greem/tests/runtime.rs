@@ -1254,3 +1254,27 @@ fn a_module_generated_by_another_version_is_rejected() {
     };
     assert!(error.to_string().contains("0.0.0-stale"), "{error}");
 }
+
+#[test]
+fn negative_initial_count_is_an_execution_error() {
+    let (p, _) = run(
+        App::default(),
+        "{ ints @stream(initialCount: -1) }",
+        Value::Null,
+        ExecuteOptions {
+            incremental: IncrementalDelivery::Enabled,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        p,
+        vec![json!({
+            "data": {"ints": null},
+            "errors": [{
+                "message": "initialCount must not be negative",
+                "locations": [{"line": 1, "column": 3}],
+                "path": ["ints"],
+            }],
+        })]
+    );
+}

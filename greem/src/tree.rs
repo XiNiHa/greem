@@ -294,9 +294,7 @@ impl Tree {
             // Disabled ignores the directive: its arguments are only
             // validated when it takes effect.
             let stream = match directive {
-                Some((stream, arguments)) if self.incremental => {
-                    Some(self.stream_info(stream, arguments)?)
-                }
+                Some((_, arguments)) if self.incremental => Some(self.stream_info(arguments)?),
                 _ => None,
             };
             let composite = matches!(
@@ -543,20 +541,12 @@ impl Tree {
         )))
     }
 
-    /// Validates a `@stream` that takes effect.
-    fn stream_info(
-        &self,
-        stream: &Node<executable::Directive>,
-        arguments: StreamArguments,
-    ) -> Result<StreamInfo, Abort> {
+    /// A `@stream` that takes effect. A negative `initialCount` is not a
+    /// request failure: it is raised as an execution error when the field's
+    /// arguments are coerced, and streams nothing initially until then.
+    fn stream_info(&self, arguments: StreamArguments) -> Result<StreamInfo, Abort> {
         let initial_count = match arguments.initial_count {
             Some(InputValue::Int(i)) if i >= 0 => i as u32,
-            Some(InputValue::Int(_)) => {
-                return Err(Abort::one(
-                    "initialCount must be positive",
-                    span_location(stream.location(), &self.doc.doc),
-                ));
-            }
             _ => 0,
         };
         let label = match arguments.label {
@@ -669,9 +659,16 @@ impl Tree {
         }
     }
 
-    /// Spec `CoerceArgumentValues` over the first occurrence of a selected field.
+    /// Spec `CoerceArgumentValues` over the first occurrence of a selected
+    /// field, after the arguments of a `@stream` that takes effect.
     pub(crate) fn coerce_arguments(&self, field: &SelectedField) -> Result<InputValue, Error> {
         let occurrence = &field.occurrences[0].field;
+        if field.stream.is_some()
+            && let Ok(Some((_, arguments))) = self.stream_arguments(occurrence)
+            && matches!(arguments.initial_count, Some(InputValue::Int(i)) if i < 0)
+        {
+            return Err(Error::new("initialCount must not be negative"));
+        }
         let mut out = Vec::new();
         for definition in &field.definition.arguments {
             let name = definition.name.as_str();
@@ -930,8 +927,8 @@ mod tests {
             panic!("field");
         };
         // $n unprovided and no label: the definition defaults.
-        let (stream, arguments) = tree.stream_arguments(a).unwrap().unwrap();
-        let info = tree.stream_info(stream, arguments).unwrap();
+        let (_, arguments) = tree.stream_arguments(a).unwrap().unwrap();
+        let info = tree.stream_info(arguments).unwrap();
         assert_eq!(info.initial_count, 2);
         assert_eq!(info.label.as_deref(), Some("stream-default"));
         let mut introduced = Vec::new();

@@ -1861,8 +1861,15 @@ fn disabled_delivery_ignores_stream_arguments_but_not_merge_conflicts() {
     assert_eq!(v["data"], json!({"numbers": [1, 2, 3]}), "{v}");
     let (payloads, _) = run(world(1, 0), query, Value::Null, incremental());
     assert_eq!(
-        payloads[0]["errors"][0]["message"],
-        json!("initialCount must be positive"),
+        payloads,
+        [json!({
+            "data": null,
+            "errors": [{
+                "message": "initialCount must not be negative",
+                "locations": [{"line": 1, "column": 3}],
+                "path": ["numbers"],
+            }],
+        })],
         "{payloads:?}"
     );
     let (v, calls) = single(
