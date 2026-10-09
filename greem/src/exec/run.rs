@@ -97,8 +97,7 @@ fn advance_scope_inner(scope: &mut Scope<'_>, shared: &Shared, changed: &mut boo
                 let groups = shared.groups();
                 driver
                     .groups()
-                    .iter()
-                    .all(|&g| groups.is_released(g) || groups.is_dead(g))
+                    .all(|g| groups.is_released(g) || groups.is_dead(g))
             };
             if released {
                 driver.release();

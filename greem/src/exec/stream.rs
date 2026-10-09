@@ -33,10 +33,11 @@ pub trait StreamDriver<'a>: Send {
         groups: &Groups,
         f: &mut dyn FnMut(GroupId) -> ControlFlow<()>,
     ) -> ControlFlow<()>;
-    fn groups(&self) -> &[GroupId];
-    /// Whether `groups` are this driver's own stream groups. A lazily drained
-    /// list holds its parents' groups instead, which are not its to announce,
-    /// ship or complete.
+    fn parent_count(&self) -> usize;
+    fn group(&self, parent: usize) -> GroupId;
+    /// Whether the parents' groups are this driver's own stream groups. A
+    /// lazily drained list holds its parents' groups instead, which are not
+    /// its to announce, ship or complete.
     fn owns_groups(&self) -> bool;
     fn parent_object(&self, parent: usize) -> u32;
     fn source_ended(&self, parent: usize) -> bool;
@@ -55,22 +56,37 @@ pub trait StreamDriver<'a>: Send {
     fn drop_group(&mut self, group: GroupId);
 }
 
+impl<'a> dyn StreamDriver<'a> + '_ {
+    /// Every parent's group, in parent order.
+    pub fn groups(&self) -> impl Iterator<Item = GroupId> + '_ {
+        (0..self.parent_count()).map(move |p| self.group(p))
+    }
+}
+
+/// One parent object's share of a streamed column.
+struct Parent<'a, T> {
+    /// `None` once it ended: drained, failed, or its group died.
+    source: Option<BoxStream<'a, Result<T, Error>>>,
+    position: Pos,
+    group: GroupId,
+    /// List index of the next item it yields.
+    next_index: u32,
+    /// Item ranges made into turns but not shipped yet.
+    unshipped: u32,
+    /// Listed in `completable`.
+    queued: bool,
+}
+
 pub struct StreamState<'a, T, Ty, C> {
-    sources: Vec<Option<BoxStream<'a, Result<T, Error>>>>,
-    positions: Vec<Pos>,
-    groups: Vec<GroupId>,
+    parents: Vec<Parent<'a, T>>,
     initial_count: Option<u32>,
     /// Whether an item error nulls the item (source continues) or fails the stream.
     item_nullable: bool,
     shape: Shape,
-    next_index: Vec<u32>,
     buffer: Vec<(usize, Result<T, Error>)>,
-    /// Per parent: item ranges made into turns but not shipped yet.
-    unshipped: Vec<u32>,
     /// Parents to examine for completion at the next barrier, each at most
-    /// once (`queued`).
+    /// once (`Parent::queued`).
     completable: Vec<usize>,
-    queued: Vec<bool>,
     released: bool,
     cx: FieldsCx<'a, C>,
     field: u32,
@@ -92,13 +108,13 @@ impl<'a, T, Ty, C> StreamState<'a, T, Ty, C> {
     /// afterwards) before anything else is pulled. `beneath` leads from the
     /// item to the failing position inside it.
     fn halt_at(&self, p: usize, index: u32, beneath: &[u32], error: &Error, group: GroupId) {
-        let object = self.positions[p].object;
+        let object = self.parents[p].position.object;
         let field = &self.cx.header.fields[self.field as usize];
         self.cx.shared.halt(group, || {
-            let mut path = self
-                .cx
-                .meta
-                .path_to(object, &field.key, &self.positions[p].indices);
+            let mut path =
+                self.cx
+                    .meta
+                    .path_to(object, &field.key, &self.parents[p].position.indices);
             path.extend(
                 std::iter::once(&index)
                     .chain(beneath)
@@ -121,25 +137,32 @@ impl<'a, T, Ty, C> StreamState<'a, T, Ty, C> {
         capacity: usize,
         shape: Shape,
     ) -> Self {
-        let n = sources.len();
         {
             let mut table = cx.shared.groups();
             for &g in &groups {
                 table.retain(g);
             }
         }
+        let parents = sources
+            .into_iter()
+            .zip(positions)
+            .zip(groups)
+            .map(|((source, position), group)| Parent {
+                source: Some(source),
+                position,
+                group,
+                next_index: 0,
+                unshipped: 0,
+                queued: false,
+            })
+            .collect();
         Self {
-            sources: sources.into_iter().map(Some).collect(),
-            positions,
-            groups,
+            parents,
             initial_count,
             item_nullable: shape.nullable_at(1),
             shape,
-            next_index: vec![0; n],
             buffer: Vec::new(),
-            unshipped: vec![0; n],
             completable: Vec::new(),
-            queued: vec![false; n],
             released: false,
             cx,
             field,
@@ -181,8 +204,8 @@ impl<T: Outputs<Ty, C>, Ty, C> StreamState<'_, T, Ty, C> {
 impl<T, Ty, C> Drop for StreamState<'_, T, Ty, C> {
     fn drop(&mut self) {
         if let Some(mut table) = self.cx.shared.groups_for_drop() {
-            for &g in &self.groups {
-                table.release_ref(g);
+            for parent in &self.parents {
+                table.release_ref(parent.group);
             }
         }
     }
@@ -264,20 +287,20 @@ where
             let terminates = self.initial_count.is_some() && self.terminates_on_error();
             let halt = self.cx.shared.behavior == ErrorBehavior::Halt;
             let mut pulled: Vec<Vec<Result<T, Error>>> =
-                (0..self.sources.len()).map(|_| Vec::new()).collect();
+                (0..self.parents.len()).map(|_| Vec::new()).collect();
             for (p, items) in pulled.iter_mut().enumerate() {
                 // A parent whose group died (halted or dropped meanwhile) is
                 // not pulled at all: its items could never be delivered.
-                let group = self.cx.groups[self.positions[p].object as usize];
+                let group = self.cx.groups[self.parents[p].position.object as usize];
                 if self.cx.shared.is_dead(group) {
-                    self.sources[p] = None;
+                    self.parents[p].source = None;
                     continue;
                 }
                 loop {
                     if limit.is_some_and(|k| items.len() as u32 >= k) {
                         break;
                     }
-                    let Some(stream) = self.sources[p].as_mut() else {
+                    let Some(stream) = self.parents[p].source.as_mut() else {
                         break;
                     };
                     match stream.next().await {
@@ -290,12 +313,12 @@ where
                             // A lazily drained list keeps pulling so every
                             // item error is reported, as depth-first would.
                             if terminal.is_some() && (halt || self.initial_count.is_some()) {
-                                self.sources[p] = None;
+                                self.parents[p].source = None;
                                 break;
                             }
                         }
                         None => {
-                            self.sources[p] = None;
+                            self.parents[p].source = None;
                             break;
                         }
                     }
@@ -311,8 +334,8 @@ where
             let mut values = Vec::new();
             let mut value_pos = Vec::new();
             for (p, items) in pulled.into_iter().enumerate() {
-                let positions = cc.list(&self.positions[p], items.len());
-                self.next_index[p] = items.len() as u32;
+                let positions = cc.list(&self.parents[p].position, items.len());
+                self.parents[p].next_index = items.len() as u32;
                 for (item, pos) in items.into_iter().zip(positions) {
                     match item {
                         Ok(value) => {
@@ -321,7 +344,7 @@ where
                         }
                         Err(error) => {
                             if terminates || halt {
-                                self.sources[p] = None;
+                                self.parents[p].source = None;
                             }
                             cc.descend(|cc| cc.error(&pos, error));
                         }
@@ -332,7 +355,7 @@ where
                 cc.descend(|cc| T::__complete(values, value_pos, cc));
             }
             if self.initial_count.is_none() {
-                self.sources.iter_mut().for_each(|s| *s = None);
+                self.parents.iter_mut().for_each(|p| p.source = None);
             }
         })
     }
@@ -344,23 +367,23 @@ where
         // A source reaching its end is progress too: the barrier must run so
         // the stream's group completes without waiting on unrelated streams.
         let mut ended = false;
-        let count = self.sources.len();
+        let count = self.parents.len();
         for p in 0..count {
-            if self.sources[p].is_some() && self.cx.shared.is_dead(self.groups[p]) {
-                self.sources[p] = None;
+            if self.parents[p].source.is_some() && self.cx.shared.is_dead(self.parents[p].group) {
+                self.parents[p].source = None;
                 self.buffer.retain(|(q, _)| *q != p);
                 self.queue_completion(p);
                 ended = true;
                 continue;
             }
             while self.buffer.len() < self.capacity {
-                let Some(source) = self.sources[p].as_mut() else {
+                let Some(source) = self.parents[p].source.as_mut() else {
                     break;
                 };
                 match source.as_mut().poll_next(cx) {
                     Poll::Pending => break,
                     Poll::Ready(None) => {
-                        self.sources[p] = None;
+                        self.parents[p].source = None;
                         self.queue_completion(p);
                         ended = true;
                     }
@@ -370,15 +393,15 @@ where
                             let buffered = self.buffer.iter().filter(|(q, _)| *q == p).count();
                             self.halt_at(
                                 p,
-                                self.next_index[p] + buffered as u32,
+                                self.parents[p].next_index + buffered as u32,
                                 beneath,
                                 error,
-                                self.groups[p],
+                                self.parents[p].group,
                             );
                         }
                         self.buffer.push((p, item));
                         if terminal.is_some() {
-                            self.sources[p] = None;
+                            self.parents[p].source = None;
                             self.queue_completion(p);
                             ended = true;
                         }
@@ -414,7 +437,7 @@ where
         let mut inner_len = 0;
         let turn = &mut column.turns[turn_index];
         let mut per_parent: Vec<Vec<Result<T, Error>>> =
-            (0..self.sources.len()).map(|_| Vec::new()).collect();
+            (0..self.parents.len()).map(|_| Vec::new()).collect();
         for (p, item) in buffer {
             per_parent[p].push(item);
         }
@@ -431,12 +454,12 @@ where
                 turn.levels[0].extend(std::iter::repeat_n(Slot::Pending, len as usize));
                 start
             };
-            let object = self.positions[p].object;
-            self.unshipped[p] += 1;
+            let object = self.parents[p].position.object;
+            self.parents[p].unshipped += 1;
             turn.ranges.push(TurnRange {
                 object,
                 parent: p as u32,
-                start_index: self.next_index[p],
+                start_index: self.parents[p].next_index,
                 start_slot,
                 len,
                 shipped: false,
@@ -445,7 +468,7 @@ where
                 let pos = Pos {
                     slot: start_slot + j as u32,
                     object,
-                    indices: smallvec::smallvec![self.next_index[p] + j as u32],
+                    indices: smallvec::smallvec![self.parents[p].next_index + j as u32],
                 };
                 match item {
                     Ok(value) => {
@@ -455,12 +478,12 @@ where
                     Err(error) => failed.push((pos, error)),
                 }
             }
-            self.next_index[p] += len;
+            self.parents[p].next_index += len;
         }
         // Turn items belong to their parent's stream group, not the scope's group.
         let mut cx = self.cx.clone();
-        for (p, pos) in self.positions.iter().enumerate() {
-            cx.groups[pos.object as usize] = self.groups[p];
+        for parent in &self.parents {
+            cx.groups[parent.position.object as usize] = parent.group;
         }
         let batch: Box<dyn TurnBatch + 'a> = Box::new(TurnItems::<T, Ty, C> {
             cx,
@@ -487,7 +510,7 @@ where
     }
 
     fn is_done(&self) -> bool {
-        self.sources.iter().all(Option::is_none) && self.buffer.is_empty()
+        self.parents.iter().all(|p| p.source.is_none()) && self.buffer.is_empty()
     }
 
     fn live_groups(
@@ -500,12 +523,13 @@ where
         // complete before the stream does.
         // A stream delivered under a carried group (a descendant) cannot hold
         // it back: it is only announced once that group ships.
-        for (p, &g) in self.groups.iter().enumerate() {
-            if self.sources[p].is_none() && !self.buffer.iter().any(|(q, _)| *q == p) {
+        for (p, parent) in self.parents.iter().enumerate() {
+            if self.source_ended(p) {
                 continue;
             }
+            let g = parent.group;
             f(g)?;
-            let parent = &self.cx.meta.objects[self.positions[p].object as usize];
+            let parent = &self.cx.meta.objects[parent.position.object as usize];
             for &(_, carried) in &parent.pending {
                 if groups.is_ancestor(carried, g) {
                     continue;
@@ -523,21 +547,26 @@ where
         ControlFlow::Continue(())
     }
 
-    fn groups(&self) -> &[GroupId] {
-        &self.groups
+    fn parent_count(&self) -> usize {
+        self.parents.len()
+    }
+
+    fn group(&self, parent: usize) -> GroupId {
+        self.parents[parent].group
     }
 
     fn parent_object(&self, parent: usize) -> u32 {
-        self.positions[parent].object
+        self.parents[parent].position.object
     }
 
     fn source_ended(&self, parent: usize) -> bool {
-        self.sources[parent].is_none() && !self.buffer.iter().any(|(q, _)| *q == parent)
+        self.parents[parent].source.is_none() && !self.buffer.iter().any(|(q, _)| *q == parent)
     }
 
     fn range_shipped(&mut self, parent: usize) {
-        self.unshipped[parent] -= 1;
-        if self.unshipped[parent] == 0 && self.sources[parent].is_none() {
+        let state = &mut self.parents[parent];
+        state.unshipped -= 1;
+        if state.unshipped == 0 && state.source.is_none() {
             self.queue_completion(parent);
         }
     }
@@ -545,16 +574,16 @@ where
     fn take_completable(&mut self) -> Vec<usize> {
         let mut parents = std::mem::take(&mut self.completable);
         parents.retain(|&p| {
-            self.queued[p] = false;
+            self.parents[p].queued = false;
             // Buffered items still make a turn whose shipping asks again.
-            self.unshipped[p] == 0 && self.source_ended(p)
+            self.parents[p].unshipped == 0 && self.source_ended(p)
         });
         parents.sort_unstable();
         parents
     }
 
     fn queue_completion(&mut self, parent: usize) {
-        if !std::mem::replace(&mut self.queued[parent], true) {
+        if !std::mem::replace(&mut self.parents[parent].queued, true) {
             self.completable.push(parent);
         }
     }
@@ -564,8 +593,8 @@ where
             return;
         }
         // Sources that ended during the initial pull never pass through `pump`.
-        for p in 0..self.sources.len() {
-            if self.sources[p].is_none() {
+        for p in 0..self.parents.len() {
+            if self.parents[p].source.is_none() {
                 self.queue_completion(p);
             }
         }
@@ -580,9 +609,9 @@ where
     }
 
     fn drop_group(&mut self, group: GroupId) {
-        for (p, &g) in self.groups.iter().enumerate() {
-            if g == group {
-                self.sources[p] = None;
+        for (p, parent) in self.parents.iter_mut().enumerate() {
+            if parent.group == group {
+                parent.source = None;
                 self.buffer.retain(|(q, _)| *q != p);
             }
         }

@@ -498,10 +498,10 @@ fn finds(group: GroupId) -> impl FnMut(GroupId) -> ControlFlow<()> {
 }
 
 /// Every group completed or can no longer deliver anything.
-fn all_settled(table: &Groups, groups: &[GroupId]) -> bool {
+fn all_settled(table: &Groups, groups: impl IntoIterator<Item = GroupId>) -> bool {
     groups
-        .iter()
-        .all(|&g| matches!(table.get(g).state, GroupState::Completed) || table.is_dead(g))
+        .into_iter()
+        .all(|g| matches!(table.get(g).state, GroupState::Completed) || table.is_dead(g))
 }
 
 fn all_terminal(table: &Groups, groups: &[GroupId]) -> bool {

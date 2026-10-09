@@ -344,8 +344,7 @@ fn announce_children(
             let Some(driver) = column.stream.as_ref().filter(|d| d.owns_groups()) else {
                 continue;
             };
-            let parent_groups: Vec<(usize, GroupId)> =
-                driver.groups().iter().copied().enumerate().collect();
+            let parent_groups: Vec<(usize, GroupId)> = driver.groups().enumerate().collect();
             for (p, g) in parent_groups {
                 let group = groups.get(g);
                 if !matches!(group.kind, GroupKind::Stream { .. })
@@ -831,7 +830,7 @@ impl Barrier<'_, '_> {
                         if range.shipped {
                             continue;
                         }
-                        let g = driver.groups()[range.parent as usize];
+                        let g = driver.group(range.parent as usize);
                         let ready = !turn.any_child(|s| s.is_live_for(g, self.groups));
                         ranges.push((t, ri, *range, g, ready));
                     }
@@ -867,7 +866,7 @@ impl Barrier<'_, '_> {
     fn fail_halted_streams(&mut self, path: &[Step], field: u32) {
         let driver_groups: Vec<GroupId> = with_scope_at_mut(self.root, path, &mut |scope| {
             let column = scope.column(field).expect("streamed column");
-            column.stream.as_ref().expect("driver").groups().to_vec()
+            column.stream.as_ref().expect("driver").groups().collect()
         });
         let mut halted = Vec::new();
         for g in driver_groups {
@@ -965,7 +964,7 @@ impl Barrier<'_, '_> {
                 turn.shipped = turn.ranges.iter().all(|r| r.shipped);
             }
             for p in driver.take_completable() {
-                let g = driver.groups()[p];
+                let g = driver.group(p);
                 let group = self.groups.get(g);
                 if !matches!(group.kind, GroupKind::Stream { .. }) {
                     continue;
