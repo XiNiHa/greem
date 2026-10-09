@@ -10,7 +10,8 @@ use crate::exec::payload::{
 use crate::exec::run::Loop;
 use crate::exec::scope::{ANNOUNCE, Activity, FieldState, STREAM, Scope};
 use crate::exec::settle;
-use crate::exec::state::{ErrorBehavior, GroupId, GroupKind, GroupState, Groups, Shared};
+use crate::exec::state::{ErrorBehavior, GroupId, GroupKind, GroupState, Groups, Root, Shared};
+use smallvec::SmallVec;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashSet};
 use std::ops::ControlFlow;
@@ -92,28 +93,39 @@ pub(crate) struct Entries {
     pub completed: Vec<CompletedEntry>,
 }
 
-/// Every error recorded beneath `roots`, in response order.
-fn root_errors(root: &mut Scope<'_>, roots: &[(Arc<[Step]>, u32)]) -> Vec<GraphQLError> {
+/// Every error recorded beneath `roots`, in response order, through the
+/// barrier's sink.
+fn root_errors(
+    root: &mut Scope<'_>,
+    roots: &[Root],
+    errs: &mut settle::ErrorSink,
+) -> Vec<GraphQLError> {
     // The roots list a scope's objects consecutively; collect each scope
     // once with all of them so its errors come out field by field.
-    let mut by_scope: Vec<(&[Step], Vec<u32>)> = Vec::new();
-    for (path, object) in roots {
-        match by_scope.last_mut() {
-            Some((last, objects)) if *last == &path[..] => objects.push(*object),
-            _ => by_scope.push((path, vec![*object])),
-        }
-    }
-    let mut errs = settle::ErrorSink::default();
-    for (path, objects) in &by_scope {
+    let mut at = 0;
+    while at < roots.len() {
+        let path = &roots[at].0;
+        let end = at + roots[at..].iter().take_while(|(p, _)| p == path).count();
+        // A group has one root per scope: fragments are per object.
+        let objects: SmallVec<[u32; 1]> = roots[at..end].iter().map(|(_, o)| *o).collect();
         with_scope_at_mut(root, path, &mut |scope| {
-            settle::collect_errors(scope, objects, &mut errs)
+            settle::collect_errors(scope, &objects, errs)
         });
+        at = end;
     }
-    errs.sorted()
+    errs.drain_sorted()
 }
 
-/// Null propagation over `roots`: the error that reaches their boundary, if any.
-fn settle_roots(root: &mut Scope<'_>, roots: &[(Arc<[Step]>, u32)]) -> Option<Box<GraphQLError>> {
+/// Null propagation over `roots` under `Propagate`: the error that reaches
+/// their boundary, if any.
+fn settle_roots(
+    behavior: ErrorBehavior,
+    root: &mut Scope<'_>,
+    roots: &[Root],
+) -> Option<Box<GraphQLError>> {
+    if behavior != ErrorBehavior::Propagate {
+        return None;
+    }
     roots.iter().find_map(|(path, object)| {
         with_scope_at_mut(root, path, &mut |scope| {
             settle::settle_object(scope, *object)
@@ -126,23 +138,34 @@ fn settle_roots(root: &mut Scope<'_>, roots: &[(Arc<[Step]>, u32)]) -> Option<Bo
 /// first entry carries `errors`.
 fn ship_roots(
     root: &mut Scope<'_>,
-    roots: &[(Arc<[Step]>, u32)],
+    roots: &[Root],
     mut errors: Vec<GraphQLError>,
-    id: &str,
+    id: u32,
     group_path: &[PathSegment],
     out: &mut Entries,
+    scratch: &mut Vec<settle::Target>,
 ) {
     for (path, object) in roots {
         let object = *object;
-        with_scope_at_mut(root, path, &mut |scope| settle::mark_alive(scope, object));
-        let object_path = with_scope_at_mut(root, path, &mut |scope| scope.meta.path(object));
+        let (depth, sub_path) = with_scope_at_mut(root, path, &mut |scope| {
+            settle::mark_alive(scope, object, scratch);
+            let meta = scope.meta;
+            // A fragment's roots sit at its own path, so the entry needs
+            // no subPath; only a root elsewhere has its path built.
+            let sub_path = if meta.has_path(object, group_path) {
+                Vec::new()
+            } else {
+                sub_path(&meta.path(object), group_path)
+            };
+            (meta.depth(object), sub_path)
+        });
         out.incremental.push(IncrementalEntry {
-            id: id.to_owned(),
-            depth: object_path.len(),
-            sub_path: sub_path(&object_path, group_path),
+            id,
+            depth,
+            sub_path,
             errors: std::mem::take(&mut errors),
             source: EntrySource::Defer {
-                path: path.to_vec(),
+                path: path.clone(),
                 object,
             },
         });
@@ -231,7 +254,7 @@ fn fail_dependents(groups: &mut Groups, candidates: &[GroupId], out: &mut Entrie
             else {
                 continue;
             };
-            let id = groups.assign_wire_id(g).to_string();
+            let id = groups.assign_wire_id(g);
             groups.set_state(g, GroupState::Failed(failure.clone()));
             out.completed.push(CompletedEntry {
                 id,
@@ -303,11 +326,7 @@ fn announce_children(
                 };
                 let id = groups.assign_wire_id(g);
                 groups.set_state(g, GroupState::Announced);
-                out.pending.push(PendingEntry {
-                    id: id.to_string(),
-                    path,
-                    label,
-                });
+                out.pending.push(PendingEntry { id, path, label });
             }
         }
         for column in scope.columns() {
@@ -350,11 +369,7 @@ fn announce_children(
                 };
                 let id = groups.assign_wire_id(g);
                 groups.set_state(g, GroupState::Announced);
-                out.pending.push(PendingEntry {
-                    id: id.to_string(),
-                    path,
-                    label,
-                });
+                out.pending.push(PendingEntry { id, path, label });
             }
         }
     });
@@ -425,7 +440,7 @@ pub(crate) fn stalled(groups: &mut Groups, initial_shipped: bool) -> BarrierOutp
     open.sort_by_key(|&g| groups.get(g).wire_id);
     let mut entries = Entries::default();
     for g in open {
-        let id = groups.assign_wire_id(g).to_string();
+        let id = groups.assign_wire_id(g);
         groups.set_state(g, GroupState::Failed(Some(error.clone())));
         entries.completed.push(CompletedEntry {
             id,
@@ -456,6 +471,8 @@ pub(crate) fn barrier(
         out: Entries::default(),
         initial: None,
         shipped: Vec::new(),
+        errs: settle::ErrorSink::default(),
+        scratch: Vec::new(),
     };
     barrier.close_serial_root();
     if let ControlFlow::Break(errors) = barrier.ship_groups() {
@@ -485,6 +502,9 @@ struct Barrier<'r, 'a> {
     initial: Option<(Data, Vec<GraphQLError>)>,
     /// Groups whose data shipped at this barrier; their children are announced.
     shipped: Vec<GroupId>,
+    /// Reused across the entries of one barrier.
+    errs: settle::ErrorSink,
+    scratch: Vec<settle::Target>,
 }
 
 /// Whether a released group can complete at this barrier.
@@ -636,23 +656,8 @@ impl Barrier<'_, '_> {
         Readiness::Ready { halted, sharing }
     }
 
-    /// The objects whose deferred field sets run under `g`.
-    fn group_roots(&mut self, g: GroupId) -> Vec<(Arc<[Step]>, u32)> {
-        self.groups.roots_of(g).to_vec()
-    }
-
-    /// Null propagation over `roots` under `Propagate`: the error that
-    /// reaches their boundary, if any.
-    fn settle(&mut self, roots: &[(Arc<[Step]>, u32)]) -> Option<Box<GraphQLError>> {
-        if self.shared.behavior == ErrorBehavior::Propagate {
-            settle_roots(self.root, roots)
-        } else {
-            None
-        }
-    }
-
     fn fail_with_shared(&mut self, g: GroupId, failure: Option<GraphQLError>) {
-        let id = self.groups.assign_wire_id(g).to_string();
+        let id = self.groups.assign_wire_id(g);
         self.groups
             .set_state(g, GroupState::Failed(failure.clone()));
         self.out.completed.push(CompletedEntry {
@@ -677,13 +682,13 @@ impl Barrier<'_, '_> {
             return ControlFlow::Break(vec![error]);
         }
         let roots = [(Arc::from(Vec::new()), 0)];
-        let errors = root_errors(self.root, &roots);
-        let failure = self.settle(&roots);
+        let errors = root_errors(self.root, &roots, &mut self.errs);
+        let failure = settle_roots(self.shared.behavior, self.root, &roots);
         self.groups.set_state(g, GroupState::Completed);
         if failure.is_some() {
             self.initial = Some((Data::Null, errors));
         } else {
-            settle::mark_alive(self.root, 0);
+            settle::mark_alive(self.root, 0, &mut self.scratch);
             self.shipped.push(g);
             self.initial = Some((Data::Root, errors));
         }
@@ -697,8 +702,8 @@ impl Barrier<'_, '_> {
             self.groups.fail_halted(g);
             return;
         }
-        let roots = self.group_roots(g);
-        match self.settle(&roots) {
+        let failure = settle_roots(self.shared.behavior, self.root, self.groups.roots_of(g));
+        match failure {
             Some(error) => self.groups.set_state(g, GroupState::Failed(Some(*error))),
             None => self.groups.mark_settled(g),
         }
@@ -713,15 +718,14 @@ impl Barrier<'_, '_> {
             let error = self.groups.fail_halted(g);
             let id = self.groups.assign_wire_id(g);
             self.out.completed.push(CompletedEntry {
-                id: id.to_string(),
+                id,
                 errors: vec![error],
             });
             return;
         }
-        let roots = self.group_roots(g);
-        let errors = root_errors(self.root, &roots);
-        let failure = self.settle(&roots);
-        let id = self.groups.assign_wire_id(g).to_string();
+        let errors = root_errors(self.root, self.groups.roots_of(g), &mut self.errs);
+        let failure = settle_roots(self.shared.behavior, self.root, self.groups.roots_of(g));
+        let id = self.groups.assign_wire_id(g);
         if let Some(error) = failure {
             self.groups
                 .set_state(g, GroupState::Failed(Some((*error).clone())));
@@ -732,12 +736,20 @@ impl Barrier<'_, '_> {
             return;
         }
         self.groups.set_state(g, GroupState::Completed);
-        let group_path = match &self.groups.get(g).kind {
+        let group_path: Arc<[PathSegment]> = match &self.groups.get(g).kind {
             GroupKind::Defer { path, .. } => path.clone(),
-            _ => Vec::new(),
+            _ => Arc::from([]),
         };
         self.shipped.push(g);
-        ship_roots(self.root, &roots, errors, &id, &group_path, &mut self.out);
+        ship_roots(
+            self.root,
+            self.groups.roots_of(g),
+            errors,
+            id,
+            &group_path,
+            &mut self.out,
+            &mut self.scratch,
+        );
         // Its payload announces the groups beneath it. Those on objects it
         // delivered were decided above; a nested fragment on the very object
         // carrying it, or one whose fields all ran in a shared set, sits on
@@ -760,9 +772,16 @@ impl Barrier<'_, '_> {
             }
             self.groups.set_state(s, GroupState::Completed);
             self.shipped.push(s);
-            let roots = self.group_roots(s);
-            let errors = root_errors(self.root, &roots);
-            ship_roots(self.root, &roots, errors, &id, &group_path, &mut self.out);
+            let errors = root_errors(self.root, self.groups.roots_of(s), &mut self.errs);
+            ship_roots(
+                self.root,
+                self.groups.roots_of(s),
+                errors,
+                id,
+                &group_path,
+                &mut self.out,
+                &mut self.scratch,
+            );
         }
         self.out.completed.push(CompletedEntry {
             id,
@@ -879,7 +898,7 @@ impl Barrier<'_, '_> {
                 continue;
             };
             let error = error.clone();
-            let id = self.groups.assign_wire_id(g).to_string();
+            let id = self.groups.assign_wire_id(g);
             self.fail_stream_group(path, field, g, id, error);
         }
     }
@@ -899,13 +918,13 @@ impl Barrier<'_, '_> {
             if self.groups.is_dead(g) || !matches!(self.groups.get(g).state, GroupState::Released) {
                 continue;
             }
-            let mut errs = settle::ErrorSink::default();
+            let errs = &mut self.errs;
             with_scope_at_mut(self.root, path, &mut |scope| {
                 let column = scope.column(field).expect("streamed column");
-                settle::collect_range_errors(scope, column, t, range, &mut errs);
+                settle::collect_range_errors(scope, column, t, range, errs);
             });
-            let errors = errs.sorted();
-            let id = self.groups.assign_wire_id(g).to_string();
+            let errors = self.errs.drain_sorted();
+            let id = self.groups.assign_wire_id(g);
             // Propagation fails the group with the error that reached the boundary.
             let failure: Option<GraphQLError> = if self.shared.behavior == ErrorBehavior::Propagate
             {
@@ -924,9 +943,10 @@ impl Barrier<'_, '_> {
                 self.fail_stream_group(path, field, g, id, error);
                 continue;
             }
+            let scratch = &mut self.scratch;
             with_scope_at_mut(self.root, path, &mut |scope| {
                 let column = scope.columns_mut().find(|c| c.field == field).unwrap();
-                settle::mark_alive_range(column, t, range);
+                settle::mark_alive_range(column, t, range, scratch);
             });
             let depth = match &self.groups.get(g).kind {
                 GroupKind::Stream { path, .. } => path.len() + 1,
@@ -974,7 +994,7 @@ impl Barrier<'_, '_> {
                 }
                 match group.state {
                     GroupState::Released => {
-                        let id = self.groups.assign_wire_id(g).to_string();
+                        let id = self.groups.assign_wire_id(g);
                         self.groups.set_state(g, GroupState::Completed);
                         self.out.completed.push(CompletedEntry {
                             id,
@@ -996,7 +1016,7 @@ impl Barrier<'_, '_> {
         path: &[Step],
         field: u32,
         g: GroupId,
-        id: String,
+        id: u32,
         error: GraphQLError,
     ) {
         self.groups
@@ -1089,7 +1109,7 @@ mod tests {
         GroupKind::Defer {
             usage: 0,
             label: None,
-            path: Vec::new(),
+            path: Arc::from([]),
             after: None,
         }
     }
@@ -1098,7 +1118,7 @@ mod tests {
         GroupKind::Stream {
             node: 0,
             label: None,
-            path: Vec::new(),
+            path: Arc::from([]),
             parent: 0,
         }
     }
@@ -1136,12 +1156,13 @@ mod tests {
         let output = stalled(&mut groups, true);
         assert_eq!(output.kind, PayloadKind::Subsequent);
         assert_eq!(output.has_next, Some(false));
-        let failed: Vec<&str> = output
+        let failed: Vec<String> = output
             .entries
             .completed
             .iter()
-            .map(|entry| entry.id.as_str())
+            .map(|entry| entry.id.to_string())
             .collect();
+        let failed: Vec<&str> = failed.iter().map(String::as_str).collect();
         assert_eq!(failed, ["0", "2", "3"]);
         for entry in &output.entries.completed {
             assert_eq!(entry.errors[0].message, "execution stalled");

@@ -38,7 +38,7 @@ pub enum GroupKind {
     Defer {
         usage: UsageId,
         label: Option<String>,
-        path: Vec<PathSegment>,
+        path: Arc<[PathSegment]>,
         /// A fragment nested in another one but delivered inside stream
         /// items: its position comes from `parent` (the stream group), while
         /// the enclosing fragment's group must also have completed first.
@@ -47,7 +47,7 @@ pub enum GroupKind {
     Stream {
         node: NodeId,
         label: Option<String>,
-        path: Vec<PathSegment>,
+        path: Arc<[PathSegment]>,
         /// The parent's index in the stream driver that owns this group.
         parent: u32,
     },

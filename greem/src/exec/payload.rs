@@ -7,6 +7,7 @@ use crate::exec::scope::Scope;
 use crate::tree::FieldKind;
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Serialize, Serializer};
+use std::sync::Arc;
 
 /// A step from one scope to a nested one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,22 +28,35 @@ pub enum PayloadKind {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct PendingEntry {
-    pub id: String,
-    pub path: Vec<PathSegment>,
+    #[serde(serialize_with = "wire_id")]
+    pub id: u32,
+    #[serde(serialize_with = "segments")]
+    pub path: Arc<[PathSegment]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct CompletedEntry {
-    pub id: String,
+    #[serde(serialize_with = "wire_id")]
+    pub id: u32,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<GraphQLError>,
 }
 
+/// A wire id is a string on the wire; it is formatted here rather than
+/// allocated when the entry is made.
+fn wire_id<S: Serializer>(id: &u32, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(id)
+}
+
+fn segments<S: Serializer>(path: &Arc<[PathSegment]>, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.collect_seq(path.iter())
+}
+
 pub(crate) enum EntrySource {
     Defer {
-        path: Vec<Step>,
+        path: Arc<[Step]>,
         object: u32,
     },
     Items {
@@ -55,7 +69,7 @@ pub(crate) enum EntrySource {
 }
 
 pub struct IncrementalEntry {
-    pub(crate) id: String,
+    pub(crate) id: u32,
     /// Length of the entry's full response path; entries in one payload are
     /// ordered by it so a parent's items precede work delivered beneath them.
     pub(crate) depth: usize,
@@ -197,6 +211,14 @@ impl Serialize for Payload<'_> {
     }
 }
 
+struct WireId(u32);
+
+impl Serialize for WireId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        wire_id(&self.0, serializer)
+    }
+}
+
 struct IncrementalList<'s, 'p>(&'s Payload<'p>);
 
 impl Serialize for IncrementalList<'_, '_> {
@@ -217,7 +239,7 @@ impl Serialize for EntryView<'_, '_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let entry = self.1;
         let mut map = serializer.serialize_map(None)?;
-        map.serialize_entry("id", &entry.id)?;
+        map.serialize_entry("id", &WireId(entry.id))?;
         if !entry.sub_path.is_empty() {
             map.serialize_entry("subPath", &entry.sub_path)?;
         }

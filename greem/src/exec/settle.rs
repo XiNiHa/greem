@@ -5,7 +5,7 @@ use crate::error::GraphQLError;
 use crate::exec::column::{Column, ErrorId, Inner, Leaf, ObjSlot, Slot, TurnRange};
 use crate::exec::scope::{ANNOUNCE, FieldState, Scope, ScopeMeta};
 use crate::plan::PlanTable;
-use std::collections::BTreeMap;
+use smallvec::SmallVec;
 
 /// `Err` carries the error that must propagate past this position.
 pub(crate) type Settled = Result<(), Box<GraphQLError>>;
@@ -268,18 +268,18 @@ fn visit_inner(
 /// the ones reachable through delivered (non-null) slots are alive, the
 /// rest were nulled away. Each decided object is listed on its scope for
 /// the announcement of its pending groups.
-pub(crate) fn mark_alive(scope: &mut Scope<'_>, object: u32) {
-    decide_with(scope, object, true, &mut Vec::new());
+pub(crate) fn mark_alive(scope: &mut Scope<'_>, object: u32, targets: &mut Vec<Target>) {
+    targets.clear();
+    decide_with(scope, object, true, targets);
 }
+
+/// A child object to decide: its scope's index in the turn, its index
+/// there, and whether it was delivered.
+pub(crate) type Target = (u32, u32, bool);
 
 /// `mark_alive` with one target stack for the whole subtree: each level
 /// pushes its children above its caller's and truncates back when done.
-fn decide_with(
-    scope: &mut Scope<'_>,
-    object: u32,
-    alive: bool,
-    targets: &mut Vec<(u32, u32, bool)>,
-) {
+fn decide_with(scope: &mut Scope<'_>, object: u32, alive: bool, targets: &mut Vec<Target>) {
     if alive {
         scope.alive[object as usize] = true;
     }
@@ -304,8 +304,13 @@ fn decide_with(
 }
 
 /// Decides the items of a stream turn range that just shipped, like `mark_alive`.
-pub(crate) fn mark_alive_range(column: &mut Column<'_>, turn: usize, range: TurnRange) {
-    let mut targets = Vec::new();
+pub(crate) fn mark_alive_range(
+    column: &mut Column<'_>,
+    turn: usize,
+    range: TurnRange,
+    targets: &mut Vec<Target>,
+) {
+    targets.clear();
     for slot in range.start_slot..range.start_slot + range.len {
         visit_level(
             column,
@@ -318,7 +323,7 @@ pub(crate) fn mark_alive_range(column: &mut Column<'_>, turn: usize, range: Turn
     }
     for t in 0..targets.len() {
         let (child, index, alive) = targets[t];
-        column.turns[turn].with_child_mut(child, |s| decide_with(s, index, alive, &mut targets));
+        column.turns[turn].with_child_mut(child, |s| decide_with(s, index, alive, targets));
     }
 }
 
@@ -340,9 +345,14 @@ impl ErrorSink {
         seq
     }
 
-    pub(crate) fn sorted(mut self) -> Vec<GraphQLError> {
+    /// Takes the errors gathered so far, in order, leaving the sink ready
+    /// for the next payload entry.
+    pub(crate) fn drain_sorted(&mut self) -> Vec<GraphQLError> {
+        if self.items.is_empty() {
+            return Vec::new();
+        }
         self.items.sort_by_key(|(key, _)| *key);
-        self.items.into_iter().map(|(_, error)| error).collect()
+        self.items.drain(..).map(|(_, error)| error).collect()
     }
 }
 
@@ -364,14 +374,14 @@ pub(crate) fn collect_errors(scope: &Scope<'_>, objects: &[u32], out: &mut Error
         }
     };
     let beneath = |column: &Column<'_>, out: &mut ErrorSink| {
-        let mut per_child: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+        let mut per_child = PerChild::default();
         for &object in objects {
             for_each_child_of(column, 0, object, true, &mut |child, index| {
-                per_child.entry(child).or_default().push(index)
+                per_child.push(child, index)
             });
         }
-        for (child, indices) in per_child {
-            column.turns[0].with_child(child, |s| collect_errors(s, &indices, out));
+        for (child, indices) in &per_child.0 {
+            column.turns[0].with_child(*child, |s| collect_errors(s, indices, out));
         }
     };
     if scope.meta.serial {
@@ -414,11 +424,27 @@ pub(crate) fn collect_range_errors(
             ));
         }
     }
-    let mut per_child: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    let mut per_child = PerChild::default();
     for_each_child_in_range(column, turn, range, true, &mut |child, index| {
-        per_child.entry(child).or_default().push(index)
+        per_child.push(child, index)
     });
-    for (child, indices) in per_child {
-        column.turns[turn].with_child(child, |s| collect_errors(s, &indices, out));
+    for (child, indices) in &per_child.0 {
+        column.turns[turn].with_child(*child, |s| collect_errors(s, indices, out));
+    }
+}
+
+/// The reached indices of each child scope, by child. A column's turn has
+/// one child scope per concrete output type, and one root object reaches
+/// one index in it, so the common case stays on the stack.
+#[derive(Default)]
+struct PerChild(SmallVec<[(u32, SmallVec<[u32; 1]>); 1]>);
+
+impl PerChild {
+    fn push(&mut self, child: u32, index: u32) {
+        let at = self.0.partition_point(|(c, _)| *c < child);
+        match self.0.get_mut(at) {
+            Some((c, indices)) if *c == child => indices.push(index),
+            _ => self.0.insert(at, (child, SmallVec::from_slice(&[index]))),
+        }
     }
 }

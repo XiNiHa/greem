@@ -61,6 +61,32 @@ impl ScopeMeta<'_> {
         path
     }
 
+    /// Whether `object`'s path is exactly `expected`, without building it.
+    pub fn has_path(&self, object: u32, expected: &[PathSegment]) -> bool {
+        self.depth(object) == expected.len() && self.matches_prefix(object, expected).is_some()
+    }
+
+    /// The length of the prefix of `expected` that is `object`'s path, if
+    /// the path is a prefix of it.
+    fn matches_prefix(&self, object: u32, expected: &[PathSegment]) -> Option<usize> {
+        let Some(link) = self.parent else {
+            return Some(0);
+        };
+        let o = &self.objects[object as usize];
+        let mut at = link.meta.matches_prefix(o.parent, expected)?;
+        match expected.get(at) {
+            Some(PathSegment::Key(key)) if key == link.key => at += 1,
+            _ => return None,
+        }
+        for &index in &o.indices {
+            match expected.get(at) {
+                Some(PathSegment::Index(i)) if *i == index as usize => at += 1,
+                _ => return None,
+            }
+        }
+        Some(at)
+    }
+
     /// The length of `object`'s path.
     pub fn depth(&self, object: u32) -> usize {
         self.parent.map_or(0, |link| {

@@ -598,7 +598,7 @@ where
                 GroupKind::Defer {
                     usage,
                     label: usage_def.label.clone(),
-                    path: Vec::new(),
+                    path: std::sync::Arc::from([]),
                     after: None,
                 },
                 parent_group,

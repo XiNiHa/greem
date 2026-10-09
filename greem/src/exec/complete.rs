@@ -392,7 +392,11 @@ impl<'a, C: Send + Sync + 'a> Completion<'a, '_, C> {
                         GroupKind::Defer {
                             usage,
                             label: usage_def.label.clone(),
-                            path: self.cx.meta.path_to(pos.object, &field.key, &pos.indices),
+                            path: self
+                                .cx
+                                .meta
+                                .path_to(pos.object, &field.key, &pos.indices)
+                                .into(),
                             after,
                         },
                         parent_group,
@@ -488,7 +492,7 @@ impl<'a, C: Send + Sync + 'a> Completion<'a, '_, C> {
                         GroupKind::Stream {
                             node: field.child.unwrap_or(0),
                             label: info.label.clone(),
-                            path: self.cx.meta.path_to(pos.object, &field.key, &[]),
+                            path: self.cx.meta.path_to(pos.object, &field.key, &[]).into(),
                             parent: p as u32,
                         },
                         self.cx.groups[pos.object as usize],
