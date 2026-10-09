@@ -1,0 +1,18 @@
+"""The area schema for graphql-js v17.0.2 src/execution/__tests__/oneof-test.ts."""
+type Query {
+  test(input: TestInputObject!): TestObject
+}
+
+# apollo-compiler 1.33 does not know `@oneOf`, so the area declares it; drop
+# this once greem supplies the directive itself (#42).
+directive @oneOf on INPUT_OBJECT
+
+input TestInputObject @oneOf {
+  a: String
+  b: Int
+}
+
+type TestObject {
+  a: String
+  b: Int
+}

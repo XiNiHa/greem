@@ -386,6 +386,12 @@ impl Groups {
         }
     }
 
+    /// Takes the roots of `id` to ship them: a group ships once, and its
+    /// roots are not read again after that.
+    pub(crate) fn take_roots(&mut self, id: GroupId) -> Vec<Root> {
+        self.roots.remove(&id).unwrap_or_default()
+    }
+
     /// The objects whose deferred field sets run under `id`, in tree order.
     pub(crate) fn roots_of(&self, id: GroupId) -> &[Root] {
         self.roots.get(&id).map_or(&[], Vec::as_slice)

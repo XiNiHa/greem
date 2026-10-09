@@ -12,7 +12,7 @@ use apollo_compiler::schema::ExtendedType;
 use apollo_compiler::validation::Valid;
 use apollo_compiler::{ExecutableDocument, Name, Schema as ApolloSchema};
 use indexmap::IndexMap;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 pub type NodeId = u32;
@@ -121,8 +121,119 @@ pub struct Tree {
     pub(crate) incremental: bool,
     pub(crate) max_depth: u32,
     collected: HashMap<(NodeId, String), Arc<Collected>>,
-    /// The innermost usage every contributor of the node being collected sits under.
-    outer_usage: Option<UsageId>,
+}
+
+/// The RFC's HasNoOverlappingStreams, which apollo-compiler does not check:
+/// in every selection set of the document, two selections of one response
+/// name cannot merge when either carries `@stream`, however it is written.
+/// Like the rest of validation this ignores `@skip`, `@include`, variables
+/// and type conditions: a document is valid or not before any request.
+pub(crate) fn overlapping_streams(
+    doc: &ExecutableDocument,
+    schema: &ApolloSchema,
+) -> Vec<GraphQLError> {
+    let mut check = OverlapCheck {
+        doc,
+        schema,
+        errors: Vec::new(),
+        checked: HashSet::new(),
+    };
+    for operation in doc.operations.iter() {
+        check.sets(&[&operation.selection_set]);
+    }
+    for fragment in doc.fragments.values() {
+        check.sets(&[&fragment.selection_set]);
+    }
+    check.errors
+}
+
+struct OverlapCheck<'d> {
+    doc: &'d ExecutableDocument,
+    schema: &'d ApolloSchema,
+    errors: Vec<GraphQLError>,
+    /// Selection sets, and merged pairs of them, already checked.
+    checked: HashSet<Vec<*const SelectionSet>>,
+}
+
+impl<'d> OverlapCheck<'d> {
+    /// Checks the fields of `sets` taken together, as FieldsInSetCanMerge
+    /// does for one set or for the merged sets of two fields that merge.
+    fn sets(&mut self, sets: &[&'d SelectionSet]) {
+        let mut key: Vec<*const SelectionSet> = sets.iter().map(|s| *s as *const _).collect();
+        key.sort_unstable();
+        if !self.checked.insert(key) {
+            return;
+        }
+        let mut fields: IndexMap<&str, Vec<(&'d Node<Field>, &'d Name)>> = IndexMap::new();
+        let mut visited = Vec::new();
+        for set in sets {
+            self.gather(set, &set.ty, &mut fields, &mut visited);
+        }
+        for (key, occurrences) in &fields {
+            if occurrences.len() > 1
+                && let Some((streamed, _)) = occurrences
+                    .iter()
+                    .find(|(f, _)| f.directives.get("stream").is_some())
+            {
+                self.errors.push(GraphQLError::request(
+                    format!(
+                        "fields `{key}` conflict because they have overlapping stream directives"
+                    ),
+                    span_location(streamed.location(), self.doc),
+                ));
+            }
+        }
+        for occurrences in fields.values() {
+            for (i, (a, parent_a)) in occurrences.iter().enumerate() {
+                self.sets(&[&a.selection_set]);
+                for (b, parent_b) in &occurrences[i + 1..] {
+                    if parent_a == parent_b
+                        || !self.is_object(parent_a)
+                        || !self.is_object(parent_b)
+                    {
+                        self.sets(&[&a.selection_set, &b.selection_set]);
+                    }
+                }
+            }
+        }
+    }
+
+    fn is_object(&self, ty: &Name) -> bool {
+        self.schema.types.get(ty).is_some_and(|t| t.is_object())
+    }
+
+    /// The fields of `set` by response name, visiting fragments, each with
+    /// the type its selection set is written against.
+    fn gather(
+        &self,
+        set: &'d SelectionSet,
+        parent: &'d Name,
+        fields: &mut IndexMap<&'d str, Vec<(&'d Node<Field>, &'d Name)>>,
+        visited: &mut Vec<&'d Name>,
+    ) {
+        for selection in &set.selections {
+            match selection {
+                Selection::Field(field) => fields
+                    .entry(field.response_key().as_str())
+                    .or_default()
+                    .push((field, parent)),
+                Selection::InlineFragment(fragment) => {
+                    let parent = fragment.type_condition.as_ref().unwrap_or(parent);
+                    self.gather(&fragment.selection_set, parent, fields, visited);
+                }
+                Selection::FragmentSpread(spread) => {
+                    if visited.contains(&&spread.fragment_name) {
+                        continue;
+                    }
+                    visited.push(&spread.fragment_name);
+                    if let Some(fragment) = self.doc.fragments.get(&spread.fragment_name) {
+                        let parent = &fragment.selection_set.ty;
+                        self.gather(&fragment.selection_set, parent, fields, visited);
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn span_location(
@@ -168,7 +279,6 @@ impl Tree {
             incremental,
             max_depth,
             collected: HashMap::new(),
-            outer_usage: None,
         }
     }
 
@@ -225,38 +335,23 @@ impl Tree {
                 )?;
             }
             Source::Fields(occurrences) => {
-                // The usages the producing field is delivered under already own
-                // this node's objects; fields are grouped relative to them.
-                let base = self.nodes[node as usize].base.clone();
                 // One visited set for every occurrence merged into this node,
                 // as CollectSubfields shares it across the merged fields.
                 let mut visited = Vec::new();
                 for occ in occurrences.clone() {
-                    // Everything up to the last base usage on the path is already delivered.
-                    let cut = occ
-                        .usages
-                        .iter()
-                        .rposition(|u| base.contains(u))
-                        .map_or(0, |i| i + 1);
-                    let relative: Vec<UsageId> = occ.usages[cut..].to_vec();
-                    // Defers nested here sit under the usage this occurrence
-                    // was collected under, not under another fragment's that
-                    // merely selects the same field.
-                    self.outer_usage = occ.usages[..cut]
-                        .last()
-                        .copied()
-                        .or(base.iter().copied().max());
+                    // Each occurrence keeps the usages it was collected under,
+                    // so a nested defer sits under the fragment that reached
+                    // it, not under another one that merely selects the field.
                     self.collect_set(
                         &occ.field.selection_set,
                         typename,
-                        &relative,
+                        &occ.usages,
                         &mut groups,
                         &mut introduced,
                         node,
                         &mut visited,
                     )?;
                 }
-                self.outer_usage = None;
             }
         }
         let parent_depth = self.nodes[node as usize].depth;
@@ -270,33 +365,21 @@ impl Tree {
                 "__schema" | "__type" if node == 0 => FieldKind::Introspection,
                 _ => FieldKind::Normal,
             };
-            let usages = self.field_usages(&occurrences);
+            // The RFC's BuildExecutionPlan: a field whose filtered usage set
+            // is its parent's runs with the parent's set; any other set is a
+            // deferred set of its own, keyed by the fragments that select
+            // the field, which may all be ancestors already delivering here.
+            let set = self.field_usages(&occurrences);
+            let usages = if set == base { Vec::new() } else { set.clone() };
             let directive = if kind == FieldKind::Normal {
                 self.stream_arguments(first)?
             } else {
                 None
             };
-            for other in occurrences.iter().skip(1) {
-                // Merged fields agree on the resolved arguments, however the
-                // directive is written.
-                let arguments = self.stream_arguments(&other.field)?.map(|(_, a)| a);
-                if kind == FieldKind::Normal
-                    && arguments.as_ref() != directive.as_ref().map(|(_, a)| a)
-                {
-                    return Err(Abort::one(
-                        format!(
-                            "fields `{key}` conflict because they have differing stream directives"
-                        ),
-                        span_location(other.field.location(), &self.doc.doc),
-                    ));
-                }
-            }
             // Disabled ignores the directive: its arguments are only
             // validated when it takes effect.
             let stream = match directive {
-                Some((stream, arguments)) if self.incremental => {
-                    Some(self.stream_info(stream, arguments)?)
-                }
+                Some((_, arguments)) if self.incremental => Some(self.stream_info(arguments)?),
                 _ => None,
             };
             let composite = matches!(
@@ -314,7 +397,7 @@ impl Tree {
             let mut depth = parent_depth
                 + usages
                     .iter()
-                    .map(|&u| self.defer_levels(u, &base))
+                    .map(|&u| self.defer_levels(u, &base).max(1))
                     .max()
                     .unwrap_or(0);
             if kind == FieldKind::Normal {
@@ -342,7 +425,7 @@ impl Tree {
                     parent: Some(node),
                     depth,
                     stream: stream.clone(),
-                    base: usages.clone(),
+                    base: set,
                     source: Source::Fields(occurrences.clone()),
                 });
                 Some(id)
@@ -414,7 +497,7 @@ impl Tree {
         groups: &mut IndexMap<String, Vec<Occurrence>>,
         introduced: &mut Vec<UsageId>,
         node: NodeId,
-        visited: &mut Vec<(Name, Vec<UsageId>, Option<UsageId>)>,
+        visited: &mut Vec<(Name, Vec<UsageId>)>,
     ) -> Result<(), Abort> {
         for selection in &set.selections {
             if !self.included(selection.directives())? {
@@ -456,11 +539,7 @@ impl Tree {
                     // under, which its nested defers depend on. A deferred
                     // spread is its own usage every time.
                     if path.len() == usage_path.len() {
-                        let marker = (
-                            spread.fragment_name.clone(),
-                            usage_path.to_vec(),
-                            self.outer_usage,
-                        );
+                        let marker = (spread.fragment_name.clone(), usage_path.to_vec());
                         if visited.contains(&marker) {
                             continue;
                         }
@@ -506,7 +585,7 @@ impl Tree {
             id,
             node,
             label,
-            parent: usage_path.last().copied().or(self.outer_usage),
+            parent: usage_path.last().copied(),
         });
         introduced.push(id);
         let mut path = usage_path.to_vec();
@@ -543,20 +622,12 @@ impl Tree {
         )))
     }
 
-    /// Validates a `@stream` that takes effect.
-    fn stream_info(
-        &self,
-        stream: &Node<executable::Directive>,
-        arguments: StreamArguments,
-    ) -> Result<StreamInfo, Abort> {
+    /// A `@stream` that takes effect. A negative `initialCount` is not a
+    /// request failure: it is raised as an execution error when the field's
+    /// arguments are coerced, and streams nothing initially until then.
+    fn stream_info(&self, arguments: StreamArguments) -> Result<StreamInfo, Abort> {
         let initial_count = match arguments.initial_count {
             Some(InputValue::Int(i)) if i >= 0 => i as u32,
-            Some(InputValue::Int(_)) => {
-                return Err(Abort::one(
-                    "initialCount must be positive",
-                    span_location(stream.location(), &self.doc.doc),
-                ));
-            }
             _ => 0,
         };
         let label = match arguments.label {
@@ -669,9 +740,16 @@ impl Tree {
         }
     }
 
-    /// Spec `CoerceArgumentValues` over the first occurrence of a selected field.
+    /// Spec `CoerceArgumentValues` over the first occurrence of a selected
+    /// field, after the arguments of a `@stream` that takes effect.
     pub(crate) fn coerce_arguments(&self, field: &SelectedField) -> Result<InputValue, Error> {
         let occurrence = &field.occurrences[0].field;
+        if field.stream.is_some()
+            && let Ok(Some((_, arguments))) = self.stream_arguments(occurrence)
+            && matches!(arguments.initial_count, Some(InputValue::Int(i)) if i < 0)
+        {
+            return Err(Error::new("initialCount must not be negative"));
+        }
         let mut out = Vec::new();
         for definition in &field.definition.arguments {
             let name = definition.name.as_str();
@@ -901,6 +979,74 @@ mod tests {
         );
     }
 
+    /// A helper for the grouping tests: the tree of `query` over `sdl` with
+    /// incremental delivery on.
+    fn tree_of(sdl: &str, query: &str) -> Tree {
+        let sdl = format!(
+            "directive @defer(if: Boolean! = true, label: String) on FRAGMENT_SPREAD | INLINE_FRAGMENT\n\
+            directive @stream(if: Boolean! = true, label: String, initialCount: Int = 0) on FIELD\n{sdl}"
+        );
+        let schema = Arc::new(ApolloSchema::parse_and_validate(sdl, "s.graphql").unwrap());
+        let doc = ExecutableDocument::parse_and_validate(&schema, query, "q.graphql").unwrap();
+        let operation = doc.operations.get(None).unwrap().clone();
+        let variables =
+            apollo_compiler::request::coerce_variable_values(&schema, &operation, &JsonMap::new())
+                .unwrap();
+        Tree::new(
+            schema,
+            Arc::new(Document { doc }),
+            operation,
+            variables,
+            true,
+            32,
+        )
+    }
+
+    fn usages_of(collected: &Collected) -> Vec<(&str, Vec<UsageId>)> {
+        collected
+            .fields
+            .iter()
+            .map(|f| (f.key.as_str(), f.usages.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn fields_are_grouped_by_their_own_usage_set_not_their_parents() {
+        // The RFC's BuildExecutionPlan: `hero` is shared by both fragments,
+        // and each subfield only one of them selects is a set of its own
+        // keyed by that fragment, not part of the shared set.
+        let mut tree = tree_of(
+            "type Query { hero: Hero } type Hero { id: ID name: String both: Int }",
+            "{ ... @defer { hero { id both } } ... @defer { hero { name both } } }",
+        );
+        let root = tree.collect(0, "Query").unwrap();
+        assert_eq!(root.introduced, vec![0, 1]);
+        assert_eq!(usages_of(&root), vec![("hero", vec![0, 1])]);
+        let hero = root.fields[0].child.unwrap();
+        let hero = tree.collect(hero, "Hero").unwrap();
+        assert_eq!(
+            usages_of(&hero),
+            vec![("id", vec![0]), ("both", vec![]), ("name", vec![1])]
+        );
+    }
+
+    #[test]
+    fn a_field_under_one_fragment_only_is_immediate_relative_to_it() {
+        let mut tree = tree_of(
+            "type Query { hero: Hero } type Hero { id: ID name: String }",
+            "{ hero { id } ... @defer { hero { name ... @defer { id } } } }",
+        );
+        let root = tree.collect(0, "Query").unwrap();
+        assert_eq!(usages_of(&root), vec![("hero", vec![])]);
+        let hero = root.fields[0].child.unwrap();
+        let hero = tree.collect(hero, "Hero").unwrap();
+        // `id` is immediate; `name` is the outer fragment's own set; the
+        // inner fragment selects only `id`, which the initial set already
+        // delivers, so it introduces a usage with no set.
+        assert_eq!(usages_of(&hero), vec![("id", vec![]), ("name", vec![0])]);
+        assert_eq!(hero.introduced, vec![1]);
+    }
+
     #[test]
     fn incremental_directive_defaults_come_from_the_schema() {
         let sdl = "directive @defer(if: Boolean! = false, label: String = \"deferred-default\") on FRAGMENT_SPREAD | INLINE_FRAGMENT\n\
@@ -930,8 +1076,8 @@ mod tests {
             panic!("field");
         };
         // $n unprovided and no label: the definition defaults.
-        let (stream, arguments) = tree.stream_arguments(a).unwrap().unwrap();
-        let info = tree.stream_info(stream, arguments).unwrap();
+        let (_, arguments) = tree.stream_arguments(a).unwrap().unwrap();
+        let info = tree.stream_info(arguments).unwrap();
         assert_eq!(info.initial_count, 2);
         assert_eq!(info.label.as_deref(), Some("stream-default"));
         let mut introduced = Vec::new();

@@ -185,16 +185,20 @@ A naive depth-first executor kept only to prove the breadth-first executor equiv
 ### Compliance
 
 **World**:
-The seeded in-memory dataset and failure map that compliance resolvers are pure functions of; generated per property case alongside the document and the interleaving.
-_Avoid_: Fixture data, mock, test database
+The in-memory dataset compliance resolvers read, together with its harness: seeded by counts and generated per property case alongside the document and the interleaving, or written out literally per ported case. The property world is immutable, so its resolvers are pure functions of it; a ported world may hold the state its suite's mutations change.
+_Avoid_: Fixture data, mock, test database, root value
+
+**Harness**:
+The executor-facing controls every compliance world embeds: the failure map, the interleaving's yield counts, the call log and the gate.
+_Avoid_: Test context, controls, rig
 
 **Interleaving**:
 The order in which concurrently running resolvers complete, made a generated input by assigning each resolver call a yield count.
 _Avoid_: Schedule, timing, race
 
 **Area schema**:
-One compliance schema per specification area onto which upstream test cases are ported; extended before another is added. Distinct from the property schema the generators walk.
-_Avoid_: Test schema, fixture schema
+One compliance schema per upstream graphql-js execution test suite, the superset of every schema shape that suite's cases build, onto which those cases are ported one-to-one; extended before another is added. Distinct from the property schema the generators walk.
+_Avoid_: Test schema, fixture schema, spec-section schema
 
 **Workload**:
 A portable benchmark case: schema, document, dataset description and resolver contract, consumable by any framework in any language.

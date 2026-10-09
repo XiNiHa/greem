@@ -134,44 +134,6 @@ fn settle_roots(
     })
 }
 
-/// Marks `roots` alive and emits their incremental entries under `id`; the
-/// first entry carries `errors`.
-fn ship_roots(
-    root: &mut Scope<'_>,
-    roots: &[Root],
-    mut errors: Vec<GraphQLError>,
-    id: u32,
-    group_path: &[PathSegment],
-    out: &mut Entries,
-    scratch: &mut Vec<settle::Target>,
-) {
-    for (path, object) in roots {
-        let object = *object;
-        let (depth, sub_path) = with_scope_at_mut(root, path, &mut |scope| {
-            settle::mark_alive(scope, object, scratch);
-            let meta = scope.meta;
-            // A fragment's roots sit at its own path, so the entry needs
-            // no subPath; only a root elsewhere has its path built.
-            let sub_path = if meta.has_path(object, group_path) {
-                Vec::new()
-            } else {
-                sub_path(&meta.path(object), group_path)
-            };
-            (meta.depth(object), sub_path)
-        });
-        out.incremental.push(IncrementalEntry {
-            id,
-            depth,
-            sub_path,
-            errors: std::mem::take(&mut errors),
-            source: EntrySource::Defer {
-                path: path.clone(),
-                object,
-            },
-        });
-    }
-}
-
 /// Settles what the groups that died since the last barrier take with
 /// them: their announced dependents fail, the shared field sets nobody can
 /// deliver any more are dropped, and whatever an ancestor's death made
@@ -275,104 +237,151 @@ fn fail_dependents(groups: &mut Groups, candidates: &[GroupId], out: &mut Entrie
 /// parent shipped when the object carrying it was just marked alive or
 /// nulled. Objects under a stream item that has not shipped are decided
 /// when it does.
+///
+/// A fragment with nothing left to deliver (no field set waiting or
+/// running for it, and no shared set pending) is never announced: the
+/// RFC emits no `pending` entry for it, and its children are announced in
+/// its place, as if it had shipped.
 fn announce_children(
     root: &mut Scope<'_>,
     shipped: &[GroupId],
     groups: &mut Groups,
     out: &mut Entries,
 ) {
-    let shipped: HashSet<GroupId> = shipped.iter().copied().collect();
-    walk_flagged(root, ANNOUNCE, &mut Vec::new(), &mut |_, scope| {
-        let mut decided = std::mem::take(&mut scope.decided);
-        if decided.is_empty() {
-            return;
-        }
-        decided.sort_unstable();
-        decided.dedup();
-        #[cfg(debug_assertions)]
-        crate::__private::OBJECTS_ANNOUNCED.fetch_add(decided.len(), Ordering::Relaxed);
-        let meta = scope.meta;
-        for &object in &decided {
-            let object = object as usize;
-            let alive = scope.alive[object];
-            for &(_, g) in &meta.objects[object].pending {
-                let group = groups.get(g);
-                if !matches!(group.state, GroupState::Unreleased) || groups.is_dead(g) {
-                    continue;
-                }
-                if !group.parent.is_some_and(|p| shipped.contains(&p)) {
-                    continue;
-                }
-                if !alive {
-                    // The parent payload nulled this object: its groups never run.
-                    groups.set_state(g, GroupState::Dropped);
-                    continue;
-                } // Its enclosing fragment already failed: it is never announced.
-                if let GroupKind::Defer {
-                    after: Some(after), ..
-                } = group.kind
-                    && matches!(
-                        groups.get(after).state,
-                        GroupState::Failed(_) | GroupState::Dropped
-                    )
-                {
-                    groups.set_state(g, GroupState::Dropped);
-                    continue;
-                }
+    let mut shipped: HashSet<GroupId> = shipped.iter().copied().collect();
+    // A fragment completed silently stands in for a shipped one: the objects
+    // carrying its children were decided when their own field shipped, which
+    // may have been an earlier barrier, so they are listed again and the walk
+    // repeats, as `ship_fragment` does for the children of what it ships.
+    let mut silent: Vec<GroupId> = Vec::new();
+    loop {
+        walk_flagged(root, ANNOUNCE, &mut Vec::new(), &mut |_, scope| {
+            let mut decided = std::mem::take(&mut scope.decided);
+            if decided.is_empty() {
+                return;
+            }
+            decided.sort_unstable();
+            decided.dedup();
+            #[cfg(debug_assertions)]
+            crate::__private::OBJECTS_ANNOUNCED.fetch_add(decided.len(), Ordering::Relaxed);
+            let meta = scope.meta;
+            for &object in &decided {
+                let object = object as usize;
+                let alive = scope.alive[object];
+                for &(_, g) in &meta.objects[object].pending {
+                    let group = groups.get(g);
+                    if !matches!(group.state, GroupState::Unreleased) || groups.is_dead(g) {
+                        continue;
+                    }
+                    if !group.parent.is_some_and(|p| {
+                        shipped.contains(&p) || matches!(groups.get(p).state, GroupState::Completed)
+                    }) {
+                        continue;
+                    }
+                    if !alive {
+                        // The parent payload nulled this object: its groups never run.
+                        groups.set_state(g, GroupState::Dropped);
+                        continue;
+                    } // Its enclosing fragment already failed: it is never announced.
+                    if let GroupKind::Defer {
+                        after: Some(after), ..
+                    } = group.kind
+                        && matches!(
+                            groups.get(after).state,
+                            GroupState::Failed(_) | GroupState::Dropped
+                        )
+                    {
+                        groups.set_state(g, GroupState::Dropped);
+                        continue;
+                    }
 
-                let (path, label) = match &group.kind {
-                    GroupKind::Defer { path, label, .. } => (path.clone(), label.clone()),
-                    _ => continue,
+                    let (path, label) = match &group.kind {
+                        GroupKind::Defer { path, label, .. } => (path.clone(), label.clone()),
+                        _ => continue,
+                    };
+                    if !has_work(groups, g) {
+                        groups.set_state(g, GroupState::Completed);
+                        shipped.insert(g);
+                        silent.push(g);
+                        continue;
+                    }
+                    let id = groups.assign_wire_id(g);
+                    groups.set_state(g, GroupState::Announced);
+                    out.pending.push(PendingEntry { id, path, label });
+                }
+            }
+            for column in scope.columns() {
+                let Some(driver) = column.stream.as_ref().filter(|d| d.owns_groups()) else {
+                    continue;
                 };
-                let id = groups.assign_wire_id(g);
-                groups.set_state(g, GroupState::Announced);
-                out.pending.push(PendingEntry { id, path, label });
+                for &parent_object in &decided {
+                    let Some(p) = driver.parent_of(parent_object) else {
+                        continue;
+                    };
+                    let g = driver.group(p);
+                    let group = groups.get(g);
+                    if !matches!(group.kind, GroupKind::Stream { .. })
+                        || !matches!(group.state, GroupState::Unreleased)
+                    {
+                        continue;
+                    }
+                    if !group.parent.is_some_and(|parent| shipped.contains(&parent))
+                        || groups.is_dead(g)
+                    {
+                        continue;
+                    }
+                    if !scope.alive[parent_object as usize] {
+                        groups.set_state(g, GroupState::Dropped);
+                        continue;
+                    }
+                    // The list itself was nulled (an item error reached it) or
+                    // never was a list: there is no position to stream into.
+                    if !matches!(column.level0[parent_object as usize], Slot::Items { .. }) {
+                        groups.set_state(g, GroupState::Dropped);
+                        continue;
+                    }
+                    if driver.source_ended(p) {
+                        groups.set_state(g, GroupState::Completed);
+                        continue;
+                    }
+                    let (path, label) = match &group.kind {
+                        GroupKind::Stream { path, label, .. } => (path.clone(), label.clone()),
+                        _ => unreachable!(),
+                    };
+                    let id = groups.assign_wire_id(g);
+                    groups.set_state(g, GroupState::Announced);
+                    out.pending.push(PendingEntry { id, path, label });
+                }
+            }
+        });
+        if silent.is_empty() {
+            break;
+        }
+        for g in silent.drain(..) {
+            for (path, object) in groups.child_carriers(g) {
+                with_scope_at_mut(root, &path, &mut |scope| {
+                    if scope.decided.is_empty() {
+                        scope.signal.raise(ANNOUNCE);
+                    }
+                    scope.decided.push(object);
+                });
             }
         }
-        for column in scope.columns() {
-            let Some(driver) = column.stream.as_ref().filter(|d| d.owns_groups()) else {
-                continue;
-            };
-            for &parent_object in &decided {
-                let Some(p) = driver.parent_of(parent_object) else {
-                    continue;
-                };
-                let g = driver.group(p);
-                let group = groups.get(g);
-                if !matches!(group.kind, GroupKind::Stream { .. })
-                    || !matches!(group.state, GroupState::Unreleased)
-                {
-                    continue;
-                }
-                if !group.parent.is_some_and(|parent| shipped.contains(&parent))
-                    || groups.is_dead(g)
-                {
-                    continue;
-                }
-                if !scope.alive[parent_object as usize] {
-                    groups.set_state(g, GroupState::Dropped);
-                    continue;
-                }
-                // The list itself was nulled (an item error reached it) or
-                // never was a list: there is no position to stream into.
-                if !matches!(column.level0[parent_object as usize], Slot::Items { .. }) {
-                    groups.set_state(g, GroupState::Dropped);
-                    continue;
-                }
-                if driver.source_ended(p) {
-                    groups.set_state(g, GroupState::Completed);
-                    continue;
-                }
-                let (path, label) = match &group.kind {
-                    GroupKind::Stream { path, label, .. } => (path.clone(), label.clone()),
-                    _ => unreachable!(),
-                };
-                let id = groups.assign_wire_id(g);
-                groups.set_state(g, GroupState::Announced);
-                out.pending.push(PendingEntry { id, path, label });
-            }
-        }
-    });
+    }
+}
+
+/// Whether a fragment about to be announced can still deliver something:
+/// a field set of its own holds it, or a set it shares has not settled.
+/// Every set it will ever have is reached through one of those, so a
+/// fragment with neither is done before it starts.
+fn has_work(groups: &Groups, g: GroupId) -> bool {
+    groups.is_live(g)
+        || groups.sharing(g).iter().any(|&s| {
+            matches!(
+                groups.get(s).state,
+                GroupState::Unreleased | GroupState::Released | GroupState::Halted(_)
+            )
+        })
 }
 
 fn sub_path(object_path: &[PathSegment], group_path: &[PathSegment]) -> Vec<PathSegment> {
@@ -688,7 +697,7 @@ impl Barrier<'_, '_> {
         if failure.is_some() {
             self.initial = Some((Data::Null, errors));
         } else {
-            settle::mark_alive(self.root, 0, &mut self.scratch);
+            settle::mark_alive(self.root, 0, &mut self.scratch, self.groups);
             self.shipped.push(g);
             self.initial = Some((Data::Root, errors));
         }
@@ -741,15 +750,8 @@ impl Barrier<'_, '_> {
             _ => Arc::from([]),
         };
         self.shipped.push(g);
-        ship_roots(
-            self.root,
-            self.groups.roots_of(g),
-            errors,
-            id,
-            &group_path,
-            &mut self.out,
-            &mut self.scratch,
-        );
+        let roots = self.groups.take_roots(g);
+        self.ship_roots(&roots, errors, id, &group_path);
         // Its payload announces the groups beneath it. Those on objects it
         // delivered were decided above; a nested fragment on the very object
         // carrying it, or one whose fields all ran in a shared set, sits on
@@ -772,21 +774,52 @@ impl Barrier<'_, '_> {
             }
             self.groups.set_state(s, GroupState::Completed);
             self.shipped.push(s);
-            let errors = root_errors(self.root, self.groups.roots_of(s), &mut self.errs);
-            ship_roots(
-                self.root,
-                self.groups.roots_of(s),
-                errors,
-                id,
-                &group_path,
-                &mut self.out,
-                &mut self.scratch,
-            );
+            let roots = self.groups.take_roots(s);
+            let errors = root_errors(self.root, &roots, &mut self.errs);
+            self.ship_roots(&roots, errors, id, &group_path);
         }
         self.out.completed.push(CompletedEntry {
             id,
             errors: Vec::new(),
         });
+    }
+
+    /// Marks `roots` alive and emits their incremental entries under `id`;
+    /// the first entry carries `errors`.
+    fn ship_roots(
+        &mut self,
+        roots: &[Root],
+        mut errors: Vec<GraphQLError>,
+        id: u32,
+        group_path: &[PathSegment],
+    ) {
+        for (path, object) in roots {
+            let object = *object;
+            let scratch = &mut self.scratch;
+            let groups = &mut *self.groups;
+            let (depth, sub_path) = with_scope_at_mut(self.root, path, &mut |scope| {
+                settle::mark_alive(scope, object, scratch, groups);
+                let meta = scope.meta;
+                // A fragment's roots sit at its own path, so the entry needs
+                // no subPath; only a root elsewhere has its path built.
+                let sub_path = if meta.has_path(object, group_path) {
+                    Vec::new()
+                } else {
+                    sub_path(&meta.path(object), group_path)
+                };
+                (meta.depth(object), sub_path)
+            });
+            self.out.incremental.push(IncrementalEntry {
+                id,
+                depth,
+                sub_path,
+                errors: std::mem::take(&mut errors),
+                source: EntrySource::Defer {
+                    path: path.clone(),
+                    object,
+                },
+            });
+        }
     }
 
     /// Per streamed column: ships the item ranges whose subtrees finished,
@@ -944,9 +977,10 @@ impl Barrier<'_, '_> {
                 continue;
             }
             let scratch = &mut self.scratch;
+            let groups = &mut *self.groups;
             with_scope_at_mut(self.root, path, &mut |scope| {
                 let column = scope.columns_mut().find(|c| c.field == field).unwrap();
-                settle::mark_alive_range(column, t, range, scratch);
+                settle::mark_alive_range(column, t, range, scratch, groups);
             });
             let depth = match &self.groups.get(g).kind {
                 GroupKind::Stream { path, .. } => path.len() + 1,

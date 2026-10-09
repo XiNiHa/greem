@@ -1,0 +1,55 @@
+"""The area schema for graphql-js v17.0.2 src/execution/__tests__/variables-test.ts."""
+# Upstream's `TestFaultyScalar`: rejects every input with `FaultyScalarErrorMessage`.
+scalar FaultyScalar
+
+"""Accepts only `"ExternalValue"`, read as `"InternalValue"`."""
+scalar ComplexScalar
+
+"""Any input value, kept as JSON."""
+scalar JSONScalar
+
+enum TestEnum {
+  NULL
+  UNDEFINED
+  NAN
+  FALSE
+  CUSTOM
+  DEFAULT_VALUE
+}
+
+input TestInputObject {
+  a: String
+  b: [String]
+  c: String!
+  d: ComplexScalar
+  e: FaultyScalar
+}
+
+input TestNestedInputObject {
+  na: TestInputObject!
+  nb: String!
+}
+
+type NestedType {
+  echo(input: String): String
+}
+
+"""Upstream's `TestType`: every field echoes its coerced `input` as JSON."""
+type Query {
+  fieldWithEnumInput(input: TestEnum): String
+  fieldWithNonNullableEnumInput(input: TestEnum!): String
+  fieldWithObjectInput(input: TestInputObject): String
+  fieldWithNullableStringInput(input: String): String
+  fieldWithNonNullableStringInput(input: String!): String
+  fieldWithDefaultArgumentValue(input: String = "Hello World"): String
+  fieldWithNonNullableStringInputAndDefaultArgumentValue(input: String! = "Hello World"): String
+  fieldWithNestedInputObject(input: TestNestedInputObject): String
+  fieldWithJSONScalarInput(input: JSONScalar): String
+  """`"missing"` when the argument is omitted."""
+  fieldWithPrototypeNamedArgument(toString: String): String
+  list(input: [String]): String
+  nested: NestedType
+  nnList(input: [String]!): String
+  listNN(input: [String!]): String
+  nnListNN(input: [String!]!): String
+}

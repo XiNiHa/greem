@@ -1,0 +1,21 @@
+"""The area schema for graphql-js v17.0.2 src/execution/__tests__/nonnull-test.ts."""
+type DataType {
+  sync: String
+  syncNonNull: String!
+  """`sync`, read after one yield."""
+  promise: String
+  """`syncNonNull`, read after one yield."""
+  promiseNonNull: String!
+  syncNest: DataType
+  syncNonNullNest: DataType!
+  """`syncNest`, read after one yield."""
+  promiseNest: DataType
+  """`syncNonNullNest`, read after one yield."""
+  promiseNonNullNest: DataType!
+  """`Query.withNonNullArg` of the `Handles non-null argument` cases' own schema."""
+  withNonNullArg(cannotBeNull: String!): String
+}
+
+schema {
+  query: DataType
+}

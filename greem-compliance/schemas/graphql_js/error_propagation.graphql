@@ -1,0 +1,4 @@
+"""The area schema for graphql-js v17.0.2 src/execution/__tests__/errorPropagation-test.ts."""
+type Query {
+  foo: Int!
+}

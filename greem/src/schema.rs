@@ -256,6 +256,10 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
         let doc = doc
             .validate(&self.inner.schema)
             .map_err(|e| RequestErrors(diagnostics_to_errors(&e.errors)))?;
+        let overlaps = crate::tree::overlapping_streams(&doc, &self.inner.schema);
+        if !overlaps.is_empty() {
+            return Err(RequestErrors(overlaps));
+        }
         Ok(Arc::new(Document { doc }))
     }
 

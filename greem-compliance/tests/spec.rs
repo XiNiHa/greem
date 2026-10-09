@@ -5,26 +5,28 @@ mod common;
 
 use common::*;
 use greem::{ErrorBehavior, ExecuteOptions, IncrementalDelivery};
-use greem_compliance::world::{Failure, World};
+use greem_compliance::harness::{Area, Harness};
+use greem_compliance::world::World;
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
 
 fn world(users: u32, posts: u32) -> World {
     World::seeded(users, posts)
 }
 
 fn failing(users: u32, posts: u32, failures: &[(&'static str, &'static str, u32)]) -> World {
-    let failures: BTreeSet<Failure> = failures
-        .iter()
-        .map(|&(type_name, field, object)| Failure {
-            type_name,
-            field,
-            object,
-        })
-        .collect();
     World {
-        failures,
+        harness: Harness::failing(failures),
         ..World::seeded(users, posts)
+    }
+}
+
+fn gated(field: &'static str, world: World) -> World {
+    World {
+        harness: Harness {
+            gate_field: Some(field),
+            ..world.harness
+        },
+        ..world
     }
 }
 
@@ -329,8 +331,8 @@ fn cardinality_failure_is_a_framework_error_per_parent() {
         cardinality_failure: true,
         ..World::seeded(2, 1)
     };
-    let (v, _) = single(
-        world,
+    // Per object, the reference executor never sees a short output set.
+    let (v, _) = world.single_unchecked(
         "{ users { posts { title } } }",
         Value::Null,
         ExecuteOptions {
@@ -717,13 +719,6 @@ fn introspection_rides_in_the_root_scope() {
 }
 
 // ---- Incremental delivery ----------------------------------------------------
-
-fn incremental() -> ExecuteOptions {
-    ExecuteOptions {
-        incremental: IncrementalDelivery::Enabled,
-        ..Default::default()
-    }
-}
 
 #[test]
 fn defer_failed_group_reports_completed_errors_and_keeps_delivered_data() {
@@ -1137,10 +1132,7 @@ fn an_ended_stream_completes_without_waiting_for_other_streams() {
 fn halt_reports_the_first_error_while_a_sibling_is_still_pending() {
     // name never resolves; email fails. Halt must not wait for name.
     let payloads = run_until_stalled(
-        World {
-            gate_field: Some("User.name"),
-            ..failing(1, 0, &[("User", "email", 0)])
-        },
+        gated("User.name", failing(1, 0, &[("User", "email", 0)])),
         "{ users(first: 1) { name email } }",
         ExecuteOptions {
             error_behavior: ErrorBehavior::Halt,
@@ -1430,10 +1422,7 @@ fn halted_stream_groups_fail_with_their_error() {
     );
     // A halted stream group ships past a pending sibling inside its items.
     let payloads = run_until_stalled(
-        World {
-            gate_field: Some("Post.id"),
-            ..failing(1, 1, &[("Post", "title", 0)])
-        },
+        gated("Post.id", failing(1, 1, &[("Post", "title", 0)])),
         "{ users(first: 1) { drafts @stream(initialCount: 0) { id title } } }",
         ExecuteOptions {
             error_behavior: ErrorBehavior::Halt,
@@ -1470,9 +1459,9 @@ fn announced_fragments_under_a_failed_stream_fail_with_it() {
         "locations": [{"line": 1, "column": 51}],
         "path": ["search", 1, "id"],
     });
-    assert_eq!(
-        payloads,
-        [
+    assert_payloads(
+        &payloads,
+        &[
             json!({"data": {"search": []}, "pending": [{"id": "0", "path": ["search"]}], "hasNext": true}),
             json!({
                 "pending": [{"id": "1", "path": ["search", 0]}],
@@ -1483,7 +1472,7 @@ fn announced_fragments_under_a_failed_stream_fail_with_it() {
                 "completed": [{"id": "0", "errors": [error]}, {"id": "1", "errors": [error]}],
                 "hasNext": false,
             }),
-        ]
+        ],
     );
 }
 
@@ -1558,11 +1547,12 @@ fn nested_defers_under_a_streamed_item_are_delivered_before_the_end() {
 
 #[test]
 fn a_defer_nested_in_stream_items_depends_on_its_own_enclosing_fragment() {
-    // A and B both select the streamed drafts; C is nested under A only.
-    // A fails (name is non-null), so C is dropped even though B completes.
+    // A streams the drafts with C nested in its items; B streams them again
+    // under an alias (one streamed field cannot be selected twice). A fails
+    // (name is non-null), so C is dropped even though B completes.
     let query = "{ users(first: 1) { id \
         ... @defer(label: \"A\") { name drafts @stream(initialCount: 0) { ... @defer(label: \"C\") { title } } } \
-        ... @defer(label: \"B\") { drafts @stream(initialCount: 0) { id } } } }";
+        ... @defer(label: \"B\") { b: drafts @stream(initialCount: 0) { id } } } }";
     let (payloads, _) = run(
         failing(1, 1, &[("User", "name", 0)]),
         query,
@@ -1585,37 +1575,6 @@ fn a_defer_nested_in_stream_items_depends_on_its_own_enclosing_fragment() {
             .sum()
     };
     assert_eq!(count("pending"), count("completed"), "{payloads:?}");
-    // A deeper A fails a barrier after the items announced C: the client was
-    // told to expect C, so it completes with A's error instead of vanishing.
-    let late = query.replace(
-        "{ name drafts",
-        "{ posts(first: 1) { author { friends { friends { friends { id } } } name } } drafts",
-    );
-    let (payloads, _) = run(
-        failing(3, 1, &[("User", "name", 0)]),
-        &late,
-        Value::Null,
-        incremental(),
-    );
-    let pending_c = payloads
-        .iter()
-        .filter_map(|p| p["pending"].as_array())
-        .flatten()
-        .find(|p| p["label"] == json!("C"))
-        .expect("C is announced with the items");
-    let completed_c = payloads
-        .iter()
-        .filter_map(|p| p["completed"].as_array())
-        .flatten()
-        .find(|c| c["id"] == pending_c["id"])
-        .expect("C is completed");
-    assert_eq!(
-        completed_c["errors"][0]["path"],
-        json!(["users", 0, "posts", 0, "author", "name"]),
-        "{payloads:?}"
-    );
-    assert!(!serde_json::to_string(&payloads).unwrap().contains("title"));
-    assert_eq!(payloads.last().unwrap()["hasNext"], json!(false));
     // With A intact, C delivers.
     let (payloads, _) = run(world(1, 1), query, Value::Null, incremental());
     assert_eq!(
@@ -1648,10 +1607,9 @@ fn a_field_shared_by_two_fragments_survives_one_of_them_failing() {
     };
     let name_fails = || failing(1, 0, &[("User", "name", 0)]);
     // `users` is selected by A and B; only A's own `bad` fails. Whichever
-    // fragment comes first, and streamed or not, B still gets `users`.
+    // fragment comes first, B still gets `users`. (A streamed field cannot
+    // be shared: two selections of it do not merge.)
     for query in [
-        "{ ... @defer(label: \"B\") { users @stream(initialCount: 0) { id } } ... @defer(label: \"A\") { bad: users { name } users @stream(initialCount: 0) { id } } }",
-        "{ ... @defer(label: \"A\") { bad: users { name } users @stream(initialCount: 0) { id } } ... @defer(label: \"B\") { users @stream(initialCount: 0) { id } } }",
         "{ ... @defer(label: \"B\") { users { id } } ... @defer(label: \"A\") { bad: users { name } users { id } } }",
         "{ ... @defer(label: \"A\") { bad: users { name } users { id } } ... @defer(label: \"B\") { users { id } } }",
     ] {
@@ -1700,15 +1658,15 @@ fn a_field_shared_by_two_fragments_survives_one_of_them_failing() {
 }
 
 #[test]
-fn a_nested_defer_with_only_shared_fields_still_waits_for_its_enclosing_fragment() {
+fn a_nested_defer_whose_enclosing_fragment_fails_is_never_announced() {
     // CA and CB share `email`, so neither has a field set of its own. CA's
-    // fragment A completes early; CB's fragment B fails later. CB must not
-    // report success on the strength of the shared data alone.
+    // fragment A completes early and announces CA, which delivers the shared
+    // field; CB's fragment B fails later, so CB is never announced.
     let query = "{ users(first: 1) { id \
-        ... @defer(label: \"A\") { friends @stream(initialCount: 0) { ... @defer(label: \"CA\") { email } } } \
+        ... @defer(label: \"A\") { friends { ... @defer(label: \"CA\") { email } } } \
         ... @defer(label: \"B\") { \
             posts(first: 1) { author { friends { friends { friends { id } } } name } } \
-            friends @stream(initialCount: 0) { ... @defer(label: \"CB\") { email } } } } }";
+            friends { ... @defer(label: \"CB\") { email } } } } }";
     let (payloads, _) = run(
         failing(3, 1, &[("User", "name", 0)]),
         query,
@@ -1736,15 +1694,11 @@ fn a_nested_defer_with_only_shared_fields_still_waits_for_its_enclosing_fragment
     assert_eq!(outcomes("A"), [false], "{payloads:?}");
     assert_eq!(outcomes("B"), [true], "{payloads:?}");
     let ca = outcomes("CA");
-    let cb = outcomes("CB");
     assert!(
         !ca.is_empty() && ca.iter().all(|failed| !failed),
         "{payloads:?}"
     );
-    assert!(
-        !cb.is_empty() && cb.iter().all(|failed| *failed),
-        "{payloads:?}"
-    );
+    assert!(outcomes("CB").is_empty(), "{payloads:?}");
     // A's copy still delivered the shared field.
     let friends = &fold(&payloads)["data"]["users"][0]["friends"];
     assert!(
@@ -1759,14 +1713,15 @@ fn a_nested_defer_with_only_shared_fields_still_waits_for_its_enclosing_fragment
 }
 
 #[test]
-fn a_nested_defer_failing_with_its_shared_fields_still_waits_for_its_enclosing_fragment() {
-    // The shared `id` fails for friend 1, which fails CA and CB there. CB's
-    // enclosing fragment B is still running: CB's failure waits for it too.
+fn a_nested_defer_settled_before_its_enclosing_fragment_ships_is_never_announced() {
+    // The shared `id` fails for friend 1, which fails CA there and lets it
+    // deliver for friend 2. CB's enclosing fragment B ships after that set
+    // settled, so CB has nothing left to deliver and is never announced.
     let query = "{ users(first: 1) { uuid \
-        ... @defer(label: \"A\") { friends @stream(initialCount: 0) { ... @defer(label: \"CA\") { id } } } \
+        ... @defer(label: \"A\") { friends { ... @defer(label: \"CA\") { id } } } \
         ... @defer(label: \"B\") { \
             posts(first: 1) { author { friends { friends { friends { uuid } } } } } \
-            friends @stream(initialCount: 0) { ... @defer(label: \"CB\") { id } } } } }";
+            friends { ... @defer(label: \"CB\") { id } } } } }";
     let (payloads, _) = run(
         failing(3, 1, &[("User", "id", 1)]),
         query,
@@ -1798,20 +1753,23 @@ fn a_nested_defer_failing_with_its_shared_fields_still_waits_for_its_enclosing_f
     let b = completions("B");
     assert_eq!(b.len(), 1, "{payloads:?}");
     assert!(!b[0].1, "{payloads:?}");
-    let cb = completions("CB");
-    assert!(cb.iter().any(|(_, failed)| *failed), "{payloads:?}");
-    assert!(cb.iter().all(|(at, _)| *at >= b[0].0), "{payloads:?}");
+    let ca: Vec<bool> = completions("CA")
+        .into_iter()
+        .map(|(_, failed)| failed)
+        .collect();
+    assert_eq!(ca, [true, false], "{payloads:?}");
+    assert!(completions("CB").is_empty(), "{payloads:?}");
     assert_eq!(payloads.last().unwrap()["hasNext"], json!(false));
 }
 
 #[test]
 fn a_reused_fragment_keeps_each_enclosing_defer_context() {
-    // A and B both stream friends through F. F's deferred email depends on
+    // A and B both select friends through F. F's deferred email depends on
     // A in one occurrence and on B in the other: A failing must not take
     // B's copy with it.
     let query = "{ users(first: 1) { id \
-        ... @defer(label: \"A\") { name friends @stream(initialCount: 0) { ...F } } \
-        ... @defer(label: \"B\") { friends @stream(initialCount: 0) { ...F } } } } \
+        ... @defer(label: \"A\") { name friends { ...F } } \
+        ... @defer(label: \"B\") { friends { ...F } } } } \
         fragment F on User { id ... @defer(label: \"E\") { email } }";
     // The same operation with F expanded in place behaves the same.
     let inline = query[..query.find("fragment F").unwrap()]
@@ -1837,20 +1795,27 @@ fn a_reused_fragment_keeps_each_enclosing_defer_context() {
 }
 
 #[test]
-fn equivalent_stream_directives_merge() {
-    // The same arguments in another order, or spelled through defaults.
-    for options in [incremental(), ExecuteOptions::default()] {
-        let (payloads, _) = run(
-            world(1, 0),
-            "{ numbers @stream(initialCount: 0, if: true) numbers @stream(if: true, initialCount: 0) numbers @stream }",
-            Value::Null,
-            options,
-        );
-        assert_eq!(
-            fold(&payloads)["data"],
-            json!({"numbers": [1, 2, 3]}),
-            "{payloads:?}"
-        );
+fn overlapping_stream_directives_never_merge() {
+    // The RFC's HasNoOverlappingStreams: however the directives are written,
+    // even identically or switched off, and whether or not delivery is
+    // incremental, two selections of a streamed field are a request error.
+    for query in [
+        "{ numbers @stream(initialCount: 0, if: true) numbers @stream(if: true, initialCount: 0) }",
+        "{ numbers @stream numbers }",
+        "{ numbers @stream(if: false) numbers @stream(if: false) }",
+    ] {
+        for options in [incremental(), ExecuteOptions::default()] {
+            let (payloads, calls) = run(world(1, 0), query, Value::Null, options);
+            assert_eq!(
+                payloads,
+                [json!({"errors": [{
+                    "message": "fields `numbers` conflict because they have overlapping stream directives",
+                    "locations": [{"line": 1, "column": 3}],
+                }]})],
+                "{query}"
+            );
+            assert!(calls.is_empty());
+        }
     }
 }
 
@@ -1861,8 +1826,15 @@ fn disabled_delivery_ignores_stream_arguments_but_not_merge_conflicts() {
     assert_eq!(v["data"], json!({"numbers": [1, 2, 3]}), "{v}");
     let (payloads, _) = run(world(1, 0), query, Value::Null, incremental());
     assert_eq!(
-        payloads[0]["errors"][0]["message"],
-        json!("initialCount must be positive"),
+        payloads,
+        [json!({
+            "data": null,
+            "errors": [{
+                "message": "initialCount must not be negative",
+                "locations": [{"line": 1, "column": 3}],
+                "path": ["numbers"],
+            }],
+        })],
         "{payloads:?}"
     );
     let (v, calls) = single(
@@ -1875,7 +1847,7 @@ fn disabled_delivery_ignores_stream_arguments_but_not_merge_conflicts() {
         v["errors"][0]["message"]
             .as_str()
             .unwrap()
-            .contains("differing stream directives"),
+            .contains("overlapping stream directives"),
         "{v}"
     );
     assert!(calls.is_empty());

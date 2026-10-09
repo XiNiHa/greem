@@ -214,6 +214,9 @@ pub struct DeferredSet<'a> {
     /// Holds its groups while waiting: a released fragment cannot complete
     /// before its field set has run.
     pub held: bool,
+    /// Per object: nulled away before its fragment shipped, so the set
+    /// delivers nothing for it and no longer holds its group.
+    pub excluded: Vec<bool>,
     /// The scope's signal once it runs; its field futures wake through it.
     pub signal: Arc<Signal>,
 }
@@ -221,10 +224,32 @@ pub struct DeferredSet<'a> {
 impl DeferredSet<'_> {
     pub fn release_hold(&mut self, table: &mut Groups) {
         if std::mem::replace(&mut self.held, false) {
-            for &g in &self.groups {
-                table.unhold(g);
+            for (o, &g) in self.groups.iter().enumerate() {
+                if !self.excluded[o] {
+                    table.unhold(g);
+                }
             }
         }
+    }
+
+    /// `object` was nulled: its deferred fields can no longer be delivered.
+    pub fn exclude(&mut self, object: u32, table: &mut Groups) {
+        let o = object as usize;
+        if std::mem::replace(&mut self.excluded[o], true) {
+            return;
+        }
+        if self.held {
+            table.unhold(self.groups[o]);
+        }
+    }
+
+    /// The objects the set still delivers for, with their groups.
+    pub fn live_objects(&self) -> impl Iterator<Item = (u32, GroupId)> + '_ {
+        self.groups
+            .iter()
+            .enumerate()
+            .filter(|&(o, _)| !self.excluded[o])
+            .map(|(o, &g)| (o as u32, g))
     }
 }
 
@@ -634,7 +659,7 @@ impl<'a> Scope<'a> {
         for d in &self.deferred {
             match &d.state {
                 DeferredSetState::Waiting(_) => {
-                    for &g in &d.groups {
+                    for (_, g) in d.live_objects() {
                         f(g)?;
                     }
                 }

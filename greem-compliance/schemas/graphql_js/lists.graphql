@@ -1,0 +1,27 @@
+"""The area schema for graphql-js v17.0.2 src/execution/__tests__/lists-test.ts."""
+type Query {
+  """'Accepts a Set as a List value': a set handed back through `Items`."""
+  stringSet: [String]
+  """'Accepts function arguments as a List value': a list container other than `Vec`."""
+  boxedStrings: [String]
+  """The `[String]` generator and async-generator cases: a streamed list, one yield per item when the world says so."""
+  streamedStrings: [String]
+  """The `completeValue` errors inside async iterables: `[String]` upstream with a `{}` item; here a value the scalar cannot represent (NaN)."""
+  streamedFloats: [Float]
+  """'Handles list nullability': the four shapes, each as an owned list and as a streamed one."""
+  nullableListOfNullable: [Int]
+  nonNullListOfNullable: [Int]!
+  nullableListOfNonNull: [Int!]
+  nonNullListOfNonNull: [Int!]!
+  streamedNullableListOfNullable: [Int]
+  streamedNonNullListOfNullable: [Int]!
+  streamedNullableListOfNonNull: [Int!]
+  streamedNonNullListOfNonNull: [Int!]!
+  """`completeObjectList` of 'Accepts async iterables as list value'."""
+  streamedObjects: [ObjectWrapper]
+  streamedNonNullObjects: [ObjectWrapper!]
+}
+
+type ObjectWrapper {
+  index: String!
+}
