@@ -6,6 +6,7 @@ mod common;
 
 use common::*;
 use greem::{ErrorBehavior, ExecuteOptions, IncrementalDelivery};
+use greem_compliance::harness::Harness;
 use greem_compliance::world::{Failure, World};
 use proptest::prelude::*;
 use serde_json::{Value, json};
@@ -65,8 +66,11 @@ fn make_world(users: u32, posts: u32, failures: &BTreeSet<Failure>, yields: &[u3
     World {
         users,
         posts_per_user: posts,
-        failures: failures.clone(),
-        yields: yields.to_vec(),
+        harness: Harness {
+            failures: failures.clone(),
+            yields: yields.to_vec(),
+            ..Default::default()
+        },
         ..World::default()
     }
 }

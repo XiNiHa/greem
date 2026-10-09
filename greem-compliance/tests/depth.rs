@@ -7,6 +7,7 @@ mod common;
 use futures::StreamExt;
 use futures::executor::block_on;
 use greem::{ExecuteOptions, IncrementalDelivery, Operation, Roots};
+use greem_compliance::harness::Harness;
 use greem_compliance::world::{MutationRoot, QueryRoot, World, take_drops};
 use serde_json::Value;
 use std::future::Future;
@@ -149,8 +150,11 @@ fn assert_children_before_parents(drops: &[(&'static str, u32)]) {
 fn cancellation_at_the_deepest_generation_drops_children_first() {
     on_small_stack(|| {
         let world = World {
-            gate_field: Some("User.name"),
-            track_drops: true,
+            harness: Harness {
+                gate_field: Some("User.name"),
+                track_drops: true,
+                ..Default::default()
+            },
             ..World::seeded(2, 0)
         };
         let drops = cancel_after(TWICE_DEFAULT - 1, world, 200);
@@ -167,8 +171,11 @@ fn cancellation_at_the_deepest_generation_drops_children_first() {
 fn panic_in_the_deepest_resolver_unwinds_with_children_first() {
     on_small_stack(|| {
         let world = World {
-            panic_field: Some("User.name"),
-            track_drops: true,
+            harness: Harness {
+                panic_field: Some("User.name"),
+                track_drops: true,
+                ..Default::default()
+            },
             ..World::seeded(2, 0)
         };
         take_drops();
@@ -330,7 +337,10 @@ fn abandoned_nested_groups_are_reclaimed_after_parent_failure() {
             })
             .collect();
         let world = World {
-            failures,
+            harness: Harness {
+                failures,
+                ..Default::default()
+            },
             ..World::seeded(1, 200)
         };
         greem::__private::MAX_LIVE_GROUPS.store(0, std::sync::atomic::Ordering::Relaxed);

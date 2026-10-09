@@ -5,26 +5,28 @@ mod common;
 
 use common::*;
 use greem::{ErrorBehavior, ExecuteOptions, IncrementalDelivery};
-use greem_compliance::world::{Failure, World};
+use greem_compliance::harness::{Area, Harness};
+use greem_compliance::world::World;
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
 
 fn world(users: u32, posts: u32) -> World {
     World::seeded(users, posts)
 }
 
 fn failing(users: u32, posts: u32, failures: &[(&'static str, &'static str, u32)]) -> World {
-    let failures: BTreeSet<Failure> = failures
-        .iter()
-        .map(|&(type_name, field, object)| Failure {
-            type_name,
-            field,
-            object,
-        })
-        .collect();
     World {
-        failures,
+        harness: Harness::failing(failures),
         ..World::seeded(users, posts)
+    }
+}
+
+fn gated(field: &'static str, world: World) -> World {
+    World {
+        harness: Harness {
+            gate_field: Some(field),
+            ..world.harness
+        },
+        ..world
     }
 }
 
@@ -329,8 +331,8 @@ fn cardinality_failure_is_a_framework_error_per_parent() {
         cardinality_failure: true,
         ..World::seeded(2, 1)
     };
-    let (v, _) = single(
-        world,
+    // Per object, the reference executor never sees a short output set.
+    let (v, _) = world.single_unchecked(
         "{ users { posts { title } } }",
         Value::Null,
         ExecuteOptions {
@@ -717,13 +719,6 @@ fn introspection_rides_in_the_root_scope() {
 }
 
 // ---- Incremental delivery ----------------------------------------------------
-
-fn incremental() -> ExecuteOptions {
-    ExecuteOptions {
-        incremental: IncrementalDelivery::Enabled,
-        ..Default::default()
-    }
-}
 
 #[test]
 fn defer_failed_group_reports_completed_errors_and_keeps_delivered_data() {
@@ -1137,10 +1132,7 @@ fn an_ended_stream_completes_without_waiting_for_other_streams() {
 fn halt_reports_the_first_error_while_a_sibling_is_still_pending() {
     // name never resolves; email fails. Halt must not wait for name.
     let payloads = run_until_stalled(
-        World {
-            gate_field: Some("User.name"),
-            ..failing(1, 0, &[("User", "email", 0)])
-        },
+        gated("User.name", failing(1, 0, &[("User", "email", 0)])),
         "{ users(first: 1) { name email } }",
         ExecuteOptions {
             error_behavior: ErrorBehavior::Halt,
@@ -1430,10 +1422,7 @@ fn halted_stream_groups_fail_with_their_error() {
     );
     // A halted stream group ships past a pending sibling inside its items.
     let payloads = run_until_stalled(
-        World {
-            gate_field: Some("Post.id"),
-            ..failing(1, 1, &[("Post", "title", 0)])
-        },
+        gated("Post.id", failing(1, 1, &[("Post", "title", 0)])),
         "{ users(first: 1) { drafts @stream(initialCount: 0) { id title } } }",
         ExecuteOptions {
             error_behavior: ErrorBehavior::Halt,
@@ -1470,9 +1459,9 @@ fn announced_fragments_under_a_failed_stream_fail_with_it() {
         "locations": [{"line": 1, "column": 51}],
         "path": ["search", 1, "id"],
     });
-    assert_eq!(
-        payloads,
-        [
+    assert_payloads(
+        &payloads,
+        &[
             json!({"data": {"search": []}, "pending": [{"id": "0", "path": ["search"]}], "hasNext": true}),
             json!({
                 "pending": [{"id": "1", "path": ["search", 0]}],
@@ -1483,7 +1472,7 @@ fn announced_fragments_under_a_failed_stream_fail_with_it() {
                 "completed": [{"id": "0", "errors": [error]}, {"id": "1", "errors": [error]}],
                 "hasNext": false,
             }),
-        ]
+        ],
     );
 }
 

@@ -1,36 +1,20 @@
-//! A seeded in-memory dataset plus failure map; every resolver is a pure
-//! function of it, so the same world drives both executors.
+//! The property world: a seeded in-memory dataset plus its harness; every
+//! resolver is a pure function of it, so the same world drives both executors.
 
+pub use crate::harness::Failure;
+use crate::harness::{Area, Harness, HasHarness};
 use crate::schema::{self, types};
 use greem::{
-    Args, As, Context, DeliveryGroup, Either, Error, HintRegistry, Planning, Resolver, Streamed,
+    Args, As, Context, DeliveryGroup, Either, Error, HintRegistry, Planning, Resolver, Roots,
+    SchemaBuilder, Streamed,
 };
-use std::collections::BTreeSet;
-use std::sync::Mutex;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Failure {
-    pub type_name: &'static str,
-    pub field: &'static str,
-    pub object: u32,
-}
-
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct World {
+    pub harness: Harness,
     pub users: u32,
     pub posts_per_user: u32,
-    pub failures: BTreeSet<Failure>,
     pub cardinality_failure: bool,
-    /// The interleaving: yield counts consumed per resolver call, cyclically.
-    pub yields: Vec<u32>,
-    pub calls: std::sync::Arc<Mutex<Vec<(&'static str, usize)>>>,
-    /// A field whose resolver stays pending until `open_gate` is called.
-    pub gate_field: Option<&'static str>,
-    pub gate_open: std::sync::atomic::AtomicBool,
-    /// A field whose resolver panics.
-    pub panic_field: Option<&'static str>,
-    /// Records drops of tracked objects (depth per object) when set.
-    pub track_drops: bool,
     /// `User.score` returns NaN.
     pub nan_score: bool,
     /// `User.drafts` of this user is a stream that never yields.
@@ -49,6 +33,31 @@ pub fn take_drops() -> Vec<(&'static str, u32)> {
     DROPS.with(|d| std::mem::take(&mut *d.borrow_mut()))
 }
 
+impl HasHarness for World {
+    fn harness(&self) -> &Harness {
+        &self.harness
+    }
+}
+
+impl Area for World {
+    type Info = schema::__private::Info;
+    type Query = QueryRoot;
+    type Mutation = MutationRoot;
+
+    fn builder() -> SchemaBuilder<Self::Info, Self, Self::Query, Self::Mutation> {
+        schema::Schema::<World>::builder()
+            .query::<QueryRoot>()
+            .mutation::<MutationRoot>()
+    }
+
+    fn roots() -> Roots<QueryRoot, MutationRoot> {
+        Roots {
+            query: QueryRoot,
+            mutation: MutationRoot,
+        }
+    }
+}
+
 impl World {
     pub fn seeded(users: u32, posts_per_user: u32) -> Self {
         World {
@@ -59,66 +68,15 @@ impl World {
     }
 
     pub fn fails(&self, type_name: &'static str, field: &'static str, object: u32) -> bool {
-        self.failures.contains(&Failure {
-            type_name,
-            field,
-            object,
-        })
-    }
-
-    fn call(&self, name: &'static str, parents: usize) {
-        self.calls.lock().unwrap().push((name, parents));
+        self.harness.fails(type_name, field, object)
     }
 
     pub fn call_count(&self) -> usize {
-        self.calls.lock().unwrap().len()
+        self.harness.call_count()
     }
 
     pub fn open_gate(&self) {
-        self.gate_open
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    async fn pause(&self, name: &'static str) {
-        if self.panic_field == Some(name) {
-            panic!("intentional panic in {name}");
-        }
-        let yields = if self.yields.is_empty() {
-            0
-        } else {
-            let n = self.calls.lock().unwrap().len();
-            self.yields[n % self.yields.len()]
-        };
-        for _ in 0..yields {
-            futures::pending_once().await;
-        }
-        if self.gate_field == Some(name) {
-            std::future::poll_fn(|_| {
-                if self.gate_open.load(std::sync::atomic::Ordering::SeqCst) {
-                    std::task::Poll::Ready(())
-                } else {
-                    std::task::Poll::Pending
-                }
-            })
-            .await;
-        }
-    }
-}
-
-mod futures {
-    use std::task::Poll;
-    pub async fn pending_once() {
-        let mut yielded = false;
-        std::future::poll_fn(|cx| {
-            if yielded {
-                Poll::Ready(())
-            } else {
-                yielded = true;
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
-        })
-        .await
+        self.harness.open_gate()
     }
 }
 
@@ -185,30 +143,7 @@ pub fn uuid_for(n: u32) -> uuid::Uuid {
 }
 
 macro_rules! resolver {
-    ($ty:ty, $marker:path, $name:literal, $out:ty, |$parents:ident, $args:ident, $ctx:ident| $body:expr) => {
-        impl Resolver<$marker, World> for $ty {
-            type Output<'obj>
-                = $out
-            where
-                Self: 'obj;
-            async fn resolve<'obj, 'call>(
-                $parents: &'call [&'obj Self],
-                $args: &'obj Args<$marker>,
-                $ctx: &'obj Context<'obj, World>,
-            ) -> Result<Vec<Self::Output<'obj>>, Error>
-            where
-                'obj: 'call,
-            {
-                $ctx.app().call($name, $parents.len());
-                $ctx.app().pause($name).await;
-                let out: Vec<Self::Output<'obj>> = $body;
-                if $ctx.app().cardinality_failure && $name == "User.posts" {
-                    return Ok(out.into_iter().take(1).collect());
-                }
-                Ok(out)
-            }
-        }
-    };
+    ($($tt:tt)*) => { $crate::resolver!(World; $($tt)*); };
 }
 
 fn fail_or<T>(
@@ -218,11 +153,7 @@ fn fail_or<T>(
     object: u32,
     value: T,
 ) -> Result<T, Error> {
-    if world.fails(ty, field, object) {
-        Err(Error::new(format!("{ty}.{field} failed for {object}")))
-    } else {
-        Ok(value)
-    }
+    world.harness.fail_or(ty, field, object, value)
 }
 
 impl Resolver<schema::Query::users, World> for QueryRoot {
@@ -238,10 +169,9 @@ impl Resolver<schema::Query::users, World> for QueryRoot {
     where
         'obj: 'call,
     {
-        ctx.app().call("Query.users", parents.len());
-        ctx.app().pause("Query.users").await;
+        ctx.app().harness.trace("Query.users", parents.len()).await;
         let n = ctx.app().users.min(args.first.unwrap_or(10).max(0) as u32);
-        let tracked = ctx.app().track_drops;
+        let tracked = ctx.app().harness.track_drops;
         let hinted = ctx.hint::<GroupHint>().deferred;
         Ok(parents
             .iter()
@@ -275,7 +205,7 @@ impl Resolver<schema::User::tag, World> for User {
     where
         'obj: 'call,
     {
-        ctx.app().call("User.tag", parents.len());
+        ctx.app().harness.call("User.tag", parents.len());
         Ok(parents
             .iter()
             .map(|u| if u.hinted { "deferred" } else { "initial" })
@@ -713,10 +643,15 @@ resolver!(
                         .map(|p| Post {
                             owner: u.id,
                             index: p,
-                            tracked: ctx.app().track_drops,
+                            tracked: ctx.app().harness.track_drops,
                         })
                         .collect(),
                 )
+            })
+            .take(if world.cardinality_failure {
+                1
+            } else {
+                usize::MAX
             })
             .collect()
     }
@@ -735,7 +670,7 @@ resolver!(
                 let owner = u.id;
                 let n = world.posts_per_user;
                 let failing = world.fails("User", "drafts", owner);
-                let tracked = world.track_drops;
+                let tracked = world.harness.track_drops;
                 if world.stalled_drafts == Some(owner) {
                     return Streamed::new(futures_util::stream::pending().boxed());
                 }
@@ -774,7 +709,7 @@ resolver!(
     Vec<Option<User>>,
     |parents, _args, ctx| {
         let n = ctx.app().users;
-        let tracked = ctx.app().track_drops;
+        let tracked = ctx.app().harness.track_drops;
         parents
             .iter()
             .map(|u| {

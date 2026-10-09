@@ -17,3 +17,9 @@ proptest = "1"
 
 [build-dependencies]
 greem-build = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = "1"
+
+[package.metadata.graphql_js]
+tag = "v17.0.2"
