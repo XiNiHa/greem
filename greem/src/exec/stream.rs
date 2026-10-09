@@ -2,7 +2,7 @@ use crate::error::{Error, GraphQLError, PathSegment};
 use crate::exec::column::{
     Column, ErrorRecord, Slot, Storage, Stored, StreamCell, Turn, TurnBatch, TurnRange,
 };
-use crate::exec::complete::{Completion, FieldsCx, Pos};
+use crate::exec::complete::{Completion, FieldsCx, KeptOutputs, Pos};
 use crate::exec::state::{ErrorBehavior, GroupId, Groups};
 use crate::plan::Leaf as LeafPath;
 use crate::resolver::{Outputs, Shape};
@@ -181,6 +181,8 @@ struct TurnItems<'a, T, Ty, C> {
     /// Innermost slots the turn opens: one per item at a depth-1 list.
     inner_len: u32,
     items: Cell<Option<TurnInput<T>>>,
+    /// Owned outputs the turn's values borrow; they retire with the turn.
+    keep: KeptOutputs<C>,
     tag: PhantomData<fn() -> Ty>,
 }
 
@@ -212,6 +214,7 @@ where
             levels,
             errors,
             stored: &mut stored,
+            keep: &self.keep,
             stream: None,
             level: 1,
             leaf: self.leaf.clone(),
@@ -444,6 +447,7 @@ where
             objects,
             inner_len,
             items: Cell::new(Some((values, value_pos, failed))),
+            keep: KeptOutputs::new(),
             tag: PhantomData,
         });
         let Turn {

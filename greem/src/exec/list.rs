@@ -1,5 +1,6 @@
 //! The containers a resolver may return at a list position. One `Completes`
-//! impl for `List<Ty>` covers all of them; `Items` is the way in for any
+//! impl for `List<Ty>` covers all of them but owned `Arc<[T]>`, which is
+//! kept and completed as a borrowed slice; `Items` is the way in for any
 //! other collection.
 
 use crate::resolver::Items;
@@ -33,19 +34,6 @@ impl<T> ListOutput for Box<[T]> {
 
     fn into_items(self) -> impl Iterator<Item = T> {
         self.into_vec().into_iter()
-    }
-
-    fn items(&self) -> impl Iterator<Item = impl Borrow<T>> {
-        self.iter()
-    }
-}
-
-/// Items cannot move out of a shared slice, so each one is cloned.
-impl<T: Clone> ListOutput for Arc<[T]> {
-    type Item = T;
-
-    fn into_items(self) -> impl Iterator<Item = T> {
-        (0..self.len()).map(move |i| self[i].clone())
     }
 
     fn items(&self) -> impl Iterator<Item = impl Borrow<T>> {

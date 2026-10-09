@@ -23,6 +23,7 @@ use futures::StreamExt;
 use smallvec::SmallVec;
 use std::borrow::Borrow;
 use std::marker::PhantomData;
+use std::sync::{Arc, OnceLock};
 #[cfg(feature = "reference-executor")]
 use {
     crate::exec::reference::{RefCompletion, RefValue},
@@ -48,6 +49,8 @@ pub struct FieldsCx<'a, C> {
     pub meta: &'a ScopeMeta<'a>,
     pub contexts: &'a [Context<'a, C>],
     pub groups: Vec<GroupId>,
+    /// The frame owner's kept outputs, which turn 0 completes from.
+    pub keep: &'a KeptOutputs<C>,
 }
 
 impl<C> Clone for FieldsCx<'_, C> {
@@ -61,6 +64,7 @@ impl<C> Clone for FieldsCx<'_, C> {
             meta: self.meta,
             contexts: self.contexts,
             groups: self.groups.clone(),
+            keep: self.keep,
         }
     }
 }
@@ -140,6 +144,8 @@ pub struct Completion<'a, 'c, C> {
     pub(crate) levels: &'c mut [Vec<Slot>],
     pub(crate) errors: &'c mut Vec<ErrorRecord>,
     pub(crate) stored: &'c mut Stored<'a>,
+    /// Where owned outputs this turn's values borrow are kept.
+    pub(crate) keep: &'a KeptOutputs<C>,
     /// Where a streamed output registers its driver; only turn 0 has one.
     pub(crate) stream: Option<&'c mut Option<Box<dyn StreamDriver<'a> + 'a>>>,
     pub(crate) level: usize,
@@ -175,6 +181,7 @@ impl<'a, 'c, C> Completion<'a, 'c, C> {
             levels: &mut turn.levels,
             errors: &mut turn.errors,
             stored,
+            keep: cx.keep,
             stream: Some(stream),
             level: 0,
             leaf,
@@ -186,6 +193,11 @@ impl<'a, 'c, C> Completion<'a, 'c, C> {
 impl<'a, C> Completion<'a, '_, C> {
     pub(crate) fn depth(&self) -> usize {
         self.shape.levels.len()
+    }
+
+    /// Keeps owned outputs as long as this turn, for completion by reference.
+    pub(crate) fn keep(&self, kept: Box<dyn Kept<C>>) -> &'a dyn Kept<C> {
+        self.keep.keep(kept)
     }
 
     fn set(&mut self, pos: &Pos, slot: Slot) {
@@ -404,6 +416,7 @@ impl<'a, C: Send + Sync + 'a> Completion<'a, '_, C> {
             table: self.cx.table,
             header: self.cx.table.header(entry),
             entry,
+            keep: KeptOutputs::new(),
             tag: PhantomData,
         };
         let child = self.stored.children.len() as u32;
@@ -487,6 +500,8 @@ pub struct ObjectBatch<'a, T, Ty, C> {
     pub table: &'a PlanTable,
     pub header: &'a PlanHeader,
     pub entry: PlanId,
+    /// Owned outputs the scope's turn 0 values borrow.
+    pub keep: KeptOutputs<C>,
     pub tag: PhantomData<fn() -> Ty>,
 }
 
@@ -524,6 +539,7 @@ where
             meta: &self.meta,
             contexts: &self.contexts,
             groups: base_groups.clone(),
+            keep: &self.keep,
         };
         let futures = T::__start_fields(&cx, &parents, 0);
         let deferred = (1..self.header.sets.len())
@@ -1241,6 +1257,130 @@ where
             value.as_ref().map_err(Clone::clone),
             rc,
         )
+    }
+}
+
+/// Items cannot move out of a shared slice, so the slices are kept as long as
+/// the turn completing them and their items complete by reference.
+impl<T, Ty, C> Completes<Arc<[T]>, C> for List<Ty>
+where
+    T: Send + Sync + 'static,
+    for<'q> &'q T: Outputs<Ty, C> + Send,
+    Ty: 'static,
+    C: Send + Sync,
+{
+    fn walk<'a>(w: &mut Walker<'_, C>, node: NodeId, leaf: &LeafPath) -> Result<(), Abort>
+    where
+        Arc<[T]>: 'a,
+        C: 'a,
+    {
+        <&'a T as Outputs<Ty, C>>::__walk(w, node, leaf)
+    }
+
+    fn first_error(
+        value: &Arc<[T]>,
+        indices: &mut Vec<u32>,
+        wanted: &dyn Fn(&[u32]) -> bool,
+    ) -> Option<Error> {
+        <List<Ty> as Completes<&Arc<[T]>, C>>::first_error(&value, indices, wanted)
+    }
+
+    fn complete<'a>(values: Vec<Arc<[T]>>, positions: Vec<Pos>, cc: &mut Completion<'a, '_, C>)
+    where
+        Arc<[T]>: 'a,
+        C: 'a,
+    {
+        let kept = cc.keep(Box::new(KeptLists::<T, Ty>(values, PhantomData)));
+        kept.complete(positions, cc);
+    }
+
+    #[cfg(feature = "reference-executor")]
+    fn reference<'v, 's: 'v>(value: Arc<[T]>, rc: &RefCompletion<'s, C>) -> BoxFuture<'v, RefValue>
+    where
+        Arc<[T]>: 'v,
+        C: 'v,
+    {
+        let nullable = rc.item_nullable();
+        let mut rc = rc.clone();
+        // The future owns the slice and completes its items by reference.
+        Box::pin(async move {
+            let items: Vec<_> = value
+                .iter()
+                .map(|item| <&T as Outputs<Ty, C>>::__reference(item, &rc.item()))
+                .collect();
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(item.await);
+            }
+            crate::exec::reference::list(out, nullable)
+        })
+    }
+}
+
+/// A batch of owned list outputs that completes its items by reference from
+/// where it is kept.
+pub trait Kept<C>: Send + Sync {
+    fn complete<'q>(&'q self, positions: Vec<Pos>, cc: &mut Completion<'q, '_, C>);
+}
+
+/// The outputs a frame owner or stream turn keeps while the values completed
+/// from them borrow them. Appending needs only a shared borrow, since those
+/// values borrow earlier entries. Entries are `'static`: an appendable list is
+/// invariant in what it holds, so it cannot take outputs that borrow the
+/// frame it lives in.
+pub struct KeptOutputs<C> {
+    head: OnceLock<Box<KeptNode<C>>>,
+}
+
+struct KeptNode<C> {
+    kept: Box<dyn Kept<C>>,
+    next: OnceLock<Box<KeptNode<C>>>,
+}
+
+impl<C> KeptOutputs<C> {
+    pub fn new() -> Self {
+        Self {
+            head: OnceLock::new(),
+        }
+    }
+
+    pub fn keep(&self, kept: Box<dyn Kept<C>>) -> &dyn Kept<C> {
+        let mut node = Box::new(KeptNode {
+            kept,
+            next: OnceLock::new(),
+        });
+        let mut slot = &self.head;
+        loop {
+            match slot.get() {
+                Some(taken) => slot = &taken.next,
+                None => match slot.set(node) {
+                    Ok(()) => return &*slot.get().expect("just set").kept,
+                    Err(back) => node = back,
+                },
+            }
+        }
+    }
+}
+
+impl<C> Default for KeptOutputs<C> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A batch of owned slices, completed as borrowed slices where it is kept.
+struct KeptLists<T, Ty>(Vec<Arc<[T]>>, PhantomData<fn() -> Ty>);
+
+impl<T, Ty, C> Kept<C> for KeptLists<T, Ty>
+where
+    T: Send + Sync,
+    for<'q> &'q T: Outputs<Ty, C> + Send,
+    Ty: 'static,
+    C: Send + Sync,
+{
+    fn complete<'q>(&'q self, positions: Vec<Pos>, cc: &mut Completion<'q, '_, C>) {
+        let lists = self.0.iter().collect();
+        <List<Ty> as Completes<&'q Arc<[T]>, C>>::complete(lists, positions, cc);
     }
 }
 

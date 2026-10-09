@@ -3,6 +3,7 @@
 
 use futures::StreamExt;
 use futures::executor::block_on;
+use greem::__private::ToLeaf;
 use greem::{
     Args, As, Context, Either, Error, ErrorBehavior, ExecuteOptions, IncrementalDelivery, Items,
     Operation, Resolver, Roots, Streamed,
@@ -10,7 +11,7 @@ use greem::{
 use greem_test_app::app::{App, MutationRoot, QueryRoot, User, build_schema, users};
 use greem_test_app::schema;
 use serde_json::{Value, json};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 fn run(
@@ -962,6 +963,205 @@ fn borrowed_wrappers_complete_like_owned_ones() {
             assert_eq!(borrowed["errors"].as_array().unwrap().len(), 3);
         }
     }
+}
+
+/// An Int that is not `Clone`, so an owned slice of it completes only by
+/// reference; it counts its drops when given a counter.
+struct Count(i32, Option<Arc<AtomicUsize>>);
+
+impl Drop for Count {
+    fn drop(&mut self) {
+        if let Some(dropped) = &self.1 {
+            dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+impl ToLeaf<greem::scalars::Int> for &Count {
+    fn to_leaf<'a>(self) -> Result<greem::Value<'a>, Error>
+    where
+        Self: 'a,
+    {
+        Ok(greem::Value::Int(self.0.into()))
+    }
+}
+
+// Owned slices whose items are not `Clone`: leaves, objects, abstract items
+// and nested lists.
+struct KeptShapes;
+
+type UserOrBoxed = Either<UserAs, As<schema::types::User, Box<User>>>;
+type CountRow = Arc<[Option<Count>]>;
+
+#[greem::object(schema = crate::schema, type = "Query", context = App)]
+impl KeptShapes {
+    fn users(&self) -> Arc<[User]> {
+        users().into()
+    }
+
+    fn user(&self) -> Option<User> {
+        None
+    }
+
+    fn node(&self) -> Option<UserAs> {
+        None
+    }
+
+    fn search(&self) -> Arc<[UserOrBoxed]> {
+        let mut users = users().into_iter();
+        Arc::from(vec![
+            Either::A(As::new(users.next().unwrap())),
+            Either::B(As::new(Box::new(users.next().unwrap()))),
+        ])
+    }
+
+    fn ints(&self) -> Option<Arc<[CountRow]>> {
+        Some(Arc::from(vec![
+            Arc::from(vec![Some(Count(1, None)), None]),
+            Arc::from(Vec::new()),
+        ]))
+    }
+}
+
+#[test]
+fn owned_slices_complete_without_cloning() {
+    let schema = schema::Schema::<App>::builder()
+        .query::<KeptShapes>()
+        .mutation::<MutationRoot>()
+        .build()
+        .unwrap();
+    let run = |query: &str, options: ExecuteOptions| -> Vec<Value> {
+        let output = block_on(schema.execute(
+            Roots {
+                query: KeptShapes,
+                mutation: MutationRoot,
+            },
+            App::default(),
+            Operation {
+                document: schema.parse(query).unwrap(),
+                operation_name: None,
+                variables: Value::Null,
+            },
+            options,
+        ));
+        output
+            .payloads
+            .iter()
+            .map(|p| serde_json::from_slice(&p.json).unwrap())
+            .collect()
+    };
+
+    let p = run(
+        "{ users { name posts(first: 1) { title } } search { ... on User { name } } ints }",
+        ExecuteOptions::default(),
+    );
+    assert_eq!(
+        p[0]["data"],
+        json!({
+            "users": [
+                {"name": "Ann", "posts": [{"title": "Ann post 0"}]},
+                {"name": "Bob", "posts": [{"title": "Bob post 0"}]},
+            ],
+            "search": [{"name": "Ann"}, {"name": "Bob"}],
+            "ints": [[1, null], []],
+        })
+    );
+
+    // A kept slice at a streamed field streams its items by reference.
+    let p = run(
+        "{ users @stream(initialCount: 1) { name } }",
+        ExecuteOptions {
+            incremental: IncrementalDelivery::Enabled,
+            ..Default::default()
+        },
+    );
+    assert_eq!(p[0]["data"], json!({"users": [{"name": "Ann"}]}));
+    let items: Vec<Value> = p[1..]
+        .iter()
+        .flat_map(|p| p["incremental"].as_array().cloned().unwrap_or_default())
+        .flat_map(|e| e["items"].as_array().cloned().unwrap())
+        .collect();
+    assert_eq!(items, vec![json!({"name": "Bob"})]);
+}
+
+const ROWS: i32 = 6;
+
+type Rows = futures::stream::Iter<std::vec::IntoIter<Result<CountRow, Error>>>;
+
+// A streamed list of owned slices, each counting its items' drops.
+struct KeptRows {
+    dropped: Arc<AtomicUsize>,
+}
+
+#[greem::object(schema = crate::schema, type = "Query", context = App)]
+impl KeptRows {
+    fn users(&self) -> Vec<User> {
+        Vec::new()
+    }
+
+    fn user(&self) -> Option<User> {
+        None
+    }
+
+    fn node(&self) -> Option<UserAs> {
+        None
+    }
+
+    fn search(&self) -> Vec<UserAs> {
+        Vec::new()
+    }
+
+    fn ints(&self) -> Option<Streamed<Rows>> {
+        let rows = (0..ROWS)
+            .map(|i| Ok(Arc::from(vec![Some(Count(i, Some(self.dropped.clone())))])))
+            .collect::<Vec<_>>();
+        Some(Streamed::new(futures::stream::iter(rows)))
+    }
+}
+
+#[test]
+fn kept_rows_retire_with_their_stream_turn() {
+    let schema = schema::Schema::<App>::builder()
+        .query::<KeptRows>()
+        .mutation::<MutationRoot>()
+        .stream_capacity(1)
+        .build()
+        .unwrap();
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let mut payloads = Box::pin(schema.execute_stream(
+        Roots {
+            query: KeptRows {
+                dropped: dropped.clone(),
+            },
+            mutation: MutationRoot,
+        },
+        App::default(),
+        Operation {
+            document: schema.parse("{ ints @stream }").unwrap(),
+            operation_name: None,
+            variables: Value::Null,
+        },
+        ExecuteOptions {
+            incremental: IncrementalDelivery::Enabled,
+            ..Default::default()
+        },
+        |payload| serde_json::to_value(&payload).unwrap(),
+    ));
+    let mut items = Vec::new();
+    let mut freed_while_streaming = 0;
+    while let Some(payload) = block_on(payloads.next()) {
+        for entry in payload["incremental"].as_array().into_iter().flatten() {
+            items.extend(entry["items"].as_array().unwrap().iter().cloned());
+        }
+        if payload["hasNext"] == json!(true) {
+            freed_while_streaming = dropped.load(Ordering::SeqCst);
+        }
+    }
+    assert_eq!(items, (0..ROWS).map(|i| json!([i])).collect::<Vec<_>>());
+    // Each turn holds one row and frees it when it retires, not when the
+    // request ends.
+    assert!(freed_while_streaming > 0);
+    assert_eq!(dropped.load(Ordering::SeqCst), ROWS as usize);
 }
 
 #[test]

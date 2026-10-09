@@ -643,6 +643,7 @@ where
         table,
         header,
         entry,
+        keep: Default::default(),
         tag: PhantomData,
     }
 }
