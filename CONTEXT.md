@@ -19,7 +19,7 @@ The objects belonging to one parent scope, field tree position and partition bra
 _Avoid_: Subtree, node, frame
 
 **Object storage**:
-Resolver outputs retained while dependent scopes and response data borrow them.
+Resolver outputs retained while dependent scopes and response data borrow them: object batches in frames, and owned list outputs kept by a frame or stream turn so their items complete by reference.
 _Avoid_: Object arena (the superseded shared-arena design), heap, cache, pool
 
 **Generation frame**:

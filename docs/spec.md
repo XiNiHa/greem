@@ -57,11 +57,14 @@ impl Resolver<schema::User::posts, App> for User {
   type. `&T`, `Box<T>`, `Arc<T>` and `Result<T, Error>` objects delegate at the
   `Resolver` level; `Option`, lists, `Streamed<S>` and the scalars complete
   through greem's own tags (`Nullable<Ty>`, `List<Ty>`, `scalars::*`).
-- List outputs: owned `Vec<T>`, `Box<[T]>` and `Arc<[T]>` (whose items are
-  cloned out); borrowed `&[T]`, `&Vec<T>`, `&Box<[T]>` and `&Arc<[T]>`; and
-  `Items<I>` for any other collection that iterates by value and by reference.
-  One internal adapter (`exec/list.rs`) backs a single `List<Ty>` impl, and
-  `Result<X, Error>` wraps any list output, `Streamed` included.
+- List outputs: owned `Vec<T>` and `Box<[T]>`, whose items move out; owned
+  `Arc<[T]>`, whose slices are kept while their items complete by reference
+  (`T: 'static` and `&T` completes; ADR-0009); borrowed `&[T]`, `&Vec<T>`,
+  `&Box<[T]>` and `&Arc<[T]>`; and `Items<I>` for any other collection that
+  iterates by value and by reference. Every item type that completes owned
+  also completes by reference. One internal adapter (`exec/list.rs`) backs a
+  single `List<Ty>` impl for all but owned `Arc<[T]>`, and `Result<X, Error>`
+  wraps any list output, `Streamed` included.
 - Abstract positions: `As<types::User, T>` and `Either<A, B>`, one partition leaf
   per arm; repeated arms are separate scopes.
 - An object fails as a whole only when returned as `Result<T, Error>`
@@ -168,8 +171,9 @@ absent; apollo-compiler validates documents against them.
    place, and the loop waits until the consumer pulls it, `exec/pull.rs`); ship finished stream
    item ranges; announce child groups. Then `advance` (`exec/run.rs`): release announced groups, start
    deferred field sets, turn buffered stream items into turns, retire shipped
-   turns (children, slots and values are freed and the slot is reused by the
-   next turn, so memory follows in-flight work rather than stream length),
+   turns (children, slots, values and kept outputs are freed and the slot is
+   reused by the next turn, so memory follows in-flight work rather than
+   stream length),
    mark finished subtrees quiescent. A group whose parent position was nulled
    is dropped at announcement, so a sibling parent's stream on the same
    column is not held back.
@@ -183,8 +187,10 @@ Columns (`exec/column.rs`) are per scope and per field: `level0` holds one
 outermost list slot per object; each `Turn` holds the deeper list levels, the
 innermost leaves or object links, and the child frames. Slots are
 `Items | Null | Error(id) | Propagated | Pending`; a propagated slot keeps its
-link so errors beneath it are still reported. Leaf values borrow the objects
-(`Value<'a>`); `__typename` is synthesized from the scope's tag; introspection
+link so errors beneath it are still reported. Leaf values (`Value<'a>`) borrow
+the objects or owned list outputs kept beside them: turn 0's by the frame
+owner, a stream turn's by the turn, which is built like a frame and frees them
+when it retires. `__typename` is synthesized from the scope's tag; introspection
 values are pre-resolved columns. A non-finite `Float` output is an execution error
 at its position (JSON has no NaN or infinity). Errors are recorded on the turn that owns the
 slot with the object index and list indices, so a retired stream turn frees
