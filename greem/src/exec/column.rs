@@ -1,5 +1,5 @@
 use crate::error::Error;
-use crate::exec::scope::Frame;
+use crate::exec::scope::{Frame, Scope};
 use crate::exec::stream::StreamDriver;
 use crate::resolver::Shape;
 use crate::tree::FieldKind;
@@ -119,13 +119,59 @@ pub struct TurnRange {
     pub shipped: bool,
 }
 
+/// What a turn's values and child frames borrow besides the frame: for a
+/// stream turn, the items it completed and the context it completed them in.
+pub trait TurnBatch: Send {
+    /// Completes the turn's items, writing list levels and errors to the turn.
+    fn complete<'this>(
+        &'this self,
+        levels: &mut [Vec<Slot>],
+        errors: &mut Vec<ErrorRecord>,
+    ) -> Stored<'this>;
+}
+
+/// The innermost slots and child frames of one turn: everything in it that
+/// borrows objects or outputs.
+pub struct Stored<'a> {
+    pub inner: Inner<'a>,
+    pub children: Vec<Frame<'a>>,
+}
+
+impl Stored<'_> {
+    pub fn new(objects: bool) -> Self {
+        Self {
+            inner: if objects {
+                Inner::Objects(Vec::new())
+            } else {
+                Inner::Leaves(Vec::new())
+            },
+            children: Vec::new(),
+        }
+    }
+}
+
+self_cell::self_cell!(
+    pub struct StreamCell<'a> {
+        owner: Box<dyn TurnBatch + 'a>,
+        #[not_covariant]
+        dependent: Stored,
+    }
+);
+
+pub enum Storage<'a> {
+    /// Turn 0 lives as long as its scope, so it borrows from the frame. A
+    /// retired turn keeps empty storage of this kind.
+    Immediate(Stored<'a>),
+    /// A stream turn owns what it borrows and drops it when it retires.
+    Stream(StreamCell<'a>),
+}
+
 /// One batch of completed items: the immediate completion (turn 0) or a
-/// stream turn, with its own inner slots and child scopes.
+/// stream turn, with its own slots and child scopes.
 pub struct Turn<'a> {
     /// List levels below the outermost one (`levels[0]` is list depth 1).
     pub levels: Vec<Vec<Slot>>,
-    pub inner: Inner<'a>,
-    pub children: Vec<Frame<'a>>,
+    pub stored: Storage<'a>,
     pub ranges: Vec<TurnRange>,
     /// Errors raised at slots of this turn; freed with it when it retires.
     pub errors: Vec<ErrorRecord>,
@@ -134,15 +180,61 @@ pub struct Turn<'a> {
 }
 
 impl<'a> Turn<'a> {
+    #[inline(always)]
+    pub fn with_stored<R>(&self, f: impl for<'q> FnOnce(&Stored<'q>) -> R) -> R {
+        match &self.stored {
+            Storage::Immediate(stored) => f(stored),
+            Storage::Stream(cell) => stream_stored(cell, f),
+        }
+    }
+
+    #[inline(always)]
+    pub fn with_stored_mut<R>(&mut self, f: impl for<'q> FnOnce(&mut Stored<'q>) -> R) -> R {
+        match &mut self.stored {
+            Storage::Immediate(stored) => f(stored),
+            Storage::Stream(cell) => stream_stored_mut(cell, f),
+        }
+    }
+
+    pub fn with_child<R>(&self, child: u32, f: impl FnOnce(&Scope<'_>) -> R) -> R {
+        self.with_stored(|stored| {
+            stored.children[child as usize].with_dependent(|_, scope| f(scope))
+        })
+    }
+
+    pub fn with_child_mut<R>(&mut self, child: u32, f: impl FnOnce(&mut Scope<'_>) -> R) -> R {
+        self.with_stored_mut(|stored| {
+            stored.children[child as usize].with_dependent_mut(|_, scope| f(scope))
+        })
+    }
+
+    /// Whether `f` holds for any of this turn's child scopes.
+    pub fn any_child(&self, mut f: impl FnMut(&Scope<'_>) -> bool) -> bool {
+        self.with_stored(|stored| {
+            stored
+                .children
+                .iter()
+                .any(|child| child.with_dependent(|_, scope| f(scope)))
+        })
+    }
+
+    pub fn each_child_mut(&mut self, mut f: impl FnMut(&mut Scope<'_>)) {
+        self.with_stored_mut(|stored| {
+            for child in &mut stored.children {
+                child.with_dependent_mut(|_, scope| f(scope));
+            }
+        });
+    }
+
+    pub fn objects(&self) -> bool {
+        self.with_stored(|stored| matches!(stored.inner, Inner::Objects(_)))
+    }
+
     /// Frees everything a shipped turn held: memory scales with in-flight
     /// work, not stream length.
     pub fn retire(&mut self) {
-        self.children = Vec::new();
+        self.stored = Storage::Immediate(Stored::new(self.objects()));
         self.levels = Vec::new();
-        self.inner = match self.inner {
-            Inner::Leaves(_) => Inner::Leaves(Vec::new()),
-            Inner::Objects(_) => Inner::Objects(Vec::new()),
-        };
         self.ranges = Vec::new();
         self.errors = Vec::new();
         self.retired = true;
@@ -158,18 +250,27 @@ impl<'a> Turn<'a> {
     pub fn new(depth: usize, objects: bool) -> Self {
         Self {
             levels: vec![Vec::new(); depth.saturating_sub(1)],
-            inner: if objects {
-                Inner::Objects(Vec::new())
-            } else {
-                Inner::Leaves(Vec::new())
-            },
-            children: Vec::new(),
+            stored: Storage::Immediate(Stored::new(objects)),
             ranges: Vec::new(),
             errors: Vec::new(),
             shipped: false,
             retired: false,
         }
     }
+}
+
+// Out of line, so readers inline only turn 0's direct access.
+#[inline(never)]
+fn stream_stored<R>(cell: &StreamCell<'_>, f: impl for<'q> FnOnce(&Stored<'q>) -> R) -> R {
+    cell.with_dependent(|_, stored| f(stored))
+}
+
+#[inline(never)]
+fn stream_stored_mut<R>(
+    cell: &mut StreamCell<'_>,
+    f: impl for<'q> FnOnce(&mut Stored<'q>) -> R,
+) -> R {
+    cell.with_dependent_mut(|_, stored| f(stored))
 }
 
 pub struct ErrorRecord {
@@ -190,27 +291,8 @@ pub struct Column<'a> {
     pub introspection: Option<Value<'static>>,
 }
 
-impl<'a> Column<'a> {
+impl Column<'_> {
     pub fn depth(&self) -> usize {
         self.shape.levels.len()
-    }
-
-    pub fn record_error(
-        &mut self,
-        turn: usize,
-        error: Error,
-        object: u32,
-        indices: Vec<u32>,
-        generation: u32,
-    ) -> ErrorId {
-        let errors = &mut self.turns[turn].errors;
-        let id = errors.len() as ErrorId;
-        errors.push(ErrorRecord {
-            error,
-            object,
-            indices,
-            generation,
-        });
-        id
     }
 }

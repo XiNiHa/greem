@@ -267,8 +267,7 @@ pub(crate) fn with_scope_at<R>(
         None => f(scope),
         Some((Step::Child { field, turn, child }, rest)) => {
             let column = scope.column(*field).expect("column on path");
-            column.turns[*turn as usize].children[*child as usize]
-                .with_dependent(|_, inner| with_scope_at(inner, rest, f))
+            column.turns[*turn as usize].with_child(*child, |inner| with_scope_at(inner, rest, f))
         }
         Some((Step::Deferred(index), rest)) => {
             let inner = scope.deferred[*index as usize]
@@ -401,17 +400,16 @@ struct InnerView<'s, 'a> {
 
 impl Serialize for InnerView<'_, '_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let turn = &self.column.turns[self.turn];
-        match &turn.inner {
+        self.column.turns[self.turn].with_stored(|stored| match &stored.inner {
             Inner::Leaves(leaves) => match &leaves[self.slot as usize] {
                 Leaf::Value(value) => value.serialize(serializer),
                 _ => serializer.serialize_unit(),
             },
             Inner::Objects(objects) => match objects[self.slot as usize] {
-                ObjSlot::Object { child, index } => turn.children[child as usize]
+                ObjSlot::Object { child, index } => stored.children[child as usize]
                     .with_dependent(|_, scope| ObjectView(scope, index).serialize(serializer)),
                 _ => serializer.serialize_unit(),
             },
-        }
+        })
     }
 }

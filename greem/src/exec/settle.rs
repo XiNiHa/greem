@@ -124,29 +124,27 @@ fn settle_inner(
     slot: u32,
     nullable: bool,
 ) -> Settled {
-    let (child, index) = match &column.turns[turn].inner {
-        Inner::Leaves(leaves) => {
-            return match leaves[slot as usize] {
-                Leaf::Error(id) if !nullable => {
-                    Err(Box::new(error_of(table, meta, column, turn, id)))
-                }
-                _ => Ok(()),
-            };
-        }
-        Inner::Objects(objects) => match objects[slot as usize] {
-            ObjSlot::Object { child, index } => (child, index),
-            ObjSlot::Error(id) if !nullable => {
-                return Err(Box::new(error_of(table, meta, column, turn, id)));
-            }
-            _ => return Ok(()),
+    let found = column.turns[turn].with_stored(|stored| match &stored.inner {
+        Inner::Leaves(leaves) => match leaves[slot as usize] {
+            Leaf::Error(id) => Err(id),
+            _ => Ok(None),
         },
+        Inner::Objects(objects) => match objects[slot as usize] {
+            ObjSlot::Object { child, index } => Ok(Some((child, index))),
+            ObjSlot::Error(id) => Err(id),
+            _ => Ok(None),
+        },
+    });
+    let (child, index) = match found {
+        Ok(Some(link)) => link,
+        Err(id) if !nullable => return Err(Box::new(error_of(table, meta, column, turn, id))),
+        _ => return Ok(()),
     };
-    let result = column.turns[turn].children[child as usize]
-        .with_dependent_mut(|_, scope| settle_object(scope, index));
+    let result = column.turns[turn].with_child_mut(child, |scope| settle_object(scope, index));
     match result {
         Ok(()) => Ok(()),
         Err(_) if nullable => {
-            column.turns[turn].inner.set_propagated(slot);
+            column.turns[turn].with_stored_mut(|stored| stored.inner.set_propagated(slot));
             Ok(())
         }
         Err(error) => Err(error),
@@ -229,13 +227,15 @@ fn visit_inner(
     nulled: bool,
     f: &mut dyn FnMut(u32, u32),
 ) {
-    if let Inner::Objects(objects) = &column.turns[turn].inner {
-        match objects[slot as usize] {
-            ObjSlot::Object { child, index } => f(child, index),
-            ObjSlot::Propagated { child, index } if nulled => f(child, index),
-            _ => {}
+    column.turns[turn].with_stored(|stored| {
+        if let Inner::Objects(objects) = &stored.inner {
+            match objects[slot as usize] {
+                ObjSlot::Object { child, index } => f(child, index),
+                ObjSlot::Propagated { child, index } if nulled => f(child, index),
+                _ => {}
+            }
         }
-    }
+    });
 }
 
 /// Marks every object reachable from `object` through delivered (non-null)
@@ -258,8 +258,7 @@ fn mark_alive_with(scope: &mut Scope<'_>, object: u32, targets: &mut Vec<(u32, u
         });
         for t in start..targets.len() {
             let (child, index) = targets[t];
-            column.turns[0].children[child as usize]
-                .with_dependent_mut(|_, s| mark_alive_with(s, index, targets));
+            column.turns[0].with_child_mut(child, |s| mark_alive_with(s, index, targets));
         }
         targets.truncate(start);
     }
@@ -272,8 +271,7 @@ pub(crate) fn mark_alive_range(column: &mut Column<'_>, turn: usize, range: Turn
     });
     for t in 0..targets.len() {
         let (child, index) = targets[t];
-        column.turns[turn].children[child as usize]
-            .with_dependent_mut(|_, s| mark_alive_with(s, index, &mut targets));
+        column.turns[turn].with_child_mut(child, |s| mark_alive_with(s, index, &mut targets));
     }
 }
 
@@ -326,8 +324,7 @@ pub(crate) fn collect_errors(scope: &Scope<'_>, objects: &[u32], out: &mut Error
             });
         }
         for (child, indices) in per_child {
-            column.turns[0].children[child as usize]
-                .with_dependent(|_, s| collect_errors(s, &indices, out));
+            column.turns[0].with_child(child, |s| collect_errors(s, &indices, out));
         }
     };
     if scope.meta.serial {
@@ -375,7 +372,6 @@ pub(crate) fn collect_range_errors(
         per_child.entry(child).or_default().push(index)
     });
     for (child, indices) in per_child {
-        column.turns[turn].children[child as usize]
-            .with_dependent(|_, s| collect_errors(s, &indices, out));
+        column.turns[turn].with_child(child, |s| collect_errors(s, &indices, out));
     }
 }

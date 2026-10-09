@@ -4,14 +4,14 @@
 
 use crate::context::{Context, HintAddr};
 use crate::error::{Error, GraphQLError};
-use crate::exec::column::{Column, Inner, Slot, Turn};
+use crate::exec::column::{Column, ErrorId, ErrorRecord, Inner, Slot, Storage, Stored, Turn};
 use crate::exec::list::ListOutput;
 use crate::exec::scope::{
     Batch, DeferredSet, DeferredSetState, FieldFuture, Frame, ObjectMeta, ParentLink, Scope,
     ScopeMeta,
 };
 use crate::exec::state::{GroupId, GroupKind, Shared};
-use crate::exec::stream::StreamState;
+use crate::exec::stream::{StreamDriver, StreamState};
 use crate::plan::{Leaf as LeafPath, PlanHeader, PlanId, PlanTable, Walker};
 use crate::resolver::{
     Args, As, Either, Field, List, Nullable, Outputs, Resolver, Shape, Streamed,
@@ -129,30 +129,78 @@ pub trait Completes<T, C>: Sized {
     }
 }
 
-/// The completion context handed to `Completes::complete`.
+/// The completion context handed to `Completes::complete`: the parts of one
+/// turn that completion writes.
 pub struct Completion<'a, 'c, C> {
     pub(crate) cx: &'c FieldsCx<'a, C>,
     pub(crate) field: u32,
-    pub(crate) column: &'c mut Column<'a>,
-    pub(crate) turn: usize,
+    pub(crate) shape: Shape,
+    /// The outermost list level, one slot per object; only turn 0 writes it.
+    pub(crate) level0: &'c mut [Slot],
+    pub(crate) levels: &'c mut [Vec<Slot>],
+    pub(crate) errors: &'c mut Vec<ErrorRecord>,
+    pub(crate) stored: &'c mut Stored<'a>,
+    /// Where a streamed output registers its driver; only turn 0 has one.
+    pub(crate) stream: Option<&'c mut Option<Box<dyn StreamDriver<'a> + 'a>>>,
     pub(crate) level: usize,
     pub(crate) leaf: LeafPath,
     pub(crate) generation: u32,
 }
 
+impl<'a, 'c, C> Completion<'a, 'c, C> {
+    /// Completes into `column`'s turn 0, from its outermost level.
+    pub(crate) fn immediate(
+        cx: &'c FieldsCx<'a, C>,
+        field: u32,
+        column: &'c mut Column<'a>,
+        leaf: LeafPath,
+        generation: u32,
+    ) -> Self {
+        let Column {
+            shape,
+            level0,
+            turns,
+            stream,
+            ..
+        } = column;
+        let turn = &mut turns[0];
+        let Storage::Immediate(stored) = &mut turn.stored else {
+            unreachable!("turn 0 is never a stream turn")
+        };
+        Completion {
+            cx,
+            field,
+            shape: *shape,
+            level0,
+            levels: &mut turn.levels,
+            errors: &mut turn.errors,
+            stored,
+            stream: Some(stream),
+            level: 0,
+            leaf,
+            generation,
+        }
+    }
+}
+
 impl<'a, C> Completion<'a, '_, C> {
     pub(crate) fn depth(&self) -> usize {
-        self.column.depth()
+        self.shape.levels.len()
+    }
+
+    fn set(&mut self, pos: &Pos, slot: Slot) {
+        if self.level == 0 {
+            self.level0[pos.slot as usize] = slot;
+        } else {
+            self.levels[self.level - 1][pos.slot as usize] = slot;
+        }
     }
 
     pub fn null(&mut self, pos: &Pos) {
-        let depth = self.depth();
-        if self.level == 0 && depth >= 1 {
-            self.column.level0[pos.slot as usize] = Slot::Null;
-        } else if self.level == depth {
-            self.column.turns[self.turn].inner.set_null(pos.slot);
+        if self.level == self.depth() {
+            self.stored.inner.set_null(pos.slot);
         } else {
-            self.column.turns[self.turn].levels[self.level - 1][pos.slot as usize] = Slot::Null;
+            self.set(pos, Slot::Null);
         }
     }
 
@@ -163,30 +211,26 @@ impl<'a, C> Completion<'a, '_, C> {
             let path = self.cx.meta.path_to(pos.object, &field.key, &pos.indices);
             GraphQLError::from_error(&error, field.spans.clone(), path)
         });
-        let id = self.column.record_error(
-            self.turn,
+        let id = self.errors.len() as ErrorId;
+        self.errors.push(ErrorRecord {
             error,
-            pos.object,
-            pos.indices.to_vec(),
-            self.generation,
-        );
-        let depth = self.depth();
-        if self.level == 0 && depth >= 1 {
-            self.column.level0[pos.slot as usize] = Slot::Error(id);
-        } else if self.level == depth {
-            self.column.turns[self.turn].inner.set_error(pos.slot, id);
+            object: pos.object,
+            indices: pos.indices.to_vec(),
+            generation: self.generation,
+        });
+        if self.level == self.depth() {
+            self.stored.inner.set_error(pos.slot, id);
         } else {
-            self.column.turns[self.turn].levels[self.level - 1][pos.slot as usize] =
-                Slot::Error(id);
+            self.set(pos, Slot::Error(id));
         }
     }
 
     pub fn leaf(&mut self, pos: &Pos, value: Result<Value<'a>, Error>) {
         match value {
-            Ok(Value::Null) if !self.column.shape.nullable_at(self.level) => {
+            Ok(Value::Null) if !self.shape.nullable_at(self.level) => {
                 self.error(pos, crate::value::null_at_non_null())
             }
-            Ok(value) => match &mut self.column.turns[self.turn].inner {
+            Ok(value) => match &mut self.stored.inner {
                 Inner::Leaves(leaves) => {
                     leaves[pos.slot as usize] = crate::exec::column::Leaf::Value(value)
                 }
@@ -201,28 +245,25 @@ impl<'a, C> Completion<'a, '_, C> {
     pub fn list(&mut self, pos: &Pos, len: usize) -> impl Iterator<Item = Pos> + use<C> {
         let depth = self.depth();
         debug_assert!(self.level < depth, "list written at a non-list level");
-        let turn = &mut self.column.turns[self.turn];
         let start = if self.level + 1 == depth {
-            let start = turn.inner.len() as u32;
+            let start = self.stored.inner.len() as u32;
             for _ in 0..len {
-                turn.inner.push_pending();
+                self.stored.inner.push_pending();
             }
             start
         } else {
-            let level = &mut turn.levels[self.level];
+            let level = &mut self.levels[self.level];
             let start = level.len() as u32;
             level.extend(std::iter::repeat_n(Slot::Pending, len));
             start
         };
-        let slot = Slot::Items {
-            start,
-            len: len as u32,
-        };
-        if self.level == 0 {
-            self.column.level0[pos.slot as usize] = slot;
-        } else {
-            turn.levels[self.level - 1][pos.slot as usize] = slot;
-        }
+        self.set(
+            pos,
+            Slot::Items {
+                start,
+                len: len as u32,
+            },
+        );
         let (object, base) = (pos.object, pos.indices.clone());
         (0..len as u32).map(move |i| {
             let mut indices = base.clone();
@@ -365,10 +406,11 @@ impl<'a, C: Send + Sync + 'a> Completion<'a, '_, C> {
             entry,
             tag: PhantomData,
         };
-        let turn = &mut self.column.turns[self.turn];
-        let child = turn.children.len() as u32;
-        turn.children.push(Frame::from_batch(Box::new(batch)));
-        match &mut turn.inner {
+        let child = self.stored.children.len() as u32;
+        self.stored
+            .children
+            .push(Frame::from_batch(Box::new(batch)));
+        match &mut self.stored.inner {
             Inner::Objects(slots) => {
                 for (index, pos) in positions.iter().enumerate() {
                     slots[pos.slot as usize] = crate::exec::column::ObjSlot::Object {
@@ -421,13 +463,16 @@ impl<'a, C: Send + Sync + 'a> Completion<'a, '_, C> {
             self.leaf.clone(),
             self.generation,
             self.cx.shared.capacity,
-            self.column.shape,
+            self.shape,
         );
         self.cx
             .shared
             .has_streams
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        self.column.stream = Some(Box::new(state));
+        **self
+            .stream
+            .as_mut()
+            .expect("only turn 0 registers a stream") = Some(Box::new(state));
     }
 }
 
@@ -533,9 +578,11 @@ pub(crate) fn new_column<'a>(
     let depth = shape.levels.len();
     let mut turn = Turn::new(depth, objects);
     if depth == 0 {
-        for _ in 0..n {
-            turn.inner.push_pending();
-        }
+        turn.with_stored_mut(|stored| {
+            for _ in 0..n {
+                stored.inner.push_pending();
+            }
+        });
     }
     Column {
         field,
@@ -612,15 +659,8 @@ where
             object: i,
             indices: SmallVec::new(),
         };
-        let mut cc = Completion {
-            cx: &cx,
-            field: index,
-            column: &mut column,
-            turn: 0,
-            level: 0,
-            leaf: LeafPath::default(),
-            generation,
-        };
+        let mut cc =
+            Completion::immediate(&cx, index, &mut column, LeafPath::default(), generation);
         let args = match args {
             Ok(args) => args,
             Err(error) => {

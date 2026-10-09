@@ -1,11 +1,14 @@
 use crate::error::{Error, GraphQLError, PathSegment};
-use crate::exec::column::{Column, Turn, TurnRange};
+use crate::exec::column::{
+    Column, ErrorRecord, Slot, Storage, Stored, StreamCell, Turn, TurnBatch, TurnRange,
+};
 use crate::exec::complete::{Completion, FieldsCx, Pos};
 use crate::exec::state::{ErrorBehavior, GroupId, Groups};
 use crate::plan::Leaf as LeafPath;
 use crate::resolver::{Outputs, Shape};
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
+use std::cell::Cell;
 use std::marker::PhantomData;
 use std::ops::ControlFlow;
 use std::task::{Context as TaskContext, Poll};
@@ -166,6 +169,64 @@ impl<T, Ty, C> Drop for StreamState<'_, T, Ty, C> {
     }
 }
 
+/// What a stream turn's values borrow: the items until they complete, and
+/// the field context they complete in.
+struct TurnItems<'a, T, Ty, C> {
+    cx: FieldsCx<'a, C>,
+    field: u32,
+    shape: Shape,
+    leaf: LeafPath,
+    generation: u32,
+    objects: bool,
+    /// Innermost slots the turn opens: one per item at a depth-1 list.
+    inner_len: u32,
+    items: Cell<Option<TurnInput<T>>>,
+    tag: PhantomData<fn() -> Ty>,
+}
+
+/// The items a turn completes and the errors its sources yielded instead,
+/// each with its position.
+type TurnInput<T> = (Vec<T>, Vec<Pos>, Vec<(Pos, Error)>);
+
+impl<'a, T, Ty, C> TurnBatch for TurnItems<'a, T, Ty, C>
+where
+    T: Outputs<Ty, C> + Send + 'a,
+    Ty: 'static,
+    C: Send + Sync + 'a,
+{
+    fn complete<'this>(
+        &'this self,
+        levels: &mut [Vec<Slot>],
+        errors: &mut Vec<ErrorRecord>,
+    ) -> Stored<'this> {
+        let (values, positions, failed) = self.items.take().expect("a turn completes once");
+        let mut stored = Stored::new(self.objects);
+        for _ in 0..self.inner_len {
+            stored.inner.push_pending();
+        }
+        let mut cc = Completion {
+            cx: &self.cx,
+            field: self.field,
+            shape: self.shape,
+            level0: &mut [],
+            levels,
+            errors,
+            stored: &mut stored,
+            stream: None,
+            level: 1,
+            leaf: self.leaf.clone(),
+            generation: self.generation,
+        };
+        for (pos, error) in failed {
+            cc.error(&pos, error);
+        }
+        if !values.is_empty() {
+            T::__complete(values, positions, &mut cc);
+        }
+        stored
+    }
+}
+
 impl<'a, T, Ty, C> StreamDriver<'a> for StreamState<'a, T, Ty, C>
 where
     T: Outputs<Ty, C> + Send + 'a,
@@ -218,15 +279,13 @@ where
                     }
                 }
             }
-            let mut cc = Completion {
-                cx: &self.cx,
-                field: self.field,
+            let mut cc = Completion::immediate(
+                &self.cx,
+                self.field,
                 column,
-                turn: 0,
-                level: 0,
-                leaf: self.leaf.clone(),
-                generation: self.generation,
-            };
+                self.leaf.clone(),
+                self.generation,
+            );
             let mut values = Vec::new();
             let mut value_pos = Vec::new();
             for (p, items) in pulled.into_iter().enumerate() {
@@ -310,10 +369,7 @@ where
             return false;
         }
         let depth = column.depth();
-        let objects = matches!(
-            column.turns[0].inner,
-            crate::exec::column::Inner::Objects(_)
-        );
+        let objects = column.turns[0].objects();
         let turn_index = match column.turns.iter().position(|t| t.retired) {
             Some(index) => {
                 column.turns[index].reset(depth, objects);
@@ -329,78 +385,76 @@ where
         let buffer = std::mem::take(&mut self.buffer);
         let mut values = Vec::new();
         let mut value_pos = Vec::new();
-        let mut errors = Vec::new();
-        {
-            let turn = &mut column.turns[turn_index];
-            let mut per_parent: Vec<Vec<Result<T, Error>>> =
-                (0..self.sources.len()).map(|_| Vec::new()).collect();
-            for (p, item) in buffer {
-                per_parent[p].push(item);
+        let mut failed = Vec::new();
+        let mut inner_len = 0;
+        let turn = &mut column.turns[turn_index];
+        let mut per_parent: Vec<Vec<Result<T, Error>>> =
+            (0..self.sources.len()).map(|_| Vec::new()).collect();
+        for (p, item) in buffer {
+            per_parent[p].push(item);
+        }
+        for (p, items) in per_parent.into_iter().enumerate() {
+            if items.is_empty() {
+                continue;
             }
-            for (p, items) in per_parent.into_iter().enumerate() {
-                if items.is_empty() {
-                    continue;
-                }
-                let len = items.len() as u32;
-                let start_slot = if depth == 1 {
-                    let start = turn.inner.len() as u32;
-                    for _ in 0..len {
-                        turn.inner.push_pending();
-                    }
-                    start
-                } else {
-                    let start = turn.levels[0].len() as u32;
-                    turn.levels[0].extend(std::iter::repeat_n(
-                        crate::exec::column::Slot::Pending,
-                        len as usize,
-                    ));
-                    start
-                };
-                let object = self.positions[p].object;
-                turn.ranges.push(TurnRange {
+            let len = items.len() as u32;
+            let start_slot = if depth == 1 {
+                inner_len += len;
+                inner_len - len
+            } else {
+                let start = turn.levels[0].len() as u32;
+                turn.levels[0].extend(std::iter::repeat_n(Slot::Pending, len as usize));
+                start
+            };
+            let object = self.positions[p].object;
+            turn.ranges.push(TurnRange {
+                object,
+                start_index: self.next_index[p],
+                start_slot,
+                len,
+                shipped: false,
+            });
+            for (j, item) in items.into_iter().enumerate() {
+                let pos = Pos {
+                    slot: start_slot + j as u32,
                     object,
-                    start_index: self.next_index[p],
-                    start_slot,
-                    len,
-                    shipped: false,
-                });
-                for (j, item) in items.into_iter().enumerate() {
-                    let pos = Pos {
-                        slot: start_slot + j as u32,
-                        object,
-                        indices: smallvec::smallvec![self.next_index[p] + j as u32],
-                    };
-                    match item {
-                        Ok(value) => {
-                            values.push(value);
-                            value_pos.push(pos);
-                        }
-                        Err(error) => errors.push((pos, error)),
+                    indices: smallvec::smallvec![self.next_index[p] + j as u32],
+                };
+                match item {
+                    Ok(value) => {
+                        values.push(value);
+                        value_pos.push(pos);
                     }
+                    Err(error) => failed.push((pos, error)),
                 }
-                self.next_index[p] += len;
             }
+            self.next_index[p] += len;
         }
         // Turn items belong to their parent's stream group, not the scope's group.
         let mut cx = self.cx.clone();
         for (p, pos) in self.positions.iter().enumerate() {
             cx.groups[pos.object as usize] = self.groups[p];
         }
-        let mut cc = Completion {
-            cx: &cx,
+        let batch: Box<dyn TurnBatch + 'a> = Box::new(TurnItems::<T, Ty, C> {
+            cx,
             field: self.field,
-            column,
-            turn: turn_index,
-            level: 1,
+            shape: self.shape,
             leaf: self.leaf.clone(),
             generation: self.generation + 1,
-        };
-        for (pos, error) in errors {
-            cc.error(&pos, error);
-        }
-        if !values.is_empty() {
-            T::__complete(values, value_pos, &mut cc);
-        }
+            objects,
+            inner_len,
+            items: Cell::new(Some((values, value_pos, failed))),
+            tag: PhantomData,
+        });
+        let Turn {
+            levels,
+            errors,
+            stored,
+            ..
+        } = turn;
+        *stored = Storage::Stream(StreamCell::new(batch, |batch| {
+            batch.complete(levels, errors)
+        }));
         true
     }
 

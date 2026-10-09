@@ -29,16 +29,18 @@ fn walk_scopes_mut(
             continue;
         };
         let field = column.field;
-        for t in 0..column.turns.len() {
-            for c in 0..column.turns[t].children.len() {
-                path.push(Step::Child {
-                    field,
-                    turn: t as u32,
-                    child: c as u32,
-                });
-                column.turns[t].children[c].with_dependent_mut(|_, s| walk_scopes_mut(s, path, f));
-                path.pop();
-            }
+        for (t, turn) in column.turns.iter_mut().enumerate() {
+            turn.with_stored_mut(|stored| {
+                for (c, child) in stored.children.iter_mut().enumerate() {
+                    path.push(Step::Child {
+                        field,
+                        turn: t as u32,
+                        child: c as u32,
+                    });
+                    child.with_dependent_mut(|_, s| walk_scopes_mut(s, path, f));
+                    path.pop();
+                }
+            });
         }
     }
     for d in 0..scope.deferred.len() {
@@ -62,8 +64,8 @@ fn with_scope_at_mut<R>(
                 .columns_mut()
                 .find(|c| c.field == *field)
                 .expect("column on path");
-            column.turns[*turn as usize].children[*child as usize]
-                .with_dependent_mut(|_, inner| with_scope_at_mut(inner, rest, f))
+            column.turns[*turn as usize]
+                .with_child_mut(*child, |inner| with_scope_at_mut(inner, rest, f))
         }
         Some((Step::Deferred(index), rest)) => {
             let inner = scope.deferred[*index as usize]
@@ -833,10 +835,7 @@ impl Barrier<'_, '_> {
                             .find(|&p| driver.parent_object(p) == range.object)
                             .expect("parent");
                         let g = driver.groups()[parent];
-                        let ready = turn
-                            .children
-                            .iter()
-                            .all(|c| c.with_dependent(|_, s| !s.is_live_for(g, self.groups)));
+                        let ready = !turn.any_child(|s| s.is_live_for(g, self.groups));
                         ranges.push((t, ri, *range, g, ready));
                     }
                 }

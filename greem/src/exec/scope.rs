@@ -254,16 +254,15 @@ impl<'a> Scope<'a> {
                 if turn.retired {
                     continue;
                 }
-                for child in &mut turn.children {
-                    let fresh = child.with_dependent(|_, scope| scope.activity == Activity::Fresh);
-                    if fresh {
-                        continue;
+                turn.each_child_mut(|scope| {
+                    if scope.activity == Activity::Fresh {
+                        return;
                     }
-                    match child.with_dependent_mut(|_, scope| scope.poll_generation(cx)) {
+                    match scope.poll_generation(cx) {
                         Poll::Ready(p) => progress |= p,
                         Poll::Pending => pending = true,
                     }
-                }
+                });
             }
             if let Some(driver) = &mut column.stream {
                 progress |= driver.pump(cx);
@@ -295,11 +294,10 @@ impl<'a> Scope<'a> {
                     .stream
                     .as_ref()
                     .is_some_and(|d| d.live_groups(groups, &mut finds(group)).is_break())
-                    || column.turns.iter().any(|turn| {
-                        turn.children
-                            .iter()
-                            .any(|c| c.with_dependent(|_, s| s.is_live_for(group, groups)))
-                    })
+                    || column
+                        .turns
+                        .iter()
+                        .any(|turn| turn.any_child(|s| s.is_live_for(group, groups)))
             }
             None => true,
         }
@@ -318,14 +316,12 @@ impl<'a> Scope<'a> {
             {
                 return true;
             }
-            for turn in &column.turns {
-                if turn
-                    .children
-                    .iter()
-                    .any(|c| c.with_dependent(|_, s| s.has_live_streams()))
-                {
-                    return true;
-                }
+            if column
+                .turns
+                .iter()
+                .any(|turn| turn.any_child(|s| s.has_live_streams()))
+            {
+                return true;
             }
         }
         self.deferred
@@ -354,14 +350,12 @@ impl<'a> Scope<'a> {
             if column.stream.as_ref().is_some_and(|d| !d.is_done()) {
                 return false;
             }
-            for turn in &column.turns {
-                if turn
-                    .children
-                    .iter()
-                    .any(|c| c.with_dependent(|_, s| !s.is_parked()))
-                {
-                    return false;
-                }
+            if column
+                .turns
+                .iter()
+                .any(|turn| turn.any_child(|s| !s.is_parked()))
+            {
+                return false;
             }
         }
         self.deferred
@@ -391,14 +385,12 @@ impl<'a> Scope<'a> {
             {
                 return false;
             }
-            for turn in &column.turns {
-                if turn
-                    .children
-                    .iter()
-                    .any(|c| c.with_dependent(|_, s| !s.is_finished(groups)))
-                {
-                    return false;
-                }
+            if column
+                .turns
+                .iter()
+                .any(|turn| turn.any_child(|s| !s.is_finished(groups)))
+            {
+                return false;
             }
         }
         // A released deferred scope whose group has not shipped still has to be
@@ -447,9 +439,12 @@ impl<'a> Scope<'a> {
                 if turn.retired {
                     continue;
                 }
-                for child in &turn.children {
-                    child.with_dependent(|_, s| s.live_groups(groups, f))?;
-                }
+                turn.with_stored(|stored| {
+                    for child in &stored.children {
+                        child.with_dependent(|_, s| s.live_groups(groups, f))?;
+                    }
+                    ControlFlow::Continue(())
+                })?;
             }
         }
         for d in &self.deferred {
@@ -480,9 +475,7 @@ impl<'a> Scope<'a> {
         }
         for column in self.columns_mut() {
             for turn in &mut column.turns {
-                for child in &mut turn.children {
-                    child.with_dependent_mut(|_, scope| scope.clear_fresh());
-                }
+                turn.each_child_mut(|scope| scope.clear_fresh());
             }
         }
         for deferred in &mut self.deferred {

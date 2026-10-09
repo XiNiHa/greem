@@ -81,16 +81,12 @@ fn advance_scope_inner(scope: &mut Scope<'_>, shared: &Shared, changed: &mut boo
             continue;
         };
         for turn in &mut column.turns {
-            for child in &mut turn.children {
-                child.with_dependent_mut(|_, s| advance_scope(s, shared, changed));
-            }
+            turn.each_child_mut(|s| advance_scope(s, shared, changed));
         }
         for turn in column.turns.iter_mut().skip(1) {
             if turn.shipped && !turn.retired && {
                 let groups = shared.groups();
-                turn.children
-                    .iter()
-                    .all(|c| c.with_dependent(|_, s| s.is_finished(&groups)))
+                !turn.any_child(|s| !s.is_finished(&groups))
             } {
                 // Retiring drops scopes, which lock the table themselves.
                 turn.retire();
