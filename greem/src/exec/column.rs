@@ -112,6 +112,8 @@ impl<'a> Inner<'a> {
 #[derive(Clone, Copy, Debug)]
 pub struct TurnRange {
     pub object: u32,
+    /// The parent's index in the column's stream driver.
+    pub parent: u32,
     pub start_index: u32,
     pub start_slot: u32,
     pub len: u32,

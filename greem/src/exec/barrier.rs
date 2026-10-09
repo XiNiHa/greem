@@ -831,10 +831,7 @@ impl Barrier<'_, '_> {
                         if range.shipped {
                             continue;
                         }
-                        let parent = (0..driver.groups().len())
-                            .find(|&p| driver.parent_object(p) == range.object)
-                            .expect("parent");
-                        let g = driver.groups()[parent];
+                        let g = driver.groups()[range.parent as usize];
                         let ready = !turn.any_child(|s| s.is_live_for(g, self.groups));
                         ranges.push((t, ri, *range, g, ready));
                     }
@@ -953,36 +950,39 @@ impl Barrier<'_, '_> {
 
     /// Marks the handled ranges and the turns they empty as shipped, and
     /// completes every stream whose source ended with nothing left to ship.
+    /// Only the parents the driver queued are examined: those whose source
+    /// ended or whose last range shipped since the previous barrier.
     fn complete_streams(&mut self, path: &[Step], field: u32, handled: &[(usize, usize)]) {
         with_scope_at_mut(self.root, path, &mut |scope| {
             let column = scope.columns_mut().find(|c| c.field == field).unwrap();
+            let driver = column.stream.as_mut().expect("driver");
             for &(t, ri) in handled {
-                column.turns[t].ranges[ri].shipped = true;
+                let range = &mut column.turns[t].ranges[ri];
+                range.shipped = true;
+                driver.range_shipped(range.parent as usize);
             }
             for turn in column.turns.iter_mut().skip(1) {
                 turn.shipped = turn.ranges.iter().all(|r| r.shipped);
             }
-            let driver = column.stream.as_ref().expect("driver");
-            for (p, &g) in driver.groups().iter().enumerate() {
+            for p in driver.take_completable() {
+                let g = driver.groups()[p];
                 let group = self.groups.get(g);
-                if !matches!(group.kind, GroupKind::Stream { .. })
-                    || !matches!(group.state, GroupState::Released)
-                {
+                if !matches!(group.kind, GroupKind::Stream { .. }) {
                     continue;
                 }
-                let object = driver.parent_object(p);
-                let pending_turns = column
-                    .turns
-                    .iter()
-                    .skip(1)
-                    .any(|turn| turn.ranges.iter().any(|r| !r.shipped && r.object == object));
-                if driver.source_ended(p) && !pending_turns {
-                    let id = self.groups.assign_wire_id(g).to_string();
-                    self.groups.get_mut(g).state = GroupState::Completed;
-                    self.out.completed.push(CompletedEntry {
-                        id,
-                        errors: Vec::new(),
-                    });
+                match group.state {
+                    GroupState::Released => {
+                        let id = self.groups.assign_wire_id(g).to_string();
+                        self.groups.get_mut(g).state = GroupState::Completed;
+                        self.out.completed.push(CompletedEntry {
+                            id,
+                            errors: Vec::new(),
+                        });
+                    }
+                    GroupState::Unreleased | GroupState::Announced => {
+                        driver.queue_completion(p);
+                    }
+                    _ => {}
                 }
             }
         });

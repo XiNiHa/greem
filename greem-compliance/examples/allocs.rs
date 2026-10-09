@@ -2,6 +2,8 @@
 //! world. A stand-in until greem-bench exists; delete it then.
 //!
 //! cargo run --release -p greem-compliance --example allocs [workload...]
+//!
+//! `USERS=n` sizes the user-list workloads (default 10000).
 
 use futures::StreamExt;
 use futures::executor::block_on;
@@ -63,6 +65,10 @@ struct Workload {
 }
 
 fn workloads() -> Vec<Workload> {
+    let n: u32 = std::env::var("USERS")
+        .ok()
+        .map(|v| v.parse().expect("USERS is a number"))
+        .unwrap_or(10_000);
     let deep = format!(
         "{{ users {{ id {}{}}} }}",
         "friends { id ".repeat(12),
@@ -71,9 +77,9 @@ fn workloads() -> Vec<Workload> {
     vec![
         Workload {
             name: "wide",
-            users: 10_000,
+            users: n,
             posts_per_user: 3,
-            query: "{ users(first: 10000) { id name email posts { id title tags } } }".into(),
+            query: format!("{{ users(first: {n}) {{ id name email posts {{ id title tags }} }} }}"),
             incremental: false,
         },
         Workload {
@@ -92,27 +98,29 @@ fn workloads() -> Vec<Workload> {
         },
         Workload {
             name: "deferred",
-            users: 10_000,
+            users: n,
             posts_per_user: 3,
-            query:
-                "{ users(first: 10000) { id ... @defer { name email posts { id title tags } } } }"
-                    .into(),
+            query: format!(
+                "{{ users(first: {n}) {{ id ... @defer {{ name email posts {{ id title tags }} }} }} }}"
+            ),
             incremental: true,
         },
         Workload {
             name: "streamed",
-            users: 10_000,
+            users: n,
             posts_per_user: 3,
-            query: "{ users(first: 10000) @stream { id name email posts { id title tags } } }"
-                .into(),
+            query: format!(
+                "{{ users(first: {n}) @stream {{ id name email posts {{ id title tags }} }} }}"
+            ),
             incremental: true,
         },
         Workload {
             name: "streams",
-            users: 10_000,
+            users: n,
             posts_per_user: 3,
-            query: "{ users(first: 10000) { id drafts @stream(initialCount: 1) { id title } } }"
-                .into(),
+            query: format!(
+                "{{ users(first: {n}) {{ id drafts @stream(initialCount: 1) {{ id title }} }} }}"
+            ),
             incremental: true,
         },
     ]

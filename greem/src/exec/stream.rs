@@ -40,6 +40,16 @@ pub trait StreamDriver<'a>: Send {
     fn owns_groups(&self) -> bool;
     fn parent_object(&self, parent: usize) -> u32;
     fn source_ended(&self, parent: usize) -> bool;
+    /// One of `parent`'s item ranges shipped (or was discarded as dead).
+    fn range_shipped(&mut self, parent: usize);
+    /// The parents whose stream may complete now, in index order: their
+    /// source ended and every item they produced has shipped. Each comes
+    /// once per event that could have made it so.
+    fn take_completable(&mut self) -> Vec<usize>;
+    /// Examines `parent` for completion at the next barrier. The driver
+    /// queues its own events; the barrier queues a parent whose stream
+    /// could not complete yet for a reason the driver cannot see.
+    fn queue_completion(&mut self, parent: usize);
     fn release(&mut self);
     fn is_released(&self) -> bool;
     fn drop_group(&mut self, group: GroupId);
@@ -55,6 +65,12 @@ pub struct StreamState<'a, T, Ty, C> {
     shape: Shape,
     next_index: Vec<u32>,
     buffer: Vec<(usize, Result<T, Error>)>,
+    /// Per parent: item ranges made into turns but not shipped yet.
+    unshipped: Vec<u32>,
+    /// Parents to examine for completion at the next barrier, each at most
+    /// once (`queued`).
+    completable: Vec<usize>,
+    queued: Vec<bool>,
     released: bool,
     cx: FieldsCx<'a, C>,
     field: u32,
@@ -121,6 +137,9 @@ impl<'a, T, Ty, C> StreamState<'a, T, Ty, C> {
             shape,
             next_index: vec![0; n],
             buffer: Vec::new(),
+            unshipped: vec![0; n],
+            completable: Vec::new(),
+            queued: vec![false; n],
             released: false,
             cx,
             field,
@@ -330,6 +349,7 @@ where
             if self.sources[p].is_some() && self.cx.shared.is_dead(self.groups[p]) {
                 self.sources[p] = None;
                 self.buffer.retain(|(q, _)| *q != p);
+                self.queue_completion(p);
                 ended = true;
                 continue;
             }
@@ -341,6 +361,7 @@ where
                     Poll::Pending => break,
                     Poll::Ready(None) => {
                         self.sources[p] = None;
+                        self.queue_completion(p);
                         ended = true;
                     }
                     Poll::Ready(Some(item)) => {
@@ -358,6 +379,7 @@ where
                         self.buffer.push((p, item));
                         if terminal.is_some() {
                             self.sources[p] = None;
+                            self.queue_completion(p);
                             ended = true;
                         }
                     }
@@ -410,8 +432,10 @@ where
                 start
             };
             let object = self.positions[p].object;
+            self.unshipped[p] += 1;
             turn.ranges.push(TurnRange {
                 object,
+                parent: p as u32,
                 start_index: self.next_index[p],
                 start_slot,
                 len,
@@ -511,8 +535,40 @@ where
         self.sources[parent].is_none() && !self.buffer.iter().any(|(q, _)| *q == parent)
     }
 
+    fn range_shipped(&mut self, parent: usize) {
+        self.unshipped[parent] -= 1;
+        if self.unshipped[parent] == 0 && self.sources[parent].is_none() {
+            self.queue_completion(parent);
+        }
+    }
+
+    fn take_completable(&mut self) -> Vec<usize> {
+        let mut parents = std::mem::take(&mut self.completable);
+        parents.retain(|&p| {
+            self.queued[p] = false;
+            // Buffered items still make a turn whose shipping asks again.
+            self.unshipped[p] == 0 && self.source_ended(p)
+        });
+        parents.sort_unstable();
+        parents
+    }
+
+    fn queue_completion(&mut self, parent: usize) {
+        if !std::mem::replace(&mut self.queued[parent], true) {
+            self.completable.push(parent);
+        }
+    }
+
     fn release(&mut self) {
-        self.released = true;
+        if std::mem::replace(&mut self.released, true) {
+            return;
+        }
+        // Sources that ended during the initial pull never pass through `pump`.
+        for p in 0..self.sources.len() {
+            if self.sources[p].is_none() {
+                self.queue_completion(p);
+            }
+        }
     }
 
     fn owns_groups(&self) -> bool {
