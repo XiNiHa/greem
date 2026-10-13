@@ -1,0 +1,128 @@
+name: graphql-js sync
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: graphql-js tag to sync to (default is the newest stable tag above the pin; also continues an existing sync branch)
+        required: false
+        type: string
+      base:
+        description: branch to cut the sync from and target (default is the repository default branch)
+        required: false
+        type: string
+
+concurrency:
+  group: graphql-js-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+
+env:
+  BASE: ${{ inputs.base || github.event.repository.default_branch }}
+  SYNC: greem-compliance/scripts/graphql-js-sync.sh
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      branch: ${{ steps.tag.outputs.branch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BASE }}
+
+      - name: Audit the port at the pin
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: $SYNC audit
+
+      - name: Pick the tag to sync to
+        id: tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          if [[ -z $TAG ]]; then
+            TAG=$($SYNC poll)
+            if [[ -z $TAG ]]; then
+              echo "the pin $($SYNC pin) is the newest stable tag"
+              exit 0
+            fi
+            if git ls-remote --exit-code --heads origin "sync/graphql-js-$TAG" >/dev/null; then
+              echo "sync/graphql-js-$TAG already exists; dispatch with tag=$TAG to continue it"
+              exit 0
+            fi
+          fi
+          echo "tag=$TAG" >>"$GITHUB_OUTPUT"
+          echo "branch=sync/graphql-js-$TAG" >>"$GITHUB_OUTPUT"
+
+  agent:
+    needs: poll
+    if: needs.poll.outputs.tag != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      TAG: ${{ needs.poll.outputs.tag }}
+      BRANCH: ${{ needs.poll.outputs.branch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BASE }}
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check out the sync branch
+        run: |
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null; then
+            git checkout -b "$BRANCH" "origin/$BRANCH"
+          else
+            git checkout -b "$BRANCH"
+          fi
+
+      - name: Prepare the context
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          CONTEXT=$RUNNER_TEMP/graphql-js-sync
+          echo "CONTEXT=$CONTEXT" >>"$GITHUB_ENV"
+          mkdir -p "$CONTEXT"
+          $SYNC diff "$TAG" >"$CONTEXT/diff.md"
+          $SYNC audit "$TAG" >"$CONTEXT/audit.txt" 2>&1 || true
+          cat "$CONTEXT/audit.txt"
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Sync the graphql-js port to ${{ env.TAG }}. You are on branch ${{ env.BRANCH }}, cut from ${{ env.BASE }}, which the pull request targets.
+
+            Read docs/agents/graphql-js-sync.md first and follow it. The upstream diff between the pin and ${{ env.TAG }} is at ${{ env.CONTEXT }}/diff.md, and the audit of the port against ${{ env.TAG }} is at ${{ env.CONTEXT }}/audit.txt.
+          claude_args: |
+            --model claude-opus-5-5
+            --max-turns 200
+            --allowedTools "Read,Edit,Write,Glob,Grep,Bash(cargo:*),Bash(git:*),Bash(gh pr:*),Bash(gh issue view:*),Bash(curl:*),Bash(greem-compliance/scripts/graphql-js-sync.sh:*)"
+
+      - name: Mark older sync pull requests superseded
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          url=$(gh pr view "$BRANCH" --json url --jq .url 2>/dev/null) || exit 0
+          gh pr list --state open --search "head:sync/graphql-js-" --json number,headRefName \
+            --jq ".[] | select(.headRefName != \"$BRANCH\") | .number" |
+          while read -r number; do
+            if ! gh pr view "$number" --json comments --jq '.comments[].body' | grep -q "^Superseded by"; then
+              gh pr comment "$number" --body "Superseded by the sync to $TAG: $url"
+            fi
+          done
