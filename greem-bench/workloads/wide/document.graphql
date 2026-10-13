@@ -1,0 +1,12 @@
+query Wide($size: Int!) {
+  users(first: $size) {
+    id
+    name
+    email
+    posts {
+      id
+      title
+      tags
+    }
+  }
+}

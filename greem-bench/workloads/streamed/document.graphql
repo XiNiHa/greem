@@ -1,0 +1,12 @@
+query Streamed($size: Int!) {
+  users(first: $size) @stream {
+    id
+    name
+    email
+    posts {
+      id
+      title
+      tags
+    }
+  }
+}

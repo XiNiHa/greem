@@ -1,0 +1,26 @@
+[package]
+name = "greem-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+bench = false
+
+[dependencies]
+greem = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { version = "1", features = ["rt", "time"] }
+
+[build-dependencies]
+greem-build = { workspace = true }
+
+[dev-dependencies]
+criterion = { package = "codspeed-criterion-compat", version = "5", features = ["async_tokio"] }
+
+[[bench]]
+name = "workloads"
+harness = false

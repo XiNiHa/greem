@@ -1,0 +1,31 @@
+"""The bench schema: the shape every workload's document selects over. Every framework in a comparison implements it under CONTRACT.md."""
+interface Node {
+  id: ID!
+}
+
+type Query {
+  """Users 0 to `first` - 1."""
+  users(first: Int!): [User!]!
+  """`size` search results, alternating between users and posts."""
+  search(size: Int!): [SearchResult!]!
+  """`size` rows; row i holds i cells, with the odd ones null."""
+  matrix(size: Int!): [[Int]!]
+}
+
+type User implements Node {
+  id: ID!
+  name: String!
+  email: String
+  posts: [Post!]!
+  """The same posts as a lazy source."""
+  drafts: [Post!]!
+  friends: [User!]!
+}
+
+type Post implements Node {
+  id: ID!
+  title: String!
+  tags: [String!]!
+}
+
+union SearchResult = User | Post

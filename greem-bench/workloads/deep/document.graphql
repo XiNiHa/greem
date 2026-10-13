@@ -1,0 +1,41 @@
+query Deep($size: Int!) {
+  users(first: $size) {
+    id
+    friends {
+      id
+      friends {
+        id
+        friends {
+          id
+          friends {
+            id
+            friends {
+              id
+              friends {
+                id
+                friends {
+                  id
+                  friends {
+                    id
+                    friends {
+                      id
+                      friends {
+                        id
+                        friends {
+                          id
+                          friends {
+                            id
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

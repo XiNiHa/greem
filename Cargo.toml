@@ -9,6 +9,7 @@ members = [
     "greem-compliance",
     "greem-test-app",
     "examples/axum",
+    "greem-bench",
 ]
 
 [workspace.package]

@@ -1,0 +1,9 @@
+query Streams($size: Int!) {
+  users(first: $size) {
+    id
+    drafts @stream(initialCount: 1) {
+      id
+      title
+    }
+  }
+}

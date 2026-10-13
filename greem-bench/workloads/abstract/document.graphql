@@ -1,0 +1,13 @@
+query Abstract($size: Int!) {
+  search(size: $size) {
+    __typename
+    ... on User {
+      id
+      name
+    }
+    ... on Post {
+      id
+      title
+    }
+  }
+}

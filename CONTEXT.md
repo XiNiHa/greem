@@ -200,6 +200,20 @@ _Avoid_: Schedule, timing, race
 One compliance schema per upstream graphql-js execution test suite, the superset of every schema shape that suite's cases build, onto which those cases are ported one-to-one; extended before another is added. Distinct from the property schema the generators walk.
 _Avoid_: Test schema, fixture schema, spec-section schema
 
+### Benchmarks
+
 **Workload**:
-A portable benchmark case: schema, document, dataset description and resolver contract, consumable by any framework in any language.
-_Avoid_: Bench, scenario, benchmark (as the case)
+One portable benchmark case: a document over the shared bench schema, the dataset sizes it runs at, the fetch latency it declares and the capabilities it requires. Any framework in any language runs it under the resolver contract.
+_Avoid_: Bench, scenario, benchmark (as the case), harness (which is the compliance world's controls)
+
+**Resolver contract**:
+The prose rules every implementation of the bench schema follows: each value as a function of the dataset sizes and indices, which fields are fetches, and that the implementation is idiomatic for its framework rather than tuned.
+_Avoid_: Fixture, spec, dataset description (that is only the sizes)
+
+**Consumer**:
+A program that runs workloads and reports on them: the in-process criterion bench, or a driver measuring frameworks over HTTP. A consumer never defines a workload.
+_Avoid_: Harness, runner, bench (as the program)
+
+**Fetch latency**:
+The fixed simulated delay a workload declares for a fetch-marked field, paid once per resolver call whatever the size of the set; leaf fields pay none.
+_Avoid_: Sleep, per-object delay, I/O simulation

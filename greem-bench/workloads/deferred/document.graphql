@@ -1,0 +1,14 @@
+query Deferred($size: Int!) {
+  users(first: $size) {
+    id
+    ... @defer {
+      name
+      email
+      posts {
+        id
+        title
+        tags
+      }
+    }
+  }
+}

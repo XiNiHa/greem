@@ -1,0 +1,4 @@
+{
+  "sizes": [1000],
+  "latencyMs": { "Query.users": 1, "User.posts": 1 }
+}

@@ -1,0 +1,3 @@
+query Matrix($size: Int!) {
+  matrix(size: $size)
+}
