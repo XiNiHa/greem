@@ -11,3 +11,7 @@ The five canonical triage roles use their default label strings (`needs-triage`,
 ### Domain docs
 
 Single-context: one `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+### graphql-js sync
+
+The ported graphql-js suites in `greem-compliance/tests/graphql_js` follow the tag pinned in `greem-compliance/Cargo.toml`. `.github/workflows/graphql-js-sync.yml` polls upstream and drafts the sync. See `docs/agents/graphql-js-sync.md`.
