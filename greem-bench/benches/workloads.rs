@@ -1,4 +1,4 @@
-//! Every workload under `workloads/`. `GREEM_BENCH_SIZES=smallest` is the CI
+//! Every workload under `bench/workloads/`. `GREEM_BENCH_SIZES=smallest` is the CI
 //! shape: each workload's first size only, those declaring fetch latency
 //! skipped.
 

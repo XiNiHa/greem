@@ -15,7 +15,8 @@ what codegen emits: build any consumer and open `target/debug/build/<crate>-*/ou
 | `cargo test -p greem-compliance` | Generated code compiled from `schemas/property.graphql` and one area schema per ported graphql-js suite through `build.rs`; property-based BFS≡DFS over generated documents, worlds and interleavings; the incremental fold property; breadth-first call counts; determinism; hand-written spec cases; the graphql-js execution suites one-to-one under `tests/graphql_js`; depth, cancellation and panic evidence on a 2 MiB stack; 1,000 stream turns and 1,000 mutation roots. |
 | `cargo test -p greem-example-axum` | The axum example: `build.rs` codegen, hand-written and sugared resolvers, a lookbehind hint, JSON and `multipart/mixed` responses over the router. |
 | `cargo run -p greem-example-axum` | Serves `POST /graphql` on `127.0.0.1:8080`. |
-| `cargo test -p greem-bench` | Every workload under `greem-bench/workloads/` at its smallest size still produces its checked-in `expected.json` (`GREEM_BENCH_BLESS=1` rewrites them). |
+| `cargo test -p greem-bench --features http` | Every workload under `bench/workloads/` at its smallest size still produces its oracle, the merged response for an incremental workload (`GREEM_BENCH_BLESS=1` rewrites them); the merge itself; the `serve` binary's router over the bench `App`. |
+| `cd bench && cargo run --release -p greem-bench-driver` | The HTTP driver: builds and starts greem, async-graphql and graphql-js from `bench/servers.toml`, checks each against every workload's oracle, measures per concurrency level and writes the Markdown report and JSON results to `bench/results/`. Local only. |
 | `cargo bench -p greem-bench` | Criterion over every workload: `parse` once, then `execute`, `serialize` and `request` per size. `GREEM_BENCH_SIZES=smallest` is the CI shape, which `.github/workflows/bench.yml` runs under CodSpeed's CPU simulation for a diff report on every pull request. |
 
 `PROPTEST_CASES=5000 cargo test -p greem-compliance --test properties` is the long
@@ -33,7 +34,7 @@ counterexample found so far.
 | `greem-reference` | Unpublished naive depth-first executor, the oracle. | `greem_reference::execute` |
 | `greem-compliance` | Unpublished: the harness every world embeds, the property schema and world, the generators, one area per ported graphql-js suite, evidence tests. | |
 | `greem-test-app` | Unpublished: the module `greem-build` generates from its `schema.graphql`, and hand-written resolvers over it, shared by the runtime, macro and reference integration tests. | `schema`, `app::build_schema` |
-| `greem-bench` | Unpublished: the portable workloads (`workloads/`: schema, `CONTRACT.md`, one directory per workload), greem's implementation of their contract, the expected-output test and the criterion consumer. | `workload::Workload`, `app::build_schema`, `run` |
+| `greem-bench` | Unpublished: the portable workloads (`bench/workloads/`: schema, `CONTRACT.md`, one directory per workload, shared with the HTTP driver and the foreign implementations under `bench/`), greem's implementation of their contract, the oracle test and the criterion consumer. | `workload::Workload`, `app::build_schema`, `run` |
 | `examples/axum` | The one framework example. | `router`, `build_schema` |
 
 ## The contract a user writes against

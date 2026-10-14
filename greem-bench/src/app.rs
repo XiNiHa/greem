@@ -1,4 +1,4 @@
-//! The greem implementation of the resolver contract (`workloads/CONTRACT.md`):
+//! The greem implementation of the resolver contract (`bench/workloads/CONTRACT.md`):
 //! every value a function of indices, fetch fields set-based and paying
 //! their declared latency once per call, leaves through the per-object sugar.
 

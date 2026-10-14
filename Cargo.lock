@@ -604,13 +604,16 @@ dependencies = [
 name = "greem-bench"
 version = "0.0.1"
 dependencies = [
+ "axum",
  "codspeed-criterion-compat",
  "futures",
  "greem",
  "greem-build",
+ "http-body-util",
  "serde",
  "serde_json",
  "tokio",
+ "tower",
 ]
 
 [[package]]

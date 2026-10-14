@@ -32,4 +32,13 @@ Each workload is a directory holding:
   - `variables`: other variables, if any.
   - `latencyMs`: fetch latency in milliseconds by `Type.field`, if any.
   - `requires`: capabilities a framework must have to run it: `defer`, `stream`.
-- `expected.json`: the output at the smallest size as greem produces it: a single response object, or the list of payloads in order for an incremental workload. Compare structurally after parsing, never by bytes.
+  - `note`: what a reader should know before comparing its numbers, if anything.
+- `expected.json`: the oracle, the response at the smallest size. For an incremental workload it is the merged response: every payload's incremental entries applied at their paths, streamed items appended, errors collected, since the spec fixes only that and leaves batching, order and early delivery to the executor. Compare structurally after parsing, never by bytes.
+
+## Serving
+
+The driver under `bench/driver` measures implementations over HTTP, one process each, serving every workload:
+
+- `POST /graphql` takes the standard JSON request body (`query`, `variables`, `operationName`). `Accept: application/json` asks for one JSON response; `Accept: multipart/mixed;incrementalSpec=v0.2` asks for incremental delivery as `multipart/mixed` parts, each a JSON payload in the `pending`/`incremental`/`completed` format, with the boundary named in `Content-Type`.
+- `x-workload: <name>` names the workload whose `latencyMs` the request pays; no header means no latency. An implementation loads every `<name>/workload.json` at startup from the directory `WORKLOADS` names and listens on `PORT`.
+- Before timing a workload, the driver checks the implementation at the smallest size against the oracle and refuses to time it on a mismatch. An incremental workload must also arrive as at least two payloads: ignoring `@defer` and `@stream` is not running it.

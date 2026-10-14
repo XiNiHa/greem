@@ -1,0 +1,7 @@
+{
+  "sizes": [
+    1,
+    3
+  ],
+  "note": "Set-based execution's best case: thirteen nested `friends` fetches resolve once per level under greem and once per object elsewhere."
+}

@@ -11,6 +11,7 @@ members = [
     "examples/axum",
     "greem-bench",
 ]
+exclude = ["bench"]
 
 [workspace.package]
 version = "0.0.1"

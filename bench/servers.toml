@@ -1,0 +1,30 @@
+# The implementations the driver measures; see driver/src/manifest.rs.
+
+[[implementation]]
+name = "greem"
+cwd = ".."
+build = "cargo build --release -p greem-bench --features http --bin serve"
+run = "target/release/serve"
+port = 4001
+version = "git rev-parse --short HEAD"
+capabilities = ["defer", "stream"]
+note = "axum on a tokio worker per core; set-based resolvers pay each fetch once per scope"
+
+[[implementation]]
+name = "async-graphql"
+cwd = "servers/async-graphql"
+build = "cargo build --release"
+run = "../../target/release/async-graphql-bench"
+port = 4002
+version = "cargo pkgid async-graphql | sed 's/.*@//'"
+note = "axum on a tokio worker per core; per-object resolvers, siblings resolved concurrently"
+
+[[implementation]]
+name = "graphql-js"
+cwd = "servers/graphql-js"
+build = "pnpm install --frozen-lockfile"
+run = "node server.js"
+port = 4003
+version = "node --input-type=module -e \"import { version } from 'graphql'; console.log(version)\""
+capabilities = ["defer", "stream"]
+note = "graphql-http on one Node thread, no cluster; per-object resolvers, siblings resolved concurrently"

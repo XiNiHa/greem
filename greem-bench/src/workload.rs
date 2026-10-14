@@ -1,4 +1,4 @@
-//! The workload files: one directory each under `workloads/`, read as the
+//! The workload files: one directory each under `bench/workloads/`, read as the
 //! contract describes them.
 
 use serde::Deserialize;
@@ -6,7 +6,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/workloads");
+pub const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../bench/workloads");
+
+/// The request header naming the workload whose fetch latency a request pays.
+pub const HEADER: &str = "x-workload";
 
 #[derive(Debug, Clone)]
 pub struct Workload {
@@ -16,6 +19,7 @@ pub struct Workload {
     pub variables: serde_json::Map<String, serde_json::Value>,
     pub latency: BTreeMap<String, Duration>,
     pub requires: Vec<Capability>,
+    pub note: Option<String>,
     dir: PathBuf,
 }
 
@@ -25,6 +29,15 @@ pub struct Workload {
 pub enum Capability {
     Defer,
     Stream,
+}
+
+impl std::fmt::Display for Capability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Capability::Defer => "defer",
+            Capability::Stream => "stream",
+        })
+    }
 }
 
 /// The shape of `workload.json`.
@@ -38,12 +51,18 @@ struct Manifest {
     latency_ms: BTreeMap<String, u64>,
     #[serde(default)]
     requires: Vec<Capability>,
+    note: Option<String>,
 }
 
 impl Workload {
-    /// Every workload under `workloads/`, by name.
+    /// Every workload under `bench/workloads/`, by name.
     pub fn all() -> Vec<Workload> {
-        let mut names: Vec<String> = std::fs::read_dir(DIR)
+        Workload::all_in(Path::new(DIR))
+    }
+
+    /// Every workload under `dir`, by name.
+    pub fn all_in(dir: &Path) -> Vec<Workload> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
             .expect("workloads directory")
             .filter_map(|entry| {
                 let entry = entry.expect("directory entry");
@@ -55,11 +74,18 @@ impl Workload {
             })
             .collect();
         names.sort();
-        names.iter().map(|name| Workload::load(name)).collect()
+        names
+            .iter()
+            .map(|name| Workload::load_in(dir, name))
+            .collect()
     }
 
     pub fn load(name: &str) -> Workload {
-        let dir = Path::new(DIR).join(name);
+        Workload::load_in(Path::new(DIR), name)
+    }
+
+    pub fn load_in(dir: &Path, name: &str) -> Workload {
+        let dir = dir.join(name);
         let document =
             std::fs::read_to_string(dir.join("document.graphql")).expect("workload document");
         let manifest: Manifest = serde_json::from_str(
@@ -78,6 +104,7 @@ impl Workload {
                 .map(|(field, ms)| (field, Duration::from_millis(ms)))
                 .collect(),
             requires: manifest.requires,
+            note: manifest.note,
             dir,
         }
     }
@@ -99,7 +126,16 @@ impl Workload {
         serde_json::Value::Object(variables)
     }
 
-    pub fn expected_path(&self) -> PathBuf {
+    pub fn oracle_path(&self) -> PathBuf {
         self.dir.join("expected.json")
+    }
+
+    /// The checked-in response at the smallest size.
+    pub fn oracle(&self) -> serde_json::Value {
+        let path = self.oracle_path();
+        serde_json::from_slice(
+            &std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())),
+        )
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
     }
 }

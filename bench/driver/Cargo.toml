@@ -1,0 +1,15 @@
+[package]
+name = "greem-bench-driver"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+greem-bench = { path = "../../greem-bench", default-features = false }
+clap = { version = "4", features = ["derive"] }
+futures = "0.3"
+reqwest = { version = "0.13", default-features = false, features = ["stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "sync"] }
+toml = "1"

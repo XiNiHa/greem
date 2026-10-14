@@ -1,0 +1,10 @@
+{
+  "sizes": [
+    1000
+  ],
+  "latencyMs": {
+    "Query.users": 10,
+    "User.posts": 10
+  },
+  "note": "Latency-bound: two fetches of 10 ms each dominate; it shows how many sequential fetch waits an executor pays, not resolver cost."
+}

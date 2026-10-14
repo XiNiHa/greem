@@ -214,6 +214,22 @@ _Avoid_: Fixture, spec, dataset description (that is only the sizes)
 A program that runs workloads and reports on them: the in-process criterion bench, or a driver measuring frameworks over HTTP. A consumer never defines a workload.
 _Avoid_: Harness, runner, bench (as the program)
 
+**Driver**:
+The consumer that measures implementations over HTTP: it checks each one against a workload's oracle, warms it up, then times it under load and reports.
+_Avoid_: Load generator, client, harness, runner
+
+**Implementation**:
+One framework's server of the bench schema under the resolver contract, in whatever language; what a driver measures and never tunes.
+_Avoid_: Target, contestant, backend, server (as the concept)
+
+**Oracle**:
+A workload's checked-in response at its smallest size, which every implementation must reproduce structurally before it is timed; for an incremental workload it is the merged response.
+_Avoid_: Expected output, golden file, snapshot, fixture
+
+**Merged response**:
+The single response an incremental run folds into once every payload's incremental entries are applied at their paths and streamed items appended; the only part of an incremental run the spec fixes, so the only part compared.
+_Avoid_: Final payload, flattened result, reassembled response
+
 **Fetch latency**:
 The fixed simulated delay a workload declares for a fetch-marked field, paid once per resolver call whatever the size of the set; leaf fields pay none.
 _Avoid_: Sleep, per-object delay, I/O simulation
