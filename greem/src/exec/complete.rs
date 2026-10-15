@@ -1608,6 +1608,7 @@ impl<C> Completes<crate::resolver::NoMutation, C> for crate::resolver::NoMutatio
         C: 'a,
     {
         Err(Abort::one(
+            crate::error::RequestErrorKind::Operation,
             "the schema declares no mutation type",
             Vec::new(),
         ))

@@ -149,6 +149,24 @@ impl GraphQLError {
     }
 }
 
+/// Which step of a request failed before anything executed; an HTTP
+/// integration picks the status code from it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestErrorKind {
+    /// The request has no document, or its variables are not a map.
+    Malformed,
+    /// The document does not parse, or exceeds a parser limit.
+    Parse,
+    /// The document fails validation or one of greem's own checks on it,
+    /// such as the execution depth.
+    Validation,
+    /// The operation to execute cannot be determined, or greem does not
+    /// execute its kind.
+    Operation,
+    /// The variables do not coerce to the operation's variable types.
+    Variables,
+}
+
 /// Errors produced while building a [`Schema`](crate::Schema).
 #[derive(Debug)]
 pub struct SchemaError(pub(crate) String);

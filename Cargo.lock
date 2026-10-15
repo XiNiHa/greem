@@ -590,9 +590,13 @@ name = "greem"
 version = "0.0.1"
 dependencies = [
  "apollo-compiler",
+ "bytes",
  "futures",
  "greem-macros",
  "greem-test-app",
+ "http",
+ "http-body",
+ "http-body-util",
  "indexmap",
  "self_cell",
  "serde",

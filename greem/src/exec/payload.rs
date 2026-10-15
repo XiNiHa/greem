@@ -1,7 +1,7 @@
 //! Payloads: the borrowed views the encoder receives at each barrier, and their
 //! serialization straight from the columns.
 
-use crate::error::{GraphQLError, PathSegment};
+use crate::error::{GraphQLError, PathSegment, RequestErrorKind};
 use crate::exec::column::{Column, Inner, Leaf, ObjSlot, Slot};
 use crate::exec::scope::Scope;
 use crate::tree::FieldKind;
@@ -19,7 +19,7 @@ pub enum Step {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PayloadKind {
     /// Request-level failure: `errors` and no `data`.
-    RequestError,
+    RequestError(RequestErrorKind),
     /// The first (or only) response: `data`, optionally `pending` and `hasNext`.
     Initial,
     /// A subsequent incremental result.
@@ -135,10 +135,10 @@ impl<'p> Payload<'p> {
         }
     }
 
-    pub(crate) fn request_error(errors: Vec<GraphQLError>) -> Self {
+    pub(crate) fn request_error(kind: RequestErrorKind, errors: Vec<GraphQLError>) -> Self {
         Payload {
             root: None,
-            kind: PayloadKind::RequestError,
+            kind: PayloadKind::RequestError(kind),
             data: Data::Absent,
             errors,
             pending: Vec::new(),
@@ -173,7 +173,7 @@ impl Serialize for Payload<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut map = serializer.serialize_map(None)?;
         match self.kind {
-            PayloadKind::RequestError => {
+            PayloadKind::RequestError(_) => {
                 map.serialize_entry("errors", &self.errors)?;
             }
             PayloadKind::Initial => {

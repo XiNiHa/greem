@@ -2,7 +2,7 @@
 //! schema module, with the request entry points.
 
 use crate::context::Context;
-use crate::error::{GraphQLError, InputError, SchemaError};
+use crate::error::{GraphQLError, InputError, RequestErrorKind, SchemaError};
 use crate::exec::complete::ObjectBatch;
 use crate::exec::payload::{Payload, PayloadKind};
 use crate::exec::pull::{Ship, pull};
@@ -171,13 +171,31 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> SchemaBuilder<I, C, Q, M> {
     }
 }
 
-/// A request-level failure: parse, validation, variables or unknown operation.
+/// A request-level failure: the step that failed and its errors.
 #[derive(Debug, Clone)]
-pub struct RequestErrors(pub Vec<GraphQLError>);
+pub struct RequestErrors {
+    pub kind: RequestErrorKind,
+    pub errors: Vec<GraphQLError>,
+}
 
 impl RequestErrors {
+    pub(crate) fn one(
+        kind: RequestErrorKind,
+        message: impl Into<String>,
+        locations: Vec<crate::error::Location>,
+    ) -> Self {
+        RequestErrors {
+            kind,
+            errors: vec![GraphQLError::request(message, locations)],
+        }
+    }
+
     pub fn into_payload(self) -> OwnedPayload {
-        OwnedPayload::encode(Payload::request_error(self.0))
+        OwnedPayload::encode(self.payload())
+    }
+
+    pub(crate) fn payload(self) -> Payload<'static> {
+        Payload::request_error(self.kind, self.errors)
     }
 }
 
@@ -186,6 +204,18 @@ pub struct Operation {
     pub document: Arc<Document>,
     pub operation_name: Option<String>,
     pub variables: serde_json::Value,
+}
+
+impl Operation {
+    /// Whether the operation to execute is a mutation; false when it cannot
+    /// be determined, which execution reports as a request error.
+    pub(crate) fn is_mutation(&self) -> bool {
+        self.document
+            .doc
+            .operations
+            .get(self.operation_name.as_deref())
+            .is_ok_and(|operation| operation.is_mutation())
+    }
 }
 
 /// A serialized payload owned by the caller.
@@ -250,15 +280,24 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
         if let Some(limit) = self.inner.token_limit {
             parser = parser.token_limit(limit);
         }
-        let doc = parser
-            .parse_executable(&self.inner.schema, source, "request.graphql")
-            .map_err(|e| RequestErrors(diagnostics_to_errors(&e.errors)))?;
-        let doc = doc
-            .validate(&self.inner.schema)
-            .map_err(|e| RequestErrors(diagnostics_to_errors(&e.errors)))?;
+        let ast = parser
+            .parse_ast(source, "request.graphql")
+            .map_err(|e| RequestErrors {
+                kind: RequestErrorKind::Parse,
+                errors: diagnostics_to_errors(&e.errors),
+            })?;
+        let doc = ast
+            .to_executable_validate(&self.inner.schema)
+            .map_err(|e| RequestErrors {
+                kind: RequestErrorKind::Validation,
+                errors: diagnostics_to_errors(&e.errors),
+            })?;
         let overlaps = crate::tree::overlapping_streams(&doc, &self.inner.schema);
         if !overlaps.is_empty() {
-            return Err(RequestErrors(overlaps));
+            return Err(RequestErrors {
+                kind: RequestErrorKind::Validation,
+                errors: overlaps,
+            });
         }
         Ok(Arc::new(Document { doc }))
     }
@@ -269,17 +308,19 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
             .operations
             .get(op.operation_name.as_deref())
             .map_err(|e| {
-                RequestErrors(vec![GraphQLError::request(
+                RequestErrors::one(
+                    RequestErrorKind::Operation,
                     e.message().to_string(),
                     Vec::new(),
-                )])
+                )
             })?
             .clone();
         if operation.is_subscription() {
-            return Err(RequestErrors(vec![GraphQLError::request(
+            return Err(RequestErrors::one(
+                RequestErrorKind::Operation,
                 "subscriptions are not supported",
                 Vec::new(),
-            )]));
+            ));
         }
         let variables: apollo_compiler::response::JsonMap = match &op.variables {
             serde_json::Value::Null => Default::default(),
@@ -293,10 +334,11 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
                 })
                 .collect(),
             _ => {
-                return Err(RequestErrors(vec![GraphQLError::request(
+                return Err(RequestErrors::one(
+                    RequestErrorKind::Malformed,
                     "variables must be an object",
                     Vec::new(),
-                )]));
+                ));
             }
         };
         let coerced = apollo_compiler::request::coerce_variable_values(
@@ -304,7 +346,10 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
             &operation,
             &variables,
         )
-        .map_err(|e| RequestErrors(vec![request_error_to_graphql(&e, &doc.sources)]))?;
+        .map_err(|e| RequestErrors {
+            kind: RequestErrorKind::Variables,
+            errors: vec![request_error_to_graphql(&e, &doc.sources)],
+        })?;
         // apollo accepts any value for a custom scalar: its codec runs here,
         // so an invalid variable is a request error and nothing executes.
         for variable in &operation.variables {
@@ -312,14 +357,19 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
                 continue;
             };
             check_scalars::<I>(&self.inner.schema, &variable.ty, value).map_err(|e| {
-                RequestErrors(vec![GraphQLError::request(
+                RequestErrors::one(
+                    RequestErrorKind::Variables,
                     format!("variable `${}` got an invalid value: {e}", variable.name),
                     span_location(variable.location(), doc),
-                )])
+                )
             })?;
         }
-        apollo_compiler::introspection::check_max_depth(doc, &operation)
-            .map_err(|e| RequestErrors(vec![request_error_to_graphql(&e, &doc.sources)]))?;
+        apollo_compiler::introspection::check_max_depth(doc, &operation).map_err(|e| {
+            RequestErrors {
+                kind: RequestErrorKind::Validation,
+                errors: vec![request_error_to_graphql(&e, &doc.sources)],
+            }
+        })?;
         Ok(Tree::new(
             self.inner.schema.clone(),
             op.document.clone(),
@@ -346,7 +396,10 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
             &tree.operation,
             &tree.variables,
         )
-        .map_err(|e| RequestErrors(vec![request_error_to_graphql(&e, &doc.sources)]))?;
+        .map_err(|e| RequestErrors {
+            kind: RequestErrorKind::Validation,
+            errors: vec![request_error_to_graphql(&e, &doc.sources)],
+        })?;
         let data = serde_json::to_value(response.data).unwrap_or(serde_json::Value::Null);
         Ok(Some(data))
     }
@@ -377,7 +430,7 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
                 Q::__walk(&mut walker, 0, &Leaf::default())
             }
         };
-        walk.map_err(|Abort(errors)| RequestErrors(errors))?;
+        walk.map_err(|Abort(kind, errors)| RequestErrors { kind, errors })?;
         table.usages = tree.usages.clone();
         table.compute_beneath();
         Ok((Arc::new(table), introspection, is_mutation))
@@ -450,7 +503,7 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
         pull(encode, move |mut outlet| async move {
             match schema.operation(request) {
                 Ok(op) => schema.run(roots, ctx, &op, options, &mut outlet).await,
-                Err(errors) => outlet.ship(Payload::request_error(errors.0)),
+                Err(errors) => outlet.ship(errors.payload()),
             }
         })
     }
@@ -495,7 +548,10 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
         }
     }
 
-    fn operation(&self, request: crate::http::Request) -> Result<Operation, RequestErrors> {
+    pub(crate) fn operation(
+        &self,
+        request: crate::http::Request,
+    ) -> Result<Operation, RequestErrors> {
         let crate::http::Request {
             query,
             operation_name,
@@ -503,10 +559,11 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
             ..
         } = request;
         let Some(query) = query else {
-            return Err(RequestErrors(vec![GraphQLError::request(
+            return Err(RequestErrors::one(
+                RequestErrorKind::Malformed,
                 "request has no query",
                 Vec::new(),
-            )]));
+            ));
         };
         Ok(Operation {
             document: self.parse(&query)?,
@@ -529,7 +586,7 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
         let (table, introspection, is_mutation) = match self.plan(op, &ctx, options) {
             Ok(planned) => planned,
             Err(errors) => {
-                outlet.ship(Payload::request_error(errors.0));
+                outlet.ship(errors.payload());
                 return;
             }
         };

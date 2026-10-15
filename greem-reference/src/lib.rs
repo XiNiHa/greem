@@ -36,7 +36,7 @@ where
             Ok(prepared) => prepared,
             Err(errors) => {
                 return ReferenceOutput {
-                    response: serde_json::json!({ "errors": errors.0 }),
+                    response: serde_json::json!({ "errors": errors.errors }),
                     calls: 0,
                 };
             }

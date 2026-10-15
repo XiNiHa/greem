@@ -20,7 +20,9 @@ mod value;
 pub mod __private;
 
 pub use context::{Context, DeliveryGroup, HintRegistry, Planning};
-pub use error::{Error, GraphQLError, InputError, Location, PathSegment, SchemaError};
+pub use error::{
+    Error, GraphQLError, InputError, Location, PathSegment, RequestErrorKind, SchemaError,
+};
 pub use exec::payload::{Payload, PayloadKind};
 pub use exec::state::{ErrorBehavior, ExecuteOptions, IncrementalDelivery};
 pub use resolver::{

@@ -1,20 +1,19 @@
 //! The walking skeleton's example server: schema compilation from `build.rs`,
 //! per-field resolvers (set-based and per-object sugar), lookbehind hints, and
-//! an axum handler that negotiates `multipart/mixed` for `@defer`/`@stream`
-//! and streams each payload as the execution ships it.
+//! an axum handler that hands each request to `greem::http::handle`, which
+//! streams `@defer`/`@stream` payloads as the execution ships them.
 
-use axum::body::Body;
+use axum::Router;
+use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
-use axum::{Json, Router};
-use futures::{StreamExt, future, stream};
+use axum::routing::any;
+use futures::{StreamExt, stream};
 use greem::{
-    Args, As, Context, Either, Error, ErrorBehavior, ExecuteOptions, IncrementalDelivery, Payload,
-    PayloadKind, Planning, Resolver, Roots, Streamed,
+    Args, As, Context, Either, Error, ErrorBehavior, ExecuteOptions, IncrementalDelivery, Planning,
+    Resolver, Roots, Streamed,
 };
-use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 
 mod schema {
@@ -335,83 +334,22 @@ pub fn build_schema() -> Schema {
 
 pub fn router(schema: Schema) -> Router {
     Router::new()
-        .route("/graphql", post(graphql))
+        .route("/graphql", any(graphql))
         .with_state(schema)
 }
 
-async fn graphql(
-    State(schema): State<Schema>,
-    headers: HeaderMap,
-    Json(request): Json<greem::http::Request>,
-) -> Response {
-    let accept = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok());
-    let incremental = if greem::http::accepts_multipart(accept) {
-        IncrementalDelivery::Enabled
-    } else {
-        IncrementalDelivery::Disabled
+async fn graphql(State(schema): State<Schema>, parts: Parts, body: Bytes) -> Response {
+    let roots = Roots {
+        query: QueryRoot,
+        mutation: MutationRoot,
     };
     let options = ExecuteOptions {
         error_behavior: ErrorBehavior::Propagate,
-        incremental,
+        incremental: IncrementalDelivery::Enabled,
     };
-    let mut payloads = Box::pin(schema.execute_request_stream(
-        Roots {
-            query: QueryRoot,
-            mutation: MutationRoot,
-        },
-        App::seeded(),
-        request,
-        options,
-        encode,
-    ));
-    let first = payloads
-        .next()
-        .await
-        .expect("an execution ships at least one payload");
-    if first.incremental {
-        let parts = stream::once(future::ready(first))
-            .chain(payloads)
-            .map(|payload| Ok::<_, Infallible>(payload.bytes));
-        return (
-            [(header::CONTENT_TYPE, greem::http::MULTIPART_CONTENT_TYPE)],
-            Body::from_stream(parts),
-        )
-            .into_response();
-    }
-    let status = if first.kind == PayloadKind::RequestError {
-        StatusCode::BAD_REQUEST
-    } else {
-        StatusCode::OK
-    };
-    (
-        status,
-        [(header::CONTENT_TYPE, "application/json")],
-        Body::from(first.bytes),
-    )
-        .into_response()
-}
-
-/// A payload encoded for the wire while the execution still borrows it: a
-/// multipart part when the response is incremental, otherwise the whole JSON
-/// body. The stream yields one only when polled, so a slow client holds the
-/// execution back instead of queueing payloads.
-struct Encoded {
-    incremental: bool,
-    kind: PayloadKind,
-    bytes: Vec<u8>,
-}
-
-fn encode(payload: Payload<'_>) -> Encoded {
-    let incremental = payload.has_next().is_some();
-    Encoded {
-        incremental,
-        kind: payload.kind(),
-        bytes: if incremental {
-            greem::http::multipart_part(&payload)
-        } else {
-            serde_json::to_vec(&payload).expect("serialize payload")
-        },
-    }
+    let request = greem::http::RequestParts::from_http(&parts, &body);
+    let response = greem::http::handle(&schema, roots, App::seeded(), request, options).await;
+    axum::http::Response::from(response).into_response()
 }
 
 #[tokio::main]
@@ -427,6 +365,8 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::{StatusCode, header};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
@@ -473,7 +413,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(content_type, "application/json");
+        assert_eq!(content_type, "application/json; charset=utf-8");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["data"]["users"][0]["posts"][1]["author"]["name"], "Ann");
         assert_eq!(
@@ -560,7 +500,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(content_type, "application/json");
+        assert_eq!(content_type, "application/json; charset=utf-8");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(v.get("hasNext").is_none(), "{v}");
         assert_eq!(
@@ -626,17 +566,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_errors_are_bad_requests() {
+    async fn validation_failures_are_unprocessable() {
         let router = router(build_schema());
-        let (status, _, body) = post(
+        let (status, content_type, body) = post(
             router,
-            "application/json",
+            "application/graphql-response+json, application/json;q=0.9",
             serde_json::json!({"query": "{ nope }"}),
         )
         .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            content_type,
+            "application/graphql-response+json; charset=utf-8"
+        );
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(v.get("data").is_none());
         assert!(v["errors"][0]["message"].as_str().unwrap().contains("nope"));
+    }
+
+    #[tokio::test]
+    async fn queries_also_arrive_over_get() {
+        let request =
+            axum::http::Request::get("/graphql?query=%7B+user(id%3A+%222%22)+%7B+name+%7D+%7D")
+                .header(header::ACCEPT, "application/graphql-response+json")
+                .body(Body::empty())
+                .unwrap();
+        let response = router(build_schema()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v, serde_json::json!({"data": {"user": {"name": "Bob"}}}));
+    }
+
+    #[tokio::test]
+    async fn queries_also_arrive_over_query() {
+        let request = axum::http::Request::builder()
+            .method("QUERY")
+            .uri("/graphql")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::ACCEPT, "application/graphql-response+json")
+            .body(Body::from(r#"{"query": "{ user(id: \"2\") { name } }"}"#))
+            .unwrap();
+        let response = router(build_schema()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v, serde_json::json!({"data": {"user": {"name": "Bob"}}}));
     }
 }

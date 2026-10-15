@@ -9,7 +9,7 @@ publish = false
 bench = false
 
 [features]
-http = ["dep:axum", "tokio/net", "tokio/rt-multi-thread", "tokio/macros"]
+http = ["dep:axum", "greem/http", "tokio/net", "tokio/rt-multi-thread", "tokio/macros"]
 
 [dependencies]
 greem = { workspace = true }

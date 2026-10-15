@@ -2,7 +2,7 @@
 //! `@skip`/`@include`/`@defer`/`@stream` applied, built per request before
 //! any resolver runs.
 
-use crate::error::{Error, GraphQLError, Location};
+use crate::error::{Error, GraphQLError, Location, RequestErrorKind};
 use crate::value::InputValue;
 use apollo_compiler::Node;
 use apollo_compiler::ast::{self, Type};
@@ -31,11 +31,15 @@ impl std::fmt::Debug for Document {
 
 /// A request-level failure that aborts before execution.
 #[derive(Debug)]
-pub struct Abort(pub(crate) Vec<GraphQLError>);
+pub struct Abort(pub(crate) RequestErrorKind, pub(crate) Vec<GraphQLError>);
 
 impl Abort {
-    pub(crate) fn one(message: impl Into<String>, locations: Vec<Location>) -> Self {
-        Abort(vec![GraphQLError::request(message, locations)])
+    pub(crate) fn one(
+        kind: RequestErrorKind,
+        message: impl Into<String>,
+        locations: Vec<Location>,
+    ) -> Self {
+        Abort(kind, vec![GraphQLError::request(message, locations)])
     }
 }
 
@@ -410,6 +414,7 @@ impl Tree {
             }
             if depth > self.max_depth {
                 return Err(Abort::one(
+                    RequestErrorKind::Validation,
                     format!(
                         "operation depth {depth} exceeds the maximum execution depth of {}",
                         self.max_depth
@@ -667,6 +672,7 @@ impl Tree {
             None => Ok(true),
             Some(InputValue::Bool(b)) => Ok(b),
             Some(InputValue::Null) => Err(Abort::one(
+                RequestErrorKind::Variables,
                 format!(
                     "Argument \"if\" of non-null type \"Boolean!\" must not be null on @{}",
                     directive.name

@@ -4,16 +4,14 @@
 
 use crate::app::{App, QueryRoot, Schema, build_schema};
 use crate::workload::{self, Workload};
-use axum::body::Body;
+use axum::Router;
+use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
-use axum::{Json, Router};
-use futures::{StreamExt, future, stream};
-use greem::{ExecuteOptions, IncrementalDelivery, Payload, PayloadKind, Roots};
+use axum::routing::any;
+use greem::{ExecuteOptions, IncrementalDelivery, Roots};
 use std::collections::HashMap;
-use std::convert::Infallible;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -33,7 +31,7 @@ pub fn router(dir: &Path) -> Router {
         apps,
     });
     Router::new()
-        .route("/graphql", post(graphql))
+        .route("/graphql", any(graphql))
         .with_state(server)
 }
 
@@ -54,79 +52,28 @@ pub async fn serve() {
         .expect("serve");
 }
 
-async fn graphql(
-    State(server): State<Arc<Server>>,
-    headers: HeaderMap,
-    Json(request): Json<greem::http::Request>,
-) -> Response {
-    let app = headers
+async fn graphql(State(server): State<Arc<Server>>, parts: Parts, body: Bytes) -> Response {
+    let app = parts
+        .headers
         .get(workload::HEADER)
         .and_then(|v| v.to_str().ok())
         .and_then(|name| server.apps.get(name))
         .cloned()
         .unwrap_or_default();
-    let accept = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok());
     let options = ExecuteOptions {
-        incremental: if greem::http::accepts_multipart(accept) {
-            IncrementalDelivery::Enabled
-        } else {
-            IncrementalDelivery::Disabled
-        },
+        incremental: IncrementalDelivery::Enabled,
         ..Default::default()
     };
-    let mut payloads = Box::pin(server.schema.execute_request_stream(
+    let request = greem::http::RequestParts::from_http(&parts, &body);
+    let response = greem::http::handle(
+        &server.schema,
         Roots::query(QueryRoot),
         app,
         request,
         options,
-        encode,
-    ));
-    let first = payloads
-        .next()
-        .await
-        .expect("an execution ships at least one payload");
-    if first.incremental {
-        let parts = stream::once(future::ready(first))
-            .chain(payloads)
-            .map(|payload| Ok::<_, Infallible>(payload.bytes));
-        return (
-            [(header::CONTENT_TYPE, greem::http::MULTIPART_CONTENT_TYPE)],
-            Body::from_stream(parts),
-        )
-            .into_response();
-    }
-    let status = if first.kind == PayloadKind::RequestError {
-        StatusCode::BAD_REQUEST
-    } else {
-        StatusCode::OK
-    };
-    (
-        status,
-        [(header::CONTENT_TYPE, "application/json")],
-        Body::from(first.bytes),
     )
-        .into_response()
-}
-
-/// A payload encoded while the execution still borrows it: a multipart part
-/// when the response is incremental, otherwise the whole JSON body.
-struct Encoded {
-    incremental: bool,
-    kind: PayloadKind,
-    bytes: Vec<u8>,
-}
-
-fn encode(payload: Payload<'_>) -> Encoded {
-    let incremental = payload.has_next().is_some();
-    Encoded {
-        incremental,
-        kind: payload.kind(),
-        bytes: if incremental {
-            greem::http::multipart_part(&payload)
-        } else {
-            serde_json::to_vec(&payload).expect("serialize payload")
-        },
-    }
+    .await;
+    axum::http::Response::from(response).into_response()
 }
 
 #[cfg(test)]
@@ -176,7 +123,7 @@ mod tests {
         let workload = Workload::load("wide");
         let (status, content_type, body) = post(&workload, "application/json").await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(content_type, "application/json");
+        assert_eq!(content_type, "application/json; charset=utf-8");
         let response: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(response, workload.oracle());
     }

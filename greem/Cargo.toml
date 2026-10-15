@@ -11,6 +11,7 @@ repository.workspace = true
 default = ["macros"]
 macros = ["dep:greem-macros"]
 reference-executor = []
+http = ["dep:http", "dep:http-body", "dep:bytes"]
 
 [dependencies]
 apollo-compiler.workspace = true
@@ -21,7 +22,11 @@ self_cell.workspace = true
 smallvec.workspace = true
 indexmap.workspace = true
 greem-macros = { workspace = true, optional = true }
+http = { version = "1", optional = true }
+http-body = { version = "1", optional = true }
+bytes = { version = "1", optional = true }
 
 [dev-dependencies]
 futures = { workspace = true, features = ["executor"] }
 greem-test-app = { workspace = true }
+http-body-util = "0.1"
