@@ -1,0 +1,62 @@
+name: HTTP audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: http-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  URL: http://127.0.0.1:8080/graphql
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: jdx/mise-action@v5
+      - run: pnpm install --frozen-lockfile
+      - run: cargo build -p greem-example-axum --locked
+
+      - name: Start the axum example
+        run: |
+          target/debug/greem-example-axum >"$RUNNER_TEMP/server.log" 2>&1 &
+          for _ in $(seq 30); do
+            if curl -sf -o /dev/null -H 'content-type: application/json' -d '{"query":"{ __typename }"}' "$URL"; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/server.log"
+          exit 1
+
+      - name: Audit
+        id: audit
+        run: |
+          mkdir -p "$RUNNER_TEMP/report"
+          node http-audit/audit.mjs "$URL" --report "$RUNNER_TEMP/report/report.md"
+
+      - name: Summarize
+        if: always() && steps.audit.outcome != 'skipped'
+        run: |
+          if [[ -f $RUNNER_TEMP/report/report.md ]]; then
+            cat "$RUNNER_TEMP/report/report.md" >>"$GITHUB_STEP_SUMMARY"
+          fi
+
+      # http-audit-comment.yml posts it: this run may be a fork's, whose token
+      # cannot comment.
+      - uses: actions/upload-artifact@v7
+        if: always() && github.event_name == 'pull_request' && steps.audit.outcome != 'skipped'
+        with:
+          name: http-audit-report
+          path: ${{ runner.temp }}/report/report.md
+          if-no-files-found: ignore

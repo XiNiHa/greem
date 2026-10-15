@@ -1,0 +1,52 @@
+name: HTTP audit comment
+
+# Comments http-audit.yml's report on its pull request, forks' included. This
+# runs from the default branch with a write token and never checks out the
+# pull request: the report is the only thing it takes from that run, and the
+# pull request comes from the event, not from the artifact.
+
+on:
+  workflow_run:
+    workflows: [HTTP audit]
+    types: [completed]
+
+permissions:
+  actions: read
+  pull-requests: write
+
+jobs:
+  comment:
+    if: github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion != 'cancelled'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        id: download
+        continue-on-error: true
+        with:
+          name: http-audit-report
+          path: report
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Create or update the comment
+        if: steps.download.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD: ${{ github.event.workflow_run.head_repository.owner.login }}:${{ github.event.workflow_run.head_branch }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          pr=$(gh api -X GET "repos/$GITHUB_REPOSITORY/pulls" -f state=open -f head="$HEAD" \
+            --jq "map(select(.head.sha == \"$SHA\")) | first | .number // empty")
+          if [[ -z $pr ]]; then
+            echo "no open pull request has $HEAD at $SHA"
+            exit 0
+          fi
+          marker='<!-- greem-http-audit -->'
+          body="$marker"$'\n'"$(head -c 60000 report/report.md)"
+          id=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$pr/comments" \
+            --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id" | head -n 1)
+          if [[ -n $id ]]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -f body="$body" >/dev/null
+          else
+            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$pr/comments" -f body="$body" >/dev/null
+          fi

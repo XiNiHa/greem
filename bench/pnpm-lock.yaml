@@ -6,7 +6,9 @@ settings:
 
 importers:
 
-  .:
+  .: {}
+
+  servers/graphql-js:
     dependencies:
       graphql:
         specifier: 17.0.2

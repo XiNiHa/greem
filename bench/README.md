@@ -13,4 +13,4 @@ The driver builds and starts each entry of `servers.toml` in turn, checks it aga
 
 - `greem`: `greem-bench`'s `serve` binary, over the same `App` the criterion bench measures.
 - `servers/async-graphql`: async-graphql behind `async-graphql-axum`.
-- `servers/graphql-js`: graphql-js 17 behind graphql-http on `node:http`; incremental requests, which graphql-http cannot serve, run its `experimentalExecuteIncrementally` with the multipart framing written there. Node 24 (pinned in the root `mise.toml`) via pnpm.
+- `servers/graphql-js`: graphql-js 17 behind graphql-http on `node:http`; incremental requests, which graphql-http cannot serve, run its `experimentalExecuteIncrementally` with the multipart framing written there. Node and pnpm are pinned in the root `mise.toml`; `bench/` is a pnpm workspace of its own, apart from the root's.

@@ -1,0 +1,6 @@
+{
+  "572B": "Response > Body has a legacy application/json client treated as one accepting application/graphql-response+json, so a document that does not parse is 400 (Response > Status Codes), not 200",
+  "FDE2": "The audit's document, { 8f31403dfe404bccbb0e835f2629c6a7 }, does not lex, so it is a parse failure: 400 under Response > Status Codes, and Response > Body gives a legacy application/json client the same code, not 200",
+  "7B9B": "Response > Body has a legacy application/json client treated as one accepting application/graphql-response+json, so a variable coercion failure is 422 (Response > Status Codes), not 200",
+  "86EE": "Response > Status Codes > Examples makes a variable coercion failure 422 (Unprocessable Content), not 400"
+}
