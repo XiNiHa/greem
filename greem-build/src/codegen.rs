@@ -879,8 +879,13 @@ impl Gen<'_> {
                 }
             })
             .collect();
+        let witnesses = members.iter().map(|member| {
+            let member = ident(member);
+            quote!(impl rt::Member<super::types::#member> for super::types::#tag {})
+        });
         quote! {
             impl rt::InnerKind for super::types::#tag { const OBJECTS: bool = true; }
+            #(#witnesses)*
             #(#arms)*
             impl<A, B, C> rt::Completes<::greem::Either<A, B>, C> for super::types::#tag
             where super::types::#tag: rt::Completes<A, C> + rt::Completes<B, C>, A: Send, B: Send, C: Send + Sync + 'static,
@@ -1241,6 +1246,34 @@ mod tests {
             "{code}"
         );
         assert!(code.contains("pub enum str"), "{code}");
+    }
+
+    #[test]
+    fn abstract_tags_witness_their_members_through_the_implements_chain() {
+        let code = generate_sdl(
+            "type Query { n: Node }\ninterface Node { id: ID! }\ninterface Resource implements Node { id: ID! }\ntype Post implements Node & Resource { id: ID! }\ntype User implements Node { id: ID! }\ntype Tag { id: ID! }\nunion Hit = Post | User",
+        )
+        .unwrap();
+        let flat: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+        let witnesses: Vec<&str> = flat
+            .match_indices("implrt::Member<")
+            .map(|(at, _)| {
+                let rest = &flat[at..];
+                &rest[..rest.find('}').unwrap() + 1]
+            })
+            .collect();
+        assert_eq!(
+            witnesses,
+            [
+                "implrt::Member<super::types::Post>forsuper::types::Node{}",
+                "implrt::Member<super::types::User>forsuper::types::Node{}",
+                "implrt::Member<super::types::Resource>forsuper::types::Node{}",
+                "implrt::Member<super::types::Post>forsuper::types::Resource{}",
+                "implrt::Member<super::types::Post>forsuper::types::Hit{}",
+                "implrt::Member<super::types::User>forsuper::types::Hit{}",
+            ],
+            "{code}"
+        );
     }
 
     #[test]

@@ -35,6 +35,12 @@ pub struct Post<'a> {
     author: &'a User,
 }
 
+#[derive(greem::Abstract)]
+pub enum Node {
+    User(User),
+    Post(Post<'static>),
+}
+
 pub fn users() -> Vec<User> {
     vec![
         User {
@@ -88,9 +94,11 @@ impl Resolver<schema::Query::user, App> for QueryRoot {
             .collect())
     }
 }
+// `Query.node` derives a member enum and `Query.search` composes member
+// wrappers by hand, so the tests over this app cover both.
 impl Resolver<schema::Query::node, App> for QueryRoot {
     type Output<'obj>
-        = Option<Either<As<schema::types::User, User>, As<schema::types::Post, Post<'static>>>>
+        = Option<Node>
     where
         Self: 'obj;
     async fn resolve<'obj, 'call>(
@@ -109,12 +117,12 @@ impl Resolver<schema::Query::node, App> for QueryRoot {
         Ok(parents
             .iter()
             .map(|_| match args.id.as_str() {
-                "1" => Some(Either::A(As::new(users().remove(0)))),
-                "p1" => Some(Either::B(As::new(Post {
+                "1" => Some(Node::User(users().remove(0))),
+                "p1" => Some(Node::Post(Post {
                     id: 10,
                     title: "Hello".into(),
                     author: &ANN,
-                }))),
+                })),
                 _ => None,
             })
             .collect())

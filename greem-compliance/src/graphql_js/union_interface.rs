@@ -4,7 +4,7 @@
 //! objects are indices into it; `people[0]` is the root value.
 
 use crate::harness::{Area, Harness, HasHarness};
-use greem::{Args, As, Context, Either, NoMutation, Roots, SchemaBuilder};
+use greem::{Args, Context, NoMutation, Roots, SchemaBuilder};
 
 pub mod schema {
     greem::include_schema!("graphql_js_union_interface.rs");
@@ -167,40 +167,60 @@ pub struct TypeB {
     pub name_b: &'static str,
 }
 
-use schema::types;
+#[derive(greem::Abstract)]
+#[greem(schema = crate::graphql_js::union_interface::schema, type = "Pet")]
+pub enum PetOut {
+    Dog(Dog),
+    Cat(Cat),
+}
 
-pub type PetOut = Either<As<types::Dog, Dog>, As<types::Cat, Cat>>;
-pub type NamedOut = Either<
-    As<types::Person, Person>,
-    Either<As<types::Dog, Dog>, Either<As<types::Cat, Cat>, As<types::Plant, Plant>>>,
->;
-pub type PetOrPlantOut =
-    Either<As<types::Plant, Plant>, Either<As<types::Dog, Dog>, As<types::Cat, Cat>>>;
-pub type SearchableOut = Either<As<types::TypeA, TypeA>, As<types::TypeB, TypeB>>;
+#[derive(greem::Abstract)]
+#[greem(schema = crate::graphql_js::union_interface::schema, type = "Named")]
+pub enum NamedOut {
+    Person(Person),
+    Dog(Dog),
+    Cat(Cat),
+    Plant(Plant),
+}
+
+#[derive(greem::Abstract)]
+#[greem(schema = crate::graphql_js::union_interface::schema, type = "PetOrPlantType")]
+pub enum PetOrPlantOut {
+    Plant(Plant),
+    Dog(Dog),
+    Cat(Cat),
+}
+
+#[derive(greem::Abstract)]
+#[greem(schema = crate::graphql_js::union_interface::schema, type = "Searchable")]
+pub enum SearchableOut {
+    TypeA(TypeA),
+    TypeB(TypeB),
+}
 
 impl Ref {
     fn pet(self) -> PetOut {
         match self {
-            Ref::Dog(i) => Either::A(As::new(Dog(i))),
-            Ref::Cat(i) => Either::B(As::new(Cat(i))),
+            Ref::Dog(i) => PetOut::Dog(Dog(i)),
+            Ref::Cat(i) => PetOut::Cat(Cat(i)),
             other => panic!("{other:?} is not a Pet"),
         }
     }
 
     fn named(self) -> NamedOut {
         match self {
-            Ref::Person(i) => Either::A(As::new(Person(i))),
-            Ref::Dog(i) => Either::B(Either::A(As::new(Dog(i)))),
-            Ref::Cat(i) => Either::B(Either::B(Either::A(As::new(Cat(i))))),
-            Ref::Plant(i) => Either::B(Either::B(Either::B(As::new(Plant(i))))),
+            Ref::Person(i) => NamedOut::Person(Person(i)),
+            Ref::Dog(i) => NamedOut::Dog(Dog(i)),
+            Ref::Cat(i) => NamedOut::Cat(Cat(i)),
+            Ref::Plant(i) => NamedOut::Plant(Plant(i)),
         }
     }
 
     fn pet_or_plant(self) -> PetOrPlantOut {
         match self {
-            Ref::Plant(i) => Either::A(As::new(Plant(i))),
-            Ref::Dog(i) => Either::B(Either::A(As::new(Dog(i)))),
-            Ref::Cat(i) => Either::B(Either::B(As::new(Cat(i)))),
+            Ref::Plant(i) => PetOrPlantOut::Plant(Plant(i)),
+            Ref::Dog(i) => PetOrPlantOut::Dog(Dog(i)),
+            Ref::Cat(i) => PetOrPlantOut::Cat(Cat(i)),
             other => panic!("{other:?} is not a PetOrPlantType"),
         }
     }
@@ -374,14 +394,14 @@ impl Person {
     ) -> Option<SearchableOut> {
         ctx.app().harness.trace("Person.search", 1).await;
         match args.id.as_deref() {
-            Some("a") => Some(Either::A(As::new(TypeA {
+            Some("a") => Some(SearchableOut::TypeA(TypeA {
                 id: "a",
                 name_a: "Object A",
-            }))),
-            Some("b") => Some(Either::B(As::new(TypeB {
+            })),
+            Some("b") => Some(SearchableOut::TypeB(TypeB {
                 id: "b",
                 name_b: "Object B",
-            }))),
+            })),
             _ => None,
         }
     }

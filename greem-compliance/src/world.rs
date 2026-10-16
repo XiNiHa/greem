@@ -3,10 +3,10 @@
 
 pub use crate::harness::Failure;
 use crate::harness::{Area, Harness, HasHarness};
-use crate::schema::{self, types};
+use crate::schema;
 use greem::{
-    Args, As, Context, DeliveryGroup, Either, Error, HintRegistry, Planning, Resolver, Roots,
-    SchemaBuilder, Streamed,
+    Args, Context, DeliveryGroup, Error, HintRegistry, Planning, Resolver, Roots, SchemaBuilder,
+    Streamed,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -132,6 +132,14 @@ impl Drop for Post {
     }
 }
 
+#[derive(greem::Abstract)]
+#[greem(type = "Node")]
+#[greem(type = "SearchResult")]
+pub enum Hit {
+    User(User),
+    Post(Post),
+}
+
 impl User {
     pub fn name(&self) -> String {
         format!("user{}", self.id)
@@ -238,7 +246,7 @@ resolver!(
     QueryRoot,
     schema::Query::node,
     "Query.node",
-    Option<Either<As<types::User, User>, As<types::Post, Post>>>,
+    Option<Hit>,
     |parents, args, ctx| {
         parents
             .iter()
@@ -250,7 +258,7 @@ resolver!(
     QueryRoot,
     schema::Query::nodes,
     "Query.nodes",
-    Vec<Option<Either<As<types::User, User>, As<types::Post, Post>>>>,
+    Vec<Option<Hit>>,
     |parents, args, ctx| {
         parents
             .iter()
@@ -262,7 +270,7 @@ resolver!(
     QueryRoot,
     schema::Query::search,
     "Query.search",
-    Vec<Either<As<types::User, User>, As<types::Post, Post>>>,
+    Vec<Hit>,
     |parents, args, ctx| {
         let world = ctx.app();
         parents
@@ -275,14 +283,14 @@ resolver!(
                         .as_deref()
                         .is_none_or(|t| User(u).name().contains(t))
                     {
-                        out.push(Either::A(As::new(User(u))));
+                        out.push(Hit::User(User(u)));
                     }
                     for p in 0..world.posts_per_user {
-                        out.push(Either::B(As::new(Post {
+                        out.push(Hit::Post(Post {
                             owner: u,
                             index: p,
                             tracked: false,
-                        })));
+                        }));
                     }
                 }
                 out
@@ -328,27 +336,24 @@ resolver!(
     |parents, args, _ctx| { parents.iter().map(|_| args.value.clone()).collect() }
 );
 
-fn node_for(
-    world: &World,
-    id: &str,
-) -> Option<Either<As<types::User, User>, As<types::Post, Post>>> {
+fn node_for(world: &World, id: &str) -> Option<Hit> {
     if let Some(rest) = id.strip_prefix("post:") {
         let mut parts = rest.split(':');
         let owner: u32 = parts.next()?.parse().ok()?;
         let index: u32 = parts.next()?.parse().ok()?;
         if owner < world.users && index < world.posts_per_user {
-            return Some(Either::B(As::new(Post {
+            return Some(Hit::Post(Post {
                 owner,
                 index,
                 tracked: false,
-            })));
+            }));
         }
         return None;
     }
     id.parse::<u32>()
         .ok()
         .filter(|&u| u < world.users)
-        .map(|u| Either::A(As::new(User(u))))
+        .map(|u| Hit::User(User(u)))
 }
 
 #[derive(Clone)]

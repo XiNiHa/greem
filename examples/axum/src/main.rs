@@ -1,7 +1,8 @@
 //! The walking skeleton's example server: schema compilation from `build.rs`,
-//! per-field resolvers (set-based and per-object sugar), lookbehind hints, and
-//! an axum handler that hands each request to `greem::http::handle`, which
-//! streams `@defer`/`@stream` payloads as the execution ships them.
+//! per-field resolvers (set-based and per-object sugar), a member enum at an
+//! interface position, lookbehind hints, and an axum handler that hands each
+//! request to `greem::http::handle`, which streams `@defer`/`@stream`
+//! payloads as the execution ships them.
 
 use axum::Router;
 use axum::body::Bytes;
@@ -11,16 +12,14 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use futures::{StreamExt, stream};
 use greem::{
-    Args, As, Context, Either, Error, ErrorBehavior, ExecuteOptions, IncrementalDelivery, Planning,
-    Resolver, Roots, Streamed,
+    Args, Context, Error, ErrorBehavior, ExecuteOptions, IncrementalDelivery, Planning, Resolver,
+    Roots, Streamed,
 };
 use std::sync::{Arc, Mutex};
 
 mod schema {
     greem::include_schema!();
 }
-
-use schema::types;
 
 /// The application context: the "database" plus a fetch log the tests read.
 /// Rows sit behind `Arc` the way a cache hands them out, and resolvers return
@@ -43,6 +42,13 @@ pub struct Post {
     id: u32,
     author: u32,
     title: String,
+}
+
+/// A member enum named after the interface it outputs, so `type` is implied.
+#[derive(greem::Abstract)]
+pub enum Node {
+    User(Arc<User>),
+    Post(Arc<Post>),
 }
 
 impl App {
@@ -146,7 +152,7 @@ impl Resolver<schema::Query::user, App> for QueryRoot {
 
 impl Resolver<schema::Query::node, App> for QueryRoot {
     type Output<'obj>
-        = Option<Either<As<types::User, Arc<User>>, As<types::Post, Arc<Post>>>>
+        = Option<Node>
     where
         Self: 'obj;
     async fn resolve<'obj, 'call>(
@@ -162,12 +168,12 @@ impl Resolver<schema::Query::node, App> for QueryRoot {
             .iter()
             .map(|_| {
                 if let Some(user) = app.users.iter().find(|u| u.id.to_string() == args.id) {
-                    return Some(Either::A(As::new(user.clone())));
+                    return Some(Node::User(user.clone()));
                 }
                 app.posts
                     .iter()
                     .find(|p| p.id.to_string() == args.id)
-                    .map(|p| Either::B(As::new(p.clone())))
+                    .map(|p| Node::Post(p.clone()))
             })
             .collect())
     }

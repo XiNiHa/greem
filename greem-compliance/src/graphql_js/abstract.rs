@@ -5,7 +5,7 @@
 //! an error raised while completing each pet.
 
 use crate::harness::{Area, Harness, HasHarness};
-use greem::{Args, As, Context, Either, Error, NoMutation, Roots, SchemaBuilder};
+use greem::{Args, Context, Error, NoMutation, Roots, SchemaBuilder};
 
 pub mod schema {
     greem::include_schema!("graphql_js_abstract.rs");
@@ -45,7 +45,10 @@ pub type Schema = schema::Schema<World, QueryRoot, NoMutation>;
 
 pub struct QueryRoot;
 
-#[derive(Clone, Debug)]
+/// A pet as upstream lists it, and as both abstract types complete it.
+#[derive(Clone, Debug, greem::Abstract)]
+#[greem(schema = crate::graphql_js::r#abstract::schema, type = "Pet")]
+#[greem(schema = crate::graphql_js::r#abstract::schema, type = "PetUnion")]
 pub enum Pet {
     Dog(Dog),
     Cat(Cat),
@@ -63,25 +66,14 @@ pub struct Cat {
     pub meows: bool,
 }
 
-pub type PetOut = Either<As<schema::types::Dog, Dog>, As<schema::types::Cat, Cat>>;
-
-impl Pet {
-    fn out(&self) -> PetOut {
-        match self {
-            Pet::Dog(dog) => Either::A(As::new(dog.clone())),
-            Pet::Cat(cat) => Either::B(As::new(cat.clone())),
-        }
-    }
-}
-
 impl World {
-    fn pets(&self) -> Option<Vec<Result<Option<PetOut>, Error>>> {
+    fn pets(&self) -> Option<Vec<Result<Option<Pet>, Error>>> {
         Some(
             self.pets
                 .iter()
                 .map(|pet| match self.pet_error {
                     Some(message) => Err(Error::new(message)),
-                    None => Ok(Some(pet.out())),
+                    None => Ok(Some(pet.clone())),
                 })
                 .collect(),
         )
@@ -94,7 +86,7 @@ impl QueryRoot {
         &self,
         _args: &Args<schema::Query::pets>,
         ctx: &Context<World>,
-    ) -> Option<Vec<Result<Option<PetOut>, Error>>> {
+    ) -> Option<Vec<Result<Option<Pet>, Error>>> {
         ctx.app().harness.trace("Query.pets", 1).await;
         ctx.app().pets()
     }
@@ -102,7 +94,7 @@ impl QueryRoot {
         &self,
         _args: &Args<schema::Query::unionPets>,
         ctx: &Context<World>,
-    ) -> Option<Vec<Result<Option<PetOut>, Error>>> {
+    ) -> Option<Vec<Result<Option<Pet>, Error>>> {
         ctx.app().harness.trace("Query.unionPets", 1).await;
         ctx.app().pets()
     }

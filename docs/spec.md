@@ -10,7 +10,7 @@ what codegen emits: build any consumer and open `target/debug/build/<crate>-*/ou
 - `cargo test -p greem --test runtime`
   - The runtime against `greem-test-app`'s generated module and hand-written resolvers: queries, nested lists, interfaces, unions, null propagation in all three error behaviors, serial mutations, introspection, variables, depth limit, `@defer`, `@stream`, and the pulled payload stream (no work ahead of the consumer, cancellation on drop).
 - `cargo test -p greem-macros`
-  - `#[greem::object]` per-object and set-based sugar, hints and plan routing.
+  - `#[greem::object]` per-object and set-based sugar, hints and plan routing; `#[derive(greem::Abstract)]` member enums, and a variant naming a non-member rejected at compile time.
 - `cargo test -p greem-reference`
   - The depth-first reference executor and its equivalence to the BFS on hand-picked queries.
 - `cargo test -p greem-compliance`
@@ -18,7 +18,7 @@ what codegen emits: build any consumer and open `target/debug/build/<crate>-*/ou
 - `cargo test -p greem --all-features --test http`
   - `greem::http::handle` over `greem-test-app`: GET, POST and QUERY, `Accept` negotiation, and the status codes and media types of the GraphQL-over-HTTP draft, through the `http` feature too.
 - `cargo test -p greem-example-axum`
-  - The axum example: `build.rs` codegen, hand-written and sugared resolvers, a lookbehind hint, JSON and `multipart/mixed` responses through `greem::http::handle`.
+  - The axum example: `build.rs` codegen, hand-written and sugared resolvers, a member enum, a lookbehind hint, JSON and `multipart/mixed` responses through `greem::http::handle`.
 - `cargo run -p greem-example-axum`
   - Serves GET, POST and QUERY `/graphql` on `127.0.0.1:8080`.
 - `node http-audit/audit.mjs [url]`
@@ -46,8 +46,8 @@ counterexample found so far.
   - Schema compilation from `build.rs`: SDL → generated module in `OUT_DIR`.
   - Entry points: `greem_build::compile`, `configure()` (`file_name`, `scalar`, `absent_aware`)
 - `greem-macros`
-  - Per-type resolver sugar, re-exported by `greem`.
-  - Entry points: `#[greem::object]`
+  - Per-type resolver sugar and member enums, re-exported by `greem`.
+  - Entry points: `#[greem::object]`, `#[derive(greem::Abstract)]`
 - `greem-reference`
   - Unpublished naive depth-first executor, the oracle.
   - Entry points: `greem_reference::execute`
@@ -95,7 +95,8 @@ impl Resolver<schema::User::posts, App> for User {
   single `List<Ty>` impl for all but owned `Arc<[T]>`, and `Result<X, Error>`
   wraps any list output, `Streamed` included.
 - Abstract positions: `As<types::User, T>` and `Either<A, B>`, one partition leaf
-  per arm; repeated arms are separate scopes.
+  per arm; repeated arms are separate scopes. A member enum
+  (`#[derive(greem::Abstract)]`, below) is the same with one leaf per variant.
 - An object fails as a whole only when returned as `Result<T, Error>`
   (forwarded through `&T`, `Box<T>` and `Arc<T>`). It is marked once, at its
   own position (a failed root is `data: null` with the error at the empty
@@ -123,6 +124,17 @@ one `Resolver` impl per method, under the method's own `#[cfg]`/`#[cfg_attr]`
 and `#[greem(plan = "field")]`, each generated hook under its
 hook method's own `#[cfg]`/`#[cfg_attr]`. See `examples/axum/src/main.rs`.
 
+`#[derive(greem::Abstract)]` on an enum whose variants each hold one member
+value (`enum Hit<'a> { User(&'a MyUser), Post(MyPost) }`) emits its owned and
+by-reference `Completes` impls for each `#[greem(schema = crate::schema, type = "SearchResult")]`
+target; the attribute repeats per abstract type, and `type` defaults to the
+enum's name when the enum has only one target. A variant names its member by its identifier or
+`#[greem(as = "User")]`, checked against codegen's `Member` witnesses
+(sub-interfaces included), and its payload is bounded by `Outputs<Member, C>`,
+so `&T` and `Result<T, Error>` payloads work. Variants are partition leaves in
+declaration order and repeated members stay separate scopes. The reference
+completion goes inside `greem::__private::reference!`, as codegen's does.
+
 ## What codegen emits
 
 `greem-build/src/codegen.rs`, one file per schema, formatted with prettyplease:
@@ -149,7 +161,8 @@ hook method's own `#[cfg]`/`#[cfg_attr]`. See `examples/axum/src/main.rs`.
   then a child scope), `start_fields` (the static per-field dispatch into
   `greem::__private::field`) and `reference`.
 - Per abstract type: `As` impls per member and sub-interface, `Either`,
-  `Result`.
+  `Result`, and a `Member` witness per member and sub-interface for
+  `#[derive(greem::Abstract)]` to check variants against.
 - Custom scalar codecs (`Codec::{Uuid, Json, String, I64}`; integers above
   `i64::MAX` travel as `Value::UInt`/`InputValue::UInt`, so `Json` keeps them) or the user's
   `impl Scalar for types::X`, whose `Value` is `Clone + Debug + Send + Sync`

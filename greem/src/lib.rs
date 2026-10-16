@@ -36,7 +36,7 @@ pub use tree::Document;
 pub use value::{Enum, FromInput, InputValue, Maybe, Scalar, Value, scalars};
 
 #[cfg(feature = "macros")]
-pub use greem_macros::object;
+pub use greem_macros::{Abstract, object};
 
 /// The greem-build version this runtime accepts generated code from.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");

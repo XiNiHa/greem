@@ -1,4 +1,7 @@
-//! Procedural macros for greem: `#[greem::object]` (per-type resolver sugar).
+//! Procedural macros for greem: `#[greem::object]` (per-type resolver sugar)
+//! and `#[derive(greem::Abstract)]` (member enums).
+
+mod member_enum;
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
@@ -18,29 +21,40 @@ struct ObjectArgs {
     context: Type,
 }
 
+/// Parses `key = value, ...`: `option` parses the value of each key it
+/// knows and returns `false` for any other, which is an error naming `what`.
+fn parse_options(
+    input: ParseStream,
+    what: &str,
+    mut option: impl FnMut(&str, ParseStream) -> Result<bool>,
+) -> Result<()> {
+    while !input.is_empty() {
+        let key = Ident::parse_any(input)?;
+        input.parse::<Token![=]>()?;
+        if !option(&key.to_string(), input)? {
+            return Err(Error::new(key.span(), format!("unknown {what} `{key}`")));
+        }
+        if !input.is_empty() {
+            input.parse::<Token![,]>()?;
+        }
+    }
+    Ok(())
+}
+
 impl Parse for ObjectArgs {
     fn parse(input: ParseStream) -> Result<Self> {
         let mut schema: Option<Path> = None;
         let mut type_name = None;
         let mut context: Option<Type> = None;
-        while !input.is_empty() {
-            let key = Ident::parse_any(input)?;
-            input.parse::<Token![=]>()?;
-            match key.to_string().as_str() {
+        parse_options(input, "`greem::object` option", |key, input| {
+            match key {
                 "schema" => schema = Some(input.parse()?),
                 "type" => type_name = Some(input.parse::<LitStr>()?.value()),
                 "context" => context = Some(input.parse()?),
-                other => {
-                    return Err(Error::new(
-                        key.span(),
-                        format!("unknown `greem::object` option `{other}`"),
-                    ));
-                }
+                _ => return Ok(false),
             }
-            if !input.is_empty() {
-                input.parse::<Token![,]>()?;
-            }
-        }
+            Ok(true)
+        })?;
         Ok(ObjectArgs {
             schema: schema.unwrap_or_else(|| syn::parse_quote!(crate::schema)),
             type_name,
@@ -55,6 +69,47 @@ pub fn object(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = syn::parse_macro_input!(attr as ObjectArgs);
     let item = syn::parse_macro_input!(item as ItemImpl);
     match expand_object(args, item) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// Lets an enum output an abstract type: each variant holds one member's
+/// value and is its own partition leaf, in declaration order.
+///
+/// ```
+/// # use greem_test_app::schema;
+/// # struct MyUser;
+/// # struct MyPost;
+/// #[derive(greem::Abstract)]
+/// #[greem(type = "SearchResult")]
+/// enum Hit<'a> {
+///     User(&'a MyUser),
+///     #[greem(as = "Post")]
+///     Article(&'a MyPost),
+/// }
+/// # fn main() {}
+/// ```
+///
+/// Every variant must name a member of every target:
+///
+/// ```compile_fail,E0277
+/// # use greem_test_app::schema;
+/// # struct MyUser;
+/// # struct MyPost;
+/// #[derive(greem::Abstract)]
+/// #[greem(type = "SearchResult")]
+/// enum Hit<'a> {
+///     User(&'a MyUser),
+///     #[greem(as = "Query")] // `Query` is not a member of `SearchResult`
+///     Article(&'a MyPost),
+/// }
+/// # fn main() {}
+/// ```
+#[proc_macro_derive(Abstract, attributes(greem))]
+pub fn derive_abstract(item: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(item as syn::DeriveInput);
+    match member_enum::expand(input) {
         Ok(tokens) => tokens.into(),
         Err(error) => error.to_compile_error().into(),
     }

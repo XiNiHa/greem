@@ -2,9 +2,9 @@
 //! every value a function of indices, fetch fields set-based and paying
 //! their declared latency once per call, leaves through the per-object sugar.
 
-use crate::schema::{self, types};
+use crate::schema;
 use futures::StreamExt;
-use greem::{Args, As, Context, Either, Error, Streamed};
+use greem::{Args, Context, Error, Streamed};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,6 +40,13 @@ pub struct Post {
     pub index: u32,
 }
 
+#[derive(greem::Abstract)]
+#[greem(type = "SearchResult")]
+pub enum Hit {
+    User(User),
+    Post(Post),
+}
+
 const POSTS_PER_USER: u32 = 3;
 
 fn count(n: i32) -> u32 {
@@ -69,7 +76,7 @@ impl QueryRoot {
         parents: &[&Self],
         args: &Args<schema::Query::search>,
         ctx: &Context<App>,
-    ) -> Vec<Vec<Either<As<types::User, User>, As<types::Post, Post>>>> {
+    ) -> Vec<Vec<Hit>> {
         ctx.app().fetch("Query.search").await;
         let size = count(args.size);
         parents
@@ -78,9 +85,9 @@ impl QueryRoot {
                 (0..size)
                     .map(|j| {
                         if j.is_multiple_of(2) {
-                            Either::A(As::new(User { id: j }))
+                            Hit::User(User { id: j })
                         } else {
-                            Either::B(As::new(Post { owner: j, index: 0 }))
+                            Hit::Post(Post { owner: j, index: 0 })
                         }
                     })
                     .collect()

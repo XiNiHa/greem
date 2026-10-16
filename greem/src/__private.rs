@@ -40,6 +40,18 @@ pub static OBJECTS_ANNOUNCED: std::sync::atomic::AtomicUsize =
 pub static STREAM_PARENTS_VISITED: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+/// Membership witness: codegen implements it on an abstract type's tag once
+/// per member, sub-interfaces included, and `#[derive(greem::Abstract)]`
+/// asks for it once per variant.
+#[diagnostic::on_unimplemented(
+    message = "`{M}` is not a member of `{Self}`",
+    label = "not a member of this abstract type",
+    note = "a member enum's variants name the object types of a union, or the object types and interfaces that implement an interface"
+)]
+pub trait Member<M> {}
+
+pub const fn member<Abstract: Member<M>, M>() {}
+
 /// The per-field argument payload stored in a typed Plan entry.
 pub type FieldArgs<F> = Result<crate::resolver::Args<F>, crate::error::Error>;
 
