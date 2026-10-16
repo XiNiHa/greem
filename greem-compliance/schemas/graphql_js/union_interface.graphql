@@ -1,4 +1,6 @@
-"""The area schema for graphql-js src/execution/__tests__/union-interface-test.ts."""
+"""
+The area schema for graphql-js src/execution/__tests__/union-interface-test.ts.
+"""
 schema {
   query: Person
 }
@@ -33,7 +35,9 @@ type Cat implements Mammal & Life & Named {
   father: Cat
 }
 
-"""The root type, as upstream's `new GraphQLSchema({ query: PersonType })`."""
+"""
+The root type, as upstream's `new GraphQLSchema({ query: PersonType })`.
+"""
 type Person implements Named & Mammal & Life {
   name: String
   pets: [Pet]
@@ -42,7 +46,9 @@ type Person implements Named & Mammal & Life {
   progeny: [Person]
   mother: Person
   father: Person
-  """From `schemaWithSearchable`: 'handles promises from isTypeOf correctly when a later type matches synchronously'."""
+  """
+  From `schemaWithSearchable`: 'handles promises from isTypeOf correctly when a later type matches synchronously'.
+  """
   search(id: String): Searchable
 }
 

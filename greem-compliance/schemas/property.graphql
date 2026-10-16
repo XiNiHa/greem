@@ -1,4 +1,6 @@
-"""The property schema: richer than the axum example, walked by the generators."""
+"""
+The property schema: richer than the axum example, walked by the generators.
+"""
 scalar UUID
 scalar JSON
 
@@ -25,42 +27,70 @@ type Query {
   matrix: [[Int]!]
   echo(input: UserPatch!): UserPatchOut!
   json(value: JSON): JSON
-  """The length of the `not` chain: exercises a recursive input object."""
+  """
+  The length of the `not` chain: exercises a recursive input object.
+  """
   nest(filter: Filter!): Int!
-  """1, 2, 3 as a lazy stream; item `fail` (0-based) is an error."""
+  """
+  1, 2, 3 as a lazy stream; item `fail` (0-based) is an error.
+  """
   numbers(fail: Int): [Int]!
-  """`count` lazy items, every one an error, for memory evidence."""
+  """
+  `count` lazy items, every one an error, for memory evidence.
+  """
   noisy(count: Int!): [Int]!
-  """An error item, then a source that never yields again."""
+  """
+  An error item, then a source that never yields again.
+  """
   stuck: [Int!]!
-  """NaN, which Float cannot represent, then a source that never yields again."""
+  """
+  NaN, which Float cannot represent, then a source that never yields again.
+  """
   floats: [Float]!
-  """The same source at a non-null item type."""
+  """
+  The same source at a non-null item type.
+  """
   strictFloats: [Float!]!
-  """Every user, as a nullable list of non-null items."""
+  """
+  Every user, as a nullable list of non-null items.
+  """
   team: [User!]
-  """`value`, or JSON null, at a non-null custom scalar."""
+  """
+  `value`, or JSON null, at a non-null custom scalar.
+  """
   strictJson(value: JSON): JSON!
-  """JSON null, then a source that never yields again."""
+  """
+  JSON null, then a source that never yields again.
+  """
   jsons: [JSON]!
-  """The same source at a non-null item type."""
+  """
+  The same source at a non-null item type.
+  """
   strictJsons: [JSON!]!
-  """The number of items in the bag."""
+  """
+  The number of items in the bag.
+  """
   count(bag: Bag!): Int!
 }
 
-"""Non-null lists with defaults: a nullable variable may fill them, an explicit null may not."""
+"""
+Non-null lists with defaults: a nullable variable may fill them, an explicit null may not.
+"""
 input Bag {
   values: [Int]! = []
   blobs: [JSON]! = []
 }
 
-"""An enum named like the primitive; here only to compile."""
+"""
+An enum named like the primitive; here only to compile.
+"""
 enum str {
   a
 }
 
-"""Values named like the enum helpers; here only to compile."""
+"""
+Values named like the enum helpers; here only to compile.
+"""
 enum Helpers {
   VALUES
   name
@@ -68,7 +98,9 @@ enum Helpers {
   gen
 }
 
-"""Legal names that collide with generated items; here only to compile."""
+"""
+Legal names that collide with generated items; here only to compile.
+"""
 type Schema {
   a: Int
 }
@@ -85,7 +117,9 @@ type Schema_ {
   a: Int
 }
 
-"""Fields and types named after std items; here only to compile."""
+"""
+Fields and types named after std items; here only to compile.
+"""
 type Shadows {
   str: String
   Result(x: Int): Int
@@ -112,7 +146,9 @@ type User implements Node {
   name: String!
   email: String
   role: Role!
-  """Reports whether `Query.users` saw this selection under a deferred fragment."""
+  """
+  Reports whether `Query.users` saw this selection under a deferred fragment.
+  """
   tag: String!
   posts(first: Int = 10): [Post!]!
   drafts: [Post!]!
@@ -152,7 +188,9 @@ type Mutation {
   rename(id: ID!, name: String!): User
   patch(id: ID!, patch: UserPatch!): User
   fail: String!
-  """Echoes `id`: a custom scalar argument behind a side effect."""
+  """
+  Echoes `id`: a custom scalar argument behind a side effect.
+  """
   stamp(id: UUID!, tags: [UUID!], extra: StampInput): UUID!
 }
 

@@ -17,9 +17,9 @@ The suites under `greem-compliance/tests/graphql_js` mirror graphql-js's executi
 
 1. Set the pin to the target tag.
 2. For every suite whose upstream file changed: port each added case at its upstream position, re-derive each changed case, and remove each case upstream removed, so the audit at the target tag passes. Extend the suite's area schema only when a changed case needs a shape it lacks.
-3. For every upstream file added under the watched directories: decide by the criteria in `mod.rs` whether it makes document-level claims. If it does, add it as a new area, following `build.rs`, `src/lib.rs`, `mod.rs` and `main.rs`, with a header `//! graphql-js \`<upstream path>\`` on the first line of its test file. If not, add it to the exclusion list in `mod.rs` with its reason.
+3. For every upstream file added under the watched directories: decide by the criteria in `mod.rs` whether it makes document-level claims. If it does, add it as a new area, following `build.rs`, `src/lib.rs`, `mod.rs` and `main.rs`, with a header ``//! graphql-js `<upstream path>` `` on the first line of its test file. If not, add it to the exclusion list in `mod.rs` with its reason.
 4. For every upstream file removed: remove nothing, report it.
-5. Run `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test -p greem-compliance --test graphql_js` and `graphql-js-sync.sh audit <tag>`.
+5. Run `cargo fmt --all`, `pnpm oxfmt`, `cargo clippy --workspace --all-targets`, `cargo test -p greem-compliance --test graphql_js` and `graphql-js-sync.sh audit <tag>`.
 6. Commit everything as one commit, `sync graphql-js <tag>`, with the `Co-Authored-By` trailer Claude Code gives the running model, push the branch, and open a draft pull request with the same title against the base branch, labelled `ready-for-human`.
 
 When `diff.md` shows no change to any watched file and no file added or removed, stop: say so in the run output and open nothing.

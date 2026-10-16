@@ -1,4 +1,6 @@
-"""The area schema for graphql-js src/execution/incremental/__tests__/stream-test.ts."""
+"""
+The area schema for graphql-js src/execution/incremental/__tests__/stream-test.ts.
+"""
 type Query {
   scalarList: [String]
   scalarListList: [[String]]

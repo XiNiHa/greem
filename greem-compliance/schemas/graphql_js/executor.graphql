@@ -1,4 +1,6 @@
-"""The area schema for graphql-js src/execution/__tests__/executor-test.ts."""
+"""
+The area schema for graphql-js src/execution/__tests__/executor-test.ts.
+"""
 type Query implements DataType & Type {
   a: String
   b: String
@@ -8,12 +10,18 @@ type Query implements DataType & Type {
   f: String
   pic(size: Int): String
   deep: DeepDataType
-  """`DataType.promise`: the root again, after one yield."""
+  """
+  `DataType.promise`: the root again, after one yield.
+  """
   promise: DataType
   deepType: Type
-  """'does not include arguments that were not set': echoes the arguments that were set."""
+  """
+  'does not include arguments that were not set': echoes the arguments that were set.
+  """
   field(a: Boolean, b: Boolean, c: Boolean, d: Int, e: Int): String
-  """'nulls out error subtrees'; `asyncError` also fails 'handles async bubbling errors combined with non-bubbling errors'."""
+  """
+  'nulls out error subtrees'; `asyncError` also fails 'handles async bubbling errors combined with non-bubbling errors'.
+  """
   sync: String
   syncError: String
   syncRawError: String
@@ -28,15 +36,25 @@ type Query implements DataType & Type {
   asyncRawError: String
   asyncReturnError: String
   asyncReturnErrorWithExtensions: String
-  """'nulls error subtree for promise rejection #1071': fails after one yield."""
+  """
+  'nulls error subtree for promise rejection #1071': fails after one yield.
+  """
   foods: [Food]
-  """'handles async bubbling errors combined with non-bubbling errors': fails after one yield."""
+  """
+  'handles async bubbling errors combined with non-bubbling errors': fails after one yield.
+  """
   asyncNonNullError: String!
-  """'Full response path is included for non-nullable fields'."""
+  """
+  'Full response path is included for non-nullable fields'.
+  """
   nullableA: A
-  """`a: SomeType` of 'ignores missing sub selections on fields'; suffixed since `a` is a String."""
+  """
+  `a: SomeType` of 'ignores missing sub selections on fields'; suffixed since `a` is a String.
+  """
   aObject: SomeType
-  """'executes ignoring invalid non-executable definitions'."""
+  """
+  'executes ignoring invalid non-executable definitions'.
+  """
   foo: String
 }
 
@@ -75,7 +93,9 @@ interface Type {
   c: String
   d: String
   e: String
-  """`Type.deep` of 'merges parallel fragments'; suffixed since `DataType.deep` has another type."""
+  """
+  `Type.deep` of 'merges parallel fragments'; suffixed since `DataType.deep` has another type.
+  """
   deepType: Type
 }
 
@@ -94,11 +114,15 @@ type SomeType {
 }
 
 type Mutation {
-  """'uses the mutation schema for mutations'."""
+  """
+  'uses the mutation schema for mutations'.
+  """
   c: String
 }
 
 type Subscription {
-  """'uses the query schema for queries' and 'uses the subscription schema for subscriptions'."""
+  """
+  'uses the query schema for queries' and 'uses the subscription schema for subscriptions'.
+  """
   a: String
 }

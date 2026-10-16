@@ -1,4 +1,6 @@
-"""The area schema for graphql-js src/execution/__tests__/directives-test.ts."""
+"""
+The area schema for graphql-js src/execution/__tests__/directives-test.ts.
+"""
 schema {
   query: TestType
 }
