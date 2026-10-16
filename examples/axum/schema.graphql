@@ -1,4 +1,6 @@
-"""A UUID served by the built-in codec."""
+"""
+A UUID served by the built-in codec.
+"""
 scalar UUID
 
 interface Node {

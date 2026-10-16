@@ -7,19 +7,28 @@ what codegen emits: build any consumer and open `target/debug/build/<crate>-*/ou
 
 ## What runs
 
-| Command | Proves |
-| --- | --- |
-| `cargo test -p greem --test runtime` | The runtime against `greem-test-app`'s generated module and hand-written resolvers: queries, nested lists, interfaces, unions, null propagation in all three error behaviors, serial mutations, introspection, variables, depth limit, `@defer`, `@stream`, and the pulled payload stream (no work ahead of the consumer, cancellation on drop). |
-| `cargo test -p greem-macros` | `#[greem::object]` per-object and set-based sugar, hints and plan routing. |
-| `cargo test -p greem-reference` | The depth-first reference executor and its equivalence to the BFS on hand-picked queries. |
-| `cargo test -p greem-compliance` | Generated code compiled from `schemas/property.graphql` and one area schema per ported graphql-js suite through `build.rs`; property-based BFS≡DFS over generated documents, worlds and interleavings; the incremental fold property; breadth-first call counts; determinism; hand-written spec cases; the graphql-js execution suites one-to-one under `tests/graphql_js`; depth, cancellation and panic evidence on a 2 MiB stack; 1,000 stream turns and 1,000 mutation roots. |
-| `cargo test -p greem --all-features --test http` | `greem::http::handle` over `greem-test-app`: GET, POST and QUERY, `Accept` negotiation, and the status codes and media types of the GraphQL-over-HTTP draft, through the `http` feature too. |
-| `cargo test -p greem-example-axum` | The axum example: `build.rs` codegen, hand-written and sugared resolvers, a lookbehind hint, JSON and `multipart/mixed` responses through `greem::http::handle`. |
-| `cargo run -p greem-example-axum` | Serves GET, POST and QUERY `/graphql` on `127.0.0.1:8080`. |
-| `node http-audit/audit.mjs [url]` | graphql-http's GraphQL-over-HTTP server audits against a running server, the example by default (`pnpm install` first; Node and pnpm are pinned in `mise.toml`), gated with `http-audit/overrides.json` (ADR-0012). `.github/workflows/http-audit.yml` runs it against the example on every push and pull request, and `http-audit-comment.yml` posts the report on the pull request. |
-| `cargo test -p greem-bench --features http` | Every workload under `bench/workloads/` at its smallest size still produces its oracle, the merged response for an incremental workload (`GREEM_BENCH_BLESS=1` rewrites them); the merge itself; the `serve` binary's router over the bench `App`. |
-| `cd bench && cargo run --release -p greem-bench-driver` | The HTTP driver: builds and starts greem, async-graphql and graphql-js from `bench/servers.toml`, checks each against every workload's oracle, measures per concurrency level and writes the Markdown report and JSON results to `bench/results/`. Local only. |
-| `cargo bench -p greem-bench` | Criterion over every workload: `parse` once, then `execute`, `serialize` and `request` per size. `GREEM_BENCH_SIZES=smallest` is the CI shape, which `.github/workflows/bench.yml` runs under CodSpeed's CPU simulation for a diff report on every pull request. |
+- `cargo test -p greem --test runtime`
+  - The runtime against `greem-test-app`'s generated module and hand-written resolvers: queries, nested lists, interfaces, unions, null propagation in all three error behaviors, serial mutations, introspection, variables, depth limit, `@defer`, `@stream`, and the pulled payload stream (no work ahead of the consumer, cancellation on drop).
+- `cargo test -p greem-macros`
+  - `#[greem::object]` per-object and set-based sugar, hints and plan routing.
+- `cargo test -p greem-reference`
+  - The depth-first reference executor and its equivalence to the BFS on hand-picked queries.
+- `cargo test -p greem-compliance`
+  - Generated code compiled from `schemas/property.graphql` and one area schema per ported graphql-js suite through `build.rs`; property-based BFS≡DFS over generated documents, worlds and interleavings; the incremental fold property; breadth-first call counts; determinism; hand-written spec cases; the graphql-js execution suites one-to-one under `tests/graphql_js`; depth, cancellation and panic evidence on a 2 MiB stack; 1,000 stream turns and 1,000 mutation roots.
+- `cargo test -p greem --all-features --test http`
+  - `greem::http::handle` over `greem-test-app`: GET, POST and QUERY, `Accept` negotiation, and the status codes and media types of the GraphQL-over-HTTP draft, through the `http` feature too.
+- `cargo test -p greem-example-axum`
+  - The axum example: `build.rs` codegen, hand-written and sugared resolvers, a lookbehind hint, JSON and `multipart/mixed` responses through `greem::http::handle`.
+- `cargo run -p greem-example-axum`
+  - Serves GET, POST and QUERY `/graphql` on `127.0.0.1:8080`.
+- `node http-audit/audit.mjs [url]`
+  - graphql-http's GraphQL-over-HTTP server audits against a running server, the example by default (`pnpm install` first; Node and pnpm are pinned in `mise.toml`), gated with `http-audit/overrides.json` (ADR-0012). `.github/workflows/http-audit.yml` runs it against the example on every push and pull request, and `http-audit-comment.yml` posts the report on the pull request.
+- `cargo test -p greem-bench --features http`
+  - Every workload under `bench/workloads/` at its smallest size still produces its oracle, the merged response for an incremental workload (`GREEM_BENCH_BLESS=1` rewrites them); the merge itself; the `serve` binary's router over the bench `App`.
+- `cd bench && cargo run --release -p greem-bench-driver`
+  - The HTTP driver: builds and starts greem, async-graphql and graphql-js from `bench/servers.toml`, checks each against every workload's oracle, measures per concurrency level and writes the Markdown report and JSON results to `bench/results/`. Local only.
+- `cargo bench -p greem-bench`
+  - Criterion over every workload: `parse` once, then `execute`, `serialize` and `request` per size. `GREEM_BENCH_SIZES=smallest` is the CI shape, which `.github/workflows/bench.yml` runs under CodSpeed's CPU simulation for a diff report on every pull request.
 
 `PROPTEST_CASES=5000 cargo test -p greem-compliance --test properties` is the long
 run; the regression file under `greem-compliance/tests/` keeps every shrunk
@@ -27,17 +36,32 @@ counterexample found so far.
 
 ## Crates
 
-| Crate | Role | Entry points |
-| --- | --- | --- |
-| `greem` | Runtime: resolver contract, execution tree, plan table, breadth-first executor, incremental delivery, GraphQL over HTTP (`http` feature for the `http` crate's types). | `Resolver`, `Outputs`, `Schema`, `Context`, `greem::http::handle` |
-| `greem-core` | What `greem-build` and `greem-macros` share: the GraphQL-name-to-identifier mapping. | `greem_core::ident` |
-| `greem-build` | Schema compilation from `build.rs`: SDL → generated module in `OUT_DIR`. | `greem_build::compile`, `configure()` (`file_name`, `scalar`, `absent_aware`) |
-| `greem-macros` | Per-type resolver sugar, re-exported by `greem`. | `#[greem::object]` |
-| `greem-reference` | Unpublished naive depth-first executor, the oracle. | `greem_reference::execute` |
-| `greem-compliance` | Unpublished: the harness every world embeds, the property schema and world, the generators, one area per ported graphql-js suite, evidence tests. | |
-| `greem-test-app` | Unpublished: the module `greem-build` generates from its `schema.graphql`, and hand-written resolvers over it, shared by the runtime, macro and reference integration tests. | `schema`, `app::build_schema` |
-| `greem-bench` | Unpublished: the portable workloads (`bench/workloads/`: schema, `CONTRACT.md`, one directory per workload, shared with the HTTP driver and the foreign implementations under `bench/`), greem's implementation of their contract, the oracle test and the criterion consumer. | `workload::Workload`, `app::build_schema`, `run` |
-| `examples/axum` | The one framework example. | `router`, `build_schema` |
+- `greem`
+  - Runtime: resolver contract, execution tree, plan table, breadth-first executor, incremental delivery, GraphQL over HTTP (`http` feature for the `http` crate's types).
+  - Entry points: `Resolver`, `Outputs`, `Schema`, `Context`, `greem::http::handle`
+- `greem-core`
+  - What `greem-build` and `greem-macros` share: the GraphQL-name-to-identifier mapping.
+  - Entry points: `greem_core::ident`
+- `greem-build`
+  - Schema compilation from `build.rs`: SDL → generated module in `OUT_DIR`.
+  - Entry points: `greem_build::compile`, `configure()` (`file_name`, `scalar`, `absent_aware`)
+- `greem-macros`
+  - Per-type resolver sugar, re-exported by `greem`.
+  - Entry points: `#[greem::object]`
+- `greem-reference`
+  - Unpublished naive depth-first executor, the oracle.
+  - Entry points: `greem_reference::execute`
+- `greem-compliance`
+  - Unpublished: the harness every world embeds, the property schema and world, the generators, one area per ported graphql-js suite, evidence tests.
+- `greem-test-app`
+  - Unpublished: the module `greem-build` generates from its `schema.graphql`, and hand-written resolvers over it, shared by the runtime, macro and reference integration tests.
+  - Entry points: `schema`, `app::build_schema`
+- `greem-bench`
+  - Unpublished: the portable workloads (`bench/workloads/`: schema, `CONTRACT.md`, one directory per workload, shared with the HTTP driver and the foreign implementations under `bench/`), greem's implementation of their contract, the oracle test and the criterion consumer.
+  - Entry points: `workload::Workload`, `app::build_schema`, `run`
+- `examples/axum`
+  - The one framework example.
+  - Entry points: `router`, `build_schema`
 
 ## The contract a user writes against
 

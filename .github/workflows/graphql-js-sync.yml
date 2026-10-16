@@ -83,6 +83,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - uses: jdx/mise-action@v5
+      - run: pnpm install --frozen-lockfile
+
       - name: Check out the sync branch
         run: |
           if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null; then
@@ -112,7 +115,7 @@ jobs:
           claude_args: |
             --model claude-opus-5-5
             --max-turns 200
-            --allowedTools "Read,Edit,Write,Glob,Grep,Bash(cargo:*),Bash(git:*),Bash(gh pr:*),Bash(gh issue view:*),Bash(curl:*),Bash(greem-compliance/scripts/graphql-js-sync.sh:*)"
+            --allowedTools "Read,Edit,Write,Glob,Grep,Bash(cargo:*),Bash(pnpm oxfmt:*),Bash(git:*),Bash(gh pr:*),Bash(gh issue view:*),Bash(curl:*),Bash(greem-compliance/scripts/graphql-js-sync.sh:*)"
 
       - name: Mark older sync pull requests superseded
         env:

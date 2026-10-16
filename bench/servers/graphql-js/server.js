@@ -7,11 +7,11 @@
 // behind graphql-http's request parser, with the multipart framing written
 // here.
 
-import { createServer } from 'node:http';
-import { createHandler, parseRequestParams } from 'graphql-http/lib/use/http';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
-import { setTimeout as sleep } from 'node:timers/promises';
+import { createServer } from "node:http";
+import { createHandler, parseRequestParams } from "graphql-http/lib/use/http";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import {
   GraphQLDeferDirective,
   GraphQLError,
@@ -21,16 +21,15 @@ import {
   experimentalExecuteIncrementally,
   parse,
   validate,
-} from 'graphql';
+} from "graphql";
 
-const workloadsDir =
-  process.env.WORKLOADS ?? new URL('../../workloads', import.meta.url).pathname;
+const workloadsDir = process.env.WORKLOADS ?? new URL("../../workloads", import.meta.url).pathname;
 const port = Number(process.env.PORT ?? 4003);
 const POSTS_PER_USER = 3;
 
 // `buildSchema` leaves out `@defer` and `@stream`, which graphql-js 17 still
 // treats as opt-in, so they are added here.
-const built = buildSchema(readFileSync(join(workloadsDir, 'schema.graphql'), 'utf8'));
+const built = buildSchema(readFileSync(join(workloadsDir, "schema.graphql"), "utf8"));
 const schema = new GraphQLSchema({
   ...built.toConfig(),
   directives: [...built.getDirectives(), GraphQLDeferDirective, GraphQLStreamDirective],
@@ -41,13 +40,13 @@ const latencies = new Map(
   readdirSync(workloadsDir)
     .filter((name) => statSync(join(workloadsDir, name)).isDirectory())
     .map((name) => {
-      const manifest = JSON.parse(readFileSync(join(workloadsDir, name, 'workload.json'), 'utf8'));
+      const manifest = JSON.parse(readFileSync(join(workloadsDir, name, "workload.json"), "utf8"));
       return [name, manifest.latencyMs ?? {}];
     }),
 );
 
 function latencyFor(headers) {
-  return latencies.get(headers['x-workload']) ?? {};
+  return latencies.get(headers["x-workload"]) ?? {};
 }
 
 async function fetch(context, field) {
@@ -58,7 +57,7 @@ async function fetch(context, field) {
 // Derived fields are getters so only the selected ones are computed.
 function post(owner, index) {
   return {
-    __typename: 'Post',
+    __typename: "Post",
     get id() {
       return `${owner}-${index}`;
     },
@@ -77,7 +76,7 @@ function postsOf(owner) {
 
 function user(id) {
   return {
-    __typename: 'User',
+    __typename: "User",
     get id() {
       return String(id);
     },
@@ -88,15 +87,15 @@ function user(id) {
       return id % 2 === 0 ? `user${id}@example.com` : null;
     },
     async posts(_args, context) {
-      await fetch(context, 'User.posts');
+      await fetch(context, "User.posts");
       return postsOf(id);
     },
     async *drafts(_args, context) {
-      await fetch(context, 'User.drafts');
+      await fetch(context, "User.drafts");
       for (let index = 0; index < POSTS_PER_USER; index++) yield post(id, index);
     },
     async friends(_args, context) {
-      await fetch(context, 'User.friends');
+      await fetch(context, "User.friends");
       return [user(id + 1), user(id + 2)];
     },
   };
@@ -104,22 +103,24 @@ function user(id) {
 
 const rootValue = {
   async users({ first }, context) {
-    await fetch(context, 'Query.users');
+    await fetch(context, "Query.users");
     return Array.from({ length: Math.max(first, 0) }, (_, id) => user(id));
   },
   async search({ size }, context) {
-    await fetch(context, 'Query.search');
-    return Array.from({ length: Math.max(size, 0) }, (_, j) => (j % 2 === 0 ? user(j) : post(j, 0)));
+    await fetch(context, "Query.search");
+    return Array.from({ length: Math.max(size, 0) }, (_, j) =>
+      j % 2 === 0 ? user(j) : post(j, 0),
+    );
   },
   async matrix({ size }, context) {
-    await fetch(context, 'Query.matrix');
+    await fetch(context, "Query.matrix");
     return Array.from({ length: Math.max(size, 0) }, (_, i) =>
       Array.from({ length: i }, (_, j) => (j % 2 === 0 ? j : null)),
     );
   },
 };
 
-const BOUNDARY = '-';
+const BOUNDARY = "-";
 const MULTIPART = `multipart/mixed; boundary="${BOUNDARY}"; incrementalSpec=v0.2`;
 
 function part(payload) {
@@ -129,7 +130,7 @@ function part(payload) {
 }
 
 function json(res, status, body) {
-  res.writeHead(status, { 'content-type': 'application/json' });
+  res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(body));
 }
 
@@ -142,8 +143,8 @@ const single = createHandler({
   context: (req) => ({ latency: latencyFor(req.raw.headers) }),
   execute: async (args) => {
     const result = await experimentalExecuteIncrementally(args);
-    if ('initialResult' in result) {
-      return { errors: [new GraphQLError('incremental delivery needs Accept: multipart/mixed')] };
+    if ("initialResult" in result) {
+      return { errors: [new GraphQLError("incremental delivery needs Accept: multipart/mixed")] };
     }
     return result;
   },
@@ -168,19 +169,19 @@ async function incremental(req, res) {
     variableValues: params.variables,
     operationName: params.operationName,
   });
-  if (!('initialResult' in result)) return json(res, 200, result);
-  res.writeHead(200, { 'content-type': MULTIPART });
+  if (!("initialResult" in result)) return json(res, 200, result);
+  res.writeHead(200, { "content-type": MULTIPART });
   res.write(`\r\n--${BOUNDARY}\r\n${part(result.initialResult)}`);
   for await (const payload of result.subsequentResults) res.write(part(payload));
   res.end();
 }
 
 createServer((req, res) => {
-  const handle = (req.headers.accept ?? '').includes('multipart/mixed') ? incremental : single;
+  const handle = (req.headers.accept ?? "").includes("multipart/mixed") ? incremental : single;
   handle(req, res).catch((e) => {
     if (!res.headersSent) json(res, 500, { errors: [{ message: e.message }] });
     else res.end();
   });
-}).listen(port, '127.0.0.1', () => {
+}).listen(port, "127.0.0.1", () => {
   console.log(`graphql-js bench server listening on http://127.0.0.1:${port}/graphql`);
 });

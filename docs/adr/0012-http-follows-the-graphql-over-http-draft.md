@@ -1,6 +1,7 @@
 # `greem::http` follows the GraphQL-over-HTTP draft, not graphql-http's audits
 
 `greem::http::handle` sets status codes and media types the way the GraphQL-over-HTTP draft does (`spec/GraphQLOverHTTP.md` in graphql/graphql-over-http, as of September 2026):
+
 - 400 for a body or document that does not parse;
 - 422 for any other request error, and for parameters that are not well-formed;
 - 294 when `data` comes with `errors`;

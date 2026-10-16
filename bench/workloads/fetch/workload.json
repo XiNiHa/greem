@@ -1,7 +1,5 @@
 {
-  "sizes": [
-    1000
-  ],
+  "sizes": [1000],
   "latencyMs": {
     "Query.users": 10,
     "User.posts": 10

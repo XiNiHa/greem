@@ -1,4 +1,6 @@
-"""The area schema for graphql-js src/execution/__tests__/oneof-test.ts."""
+"""
+The area schema for graphql-js src/execution/__tests__/oneof-test.ts.
+"""
 type Query {
   test(input: TestInputObject!): TestObject
 }

@@ -1,7 +1,11 @@
-"""The area schema for graphql-js src/execution/__tests__/subscribe-test.ts."""
+"""
+The area schema for graphql-js src/execution/__tests__/subscribe-test.ts.
+"""
 type Query {
   inbox: Inbox
-  """The `DummyQueryType` of the Initialization Phase cases."""
+  """
+  The `DummyQueryType` of the Initialization Phase cases.
+  """
   dummy: String
 }
 
@@ -14,7 +18,9 @@ type Inbox {
 type Email {
   from: String
   subject: String
-  """`subject`, read after one yield."""
+  """
+  `subject`, read after one yield.
+  """
   asyncSubject: String
   message: String
   unread: Boolean
@@ -27,10 +33,16 @@ type EmailEvent {
 
 type Subscription {
   importantEmail(priority: Int): EmailEvent
-  """The Initialization Phase source; `arg` is for 'resolves to an error if variables were wrong type'."""
+  """
+  The Initialization Phase source; `arg` is for 'resolves to an error if variables were wrong type'.
+  """
   foo(arg: Int): String
-  """Declared but never subscribed: the multi-field cases."""
+  """
+  Declared but never subscribed: the multi-field cases.
+  """
   bar: String
-  """The message source of the last two Publish Phase cases."""
+  """
+  The message source of the last two Publish Phase cases.
+  """
   newMessage: String
 }

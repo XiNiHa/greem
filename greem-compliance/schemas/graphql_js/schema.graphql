@@ -1,4 +1,6 @@
-"""The area schema for graphql-js src/execution/__tests__/schema-test.ts."""
+"""
+The area schema for graphql-js src/execution/__tests__/schema-test.ts.
+"""
 type Query {
   article(id: ID): Article
   feed: [Article]

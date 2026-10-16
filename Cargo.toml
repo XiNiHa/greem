@@ -1,15 +1,15 @@
 [workspace]
 resolver = "3"
 members = [
-    "greem",
-    "greem-build",
-    "greem-macros",
-    "greem-core",
-    "greem-reference",
-    "greem-compliance",
-    "greem-test-app",
-    "examples/axum",
-    "greem-bench",
+  "greem",
+  "greem-build",
+  "greem-macros",
+  "greem-core",
+  "greem-reference",
+  "greem-compliance",
+  "greem-test-app",
+  "examples/axum",
+  "greem-bench",
 ]
 exclude = ["bench"]
 
