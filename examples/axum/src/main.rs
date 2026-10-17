@@ -562,7 +562,7 @@ mod tests {
                 greem::Operation {
                     document,
                     operation_name: None,
-                    variables: serde_json::Value::Null,
+                    variables: Default::default(),
                 },
                 ExecuteOptions::default(),
             )

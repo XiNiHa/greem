@@ -945,7 +945,7 @@ fn streamed_items_ship_in_list_order_per_parent() {
             greem::Operation {
                 document: document.clone(),
                 operation_name: None,
-                variables: Value::Null,
+                variables: Default::default(),
             },
             options,
         ))
@@ -1033,7 +1033,7 @@ fn reused_turn_slots_register_progress() {
         greem::Operation {
             document: document.clone(),
             operation_name: None,
-            variables: Value::Null,
+            variables: Default::default(),
         },
         incremental(),
     ));
@@ -1896,7 +1896,7 @@ fn depth_counts_composites_defer_and_stream() {
                 greem::Operation {
                     document: document.clone(),
                     operation_name: None,
-                    variables: Value::Null,
+                    variables: Default::default(),
                 },
                 incremental(),
             ));

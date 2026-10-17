@@ -31,7 +31,11 @@ fn run(
         Operation {
             document: document.clone(),
             operation_name: None,
-            variables,
+            variables: match variables {
+                Value::Null => Default::default(),
+                Value::Object(map) => map,
+                other => panic!("variables must be a map: {other}"),
+            },
         },
         options,
     ));
@@ -82,7 +86,7 @@ fn set_based_calls_once_per_generation() {
         Operation {
             document: document.clone(),
             operation_name: None,
-            variables: Value::Null,
+            variables: Default::default(),
         },
         ExecuteOptions::default(),
     ));
@@ -266,7 +270,7 @@ fn depth_limit() {
         Operation {
             document: document.clone(),
             operation_name: None,
-            variables: Value::Null,
+            variables: Default::default(),
         },
         ExecuteOptions::default(),
     ));
@@ -511,7 +515,7 @@ fn stream_lazy() {
         Operation {
             document: document.clone(),
             operation_name: None,
-            variables: Value::Null,
+            variables: Default::default(),
         },
         ExecuteOptions {
             incremental: IncrementalDelivery::Enabled,
@@ -541,7 +545,7 @@ fn stream_lazy() {
         Operation {
             document: document.clone(),
             operation_name: None,
-            variables: Value::Null,
+            variables: Default::default(),
         },
         ExecuteOptions::default(),
     ));
@@ -568,7 +572,7 @@ fn execution_waits_for_the_consumer_to_pull() {
         Operation {
             document,
             operation_name: None,
-            variables: Value::Null,
+            variables: Default::default(),
         },
         ExecuteOptions {
             incremental: IncrementalDelivery::Enabled,
@@ -607,7 +611,7 @@ fn dropping_the_stream_cancels_execution() {
         Operation {
             document,
             operation_name: None,
-            variables: Value::Null,
+            variables: Default::default(),
         },
         ExecuteOptions {
             incremental: IncrementalDelivery::Enabled,
@@ -699,7 +703,7 @@ fn owned_output_shapes() {
             Operation {
                 document: document.clone(),
                 operation_name: None,
-                variables: Value::Null,
+                variables: Default::default(),
             },
             options,
         ));
@@ -802,7 +806,7 @@ fn borrowed_output_shapes() {
         Operation {
             document: document.clone(),
             operation_name: None,
-            variables: Value::Null,
+            variables: Default::default(),
         },
         ExecuteOptions::default(),
     ));
@@ -933,7 +937,7 @@ fn borrowed_wrappers_complete_like_owned_ones() {
                 Operation {
                     document,
                     operation_name: None,
-                    variables: Value::Null,
+                    variables: Default::default(),
                 },
                 ExecuteOptions::default(),
             ));
@@ -1040,7 +1044,7 @@ fn owned_slices_complete_without_cloning() {
             Operation {
                 document: schema.parse(query).unwrap(),
                 operation_name: None,
-                variables: Value::Null,
+                variables: Default::default(),
             },
             options,
         ));
@@ -1139,7 +1143,7 @@ fn kept_rows_retire_with_their_stream_turn() {
         Operation {
             document: schema.parse("{ ints @stream }").unwrap(),
             operation_name: None,
-            variables: Value::Null,
+            variables: Default::default(),
         },
         ExecuteOptions {
             incremental: IncrementalDelivery::Enabled,
@@ -1219,7 +1223,7 @@ fn failed_root_is_reported_once_at_its_position() {
         Operation {
             document: document.clone(),
             operation_name: None,
-            variables: Value::Null,
+            variables: Default::default(),
         },
         ExecuteOptions::default(),
     ));

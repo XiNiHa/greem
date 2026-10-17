@@ -120,10 +120,10 @@ impl Workload {
     }
 
     /// The variables of one run: `$size` bound to `size` over `variables`.
-    pub fn variables_at(&self, size: u32) -> serde_json::Value {
+    pub fn variables_at(&self, size: u32) -> serde_json::Map<String, serde_json::Value> {
         let mut variables = self.variables.clone();
         variables.insert("size".into(), size.into());
-        serde_json::Value::Object(variables)
+        variables
     }
 
     pub fn oracle_path(&self) -> PathBuf {

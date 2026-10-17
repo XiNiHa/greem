@@ -23,29 +23,31 @@ use crate::resolver::Outputs;
 use crate::schema::{Roots, Schema, SchemaInfo};
 use futures::{StreamExt, future, stream};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 /// A GraphQL-over-HTTP request body.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Request {
-    #[serde(default)]
-    pub query: Option<String>,
+    pub query: String,
     #[serde(default, rename = "operationName")]
     pub operation_name: Option<String>,
     #[serde(default)]
-    pub variables: Option<serde_json::Value>,
+    pub variables: Option<Map<String, Value>>,
     #[serde(default)]
-    pub extensions: Option<serde_json::Value>,
+    pub extensions: Option<Map<String, Value>>,
 }
 
 impl Request {
     pub fn new(query: impl Into<String>) -> Self {
         Request {
-            query: Some(query.into()),
-            ..Default::default()
+            query: query.into(),
+            operation_name: None,
+            variables: None,
+            extensions: None,
         }
     }
 
-    pub fn with_variables(mut self, variables: serde_json::Value) -> Self {
+    pub fn with_variables(mut self, variables: Map<String, Value>) -> Self {
         self.variables = Some(variables);
         self
     }

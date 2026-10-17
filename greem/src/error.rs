@@ -153,8 +153,6 @@ impl GraphQLError {
 /// integration picks the status code from it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RequestErrorKind {
-    /// The request has no document, or its variables are not a map.
-    Malformed,
     /// The document does not parse, or exceeds a parser limit.
     Parse,
     /// The document fails validation or one of greem's own checks on it,

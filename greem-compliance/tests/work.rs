@@ -42,7 +42,7 @@ fn run(query: &str, users: u32, items_per_user: u32) -> Work {
                 Operation {
                     document,
                     operation_name: None,
-                    variables: Value::Null,
+                    variables: Default::default(),
                 },
                 ExecuteOptions {
                     incremental: IncrementalDelivery::Enabled,

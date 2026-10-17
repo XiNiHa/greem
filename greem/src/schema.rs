@@ -203,7 +203,7 @@ impl RequestErrors {
 pub struct Operation {
     pub document: Arc<Document>,
     pub operation_name: Option<String>,
-    pub variables: serde_json::Value,
+    pub variables: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Operation {
@@ -322,25 +322,16 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
                 Vec::new(),
             ));
         }
-        let variables: apollo_compiler::response::JsonMap = match &op.variables {
-            serde_json::Value::Null => Default::default(),
-            serde_json::Value::Object(map) => map
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        apollo_compiler::response::serde_json_bytes::ByteString::from(k.as_str()),
-                        apollo_compiler::response::JsonValue::from(v.clone()),
-                    )
-                })
-                .collect(),
-            _ => {
-                return Err(RequestErrors::one(
-                    RequestErrorKind::Malformed,
-                    "variables must be an object",
-                    Vec::new(),
-                ));
-            }
-        };
+        let variables: apollo_compiler::response::JsonMap = op
+            .variables
+            .iter()
+            .map(|(k, v)| {
+                (
+                    apollo_compiler::response::serde_json_bytes::ByteString::from(k.as_str()),
+                    apollo_compiler::response::JsonValue::from(v.clone()),
+                )
+            })
+            .collect();
         let coerced = apollo_compiler::request::coerce_variable_values(
             &self.inner.schema,
             &operation,
@@ -558,17 +549,10 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
             variables,
             ..
         } = request;
-        let Some(query) = query else {
-            return Err(RequestErrors::one(
-                RequestErrorKind::Malformed,
-                "request has no query",
-                Vec::new(),
-            ));
-        };
         Ok(Operation {
             document: self.parse(&query)?,
             operation_name,
-            variables: variables.unwrap_or(serde_json::Value::Null),
+            variables: variables.unwrap_or_default(),
         })
     }
 

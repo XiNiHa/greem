@@ -20,6 +20,11 @@ fn both(
     variables: Value,
     behavior: ErrorBehavior,
 ) -> (Value, Value, u64) {
+    let variables = match variables {
+        Value::Null => Default::default(),
+        Value::Object(map) => map,
+        other => panic!("variables must be a map: {other}"),
+    };
     let schema = build_schema();
     let document = schema.parse(query).unwrap_or_else(|e| panic!("{e:?}"));
     let output = block_on(schema.execute(
@@ -268,7 +273,7 @@ fn reference_calls_once_per_object() {
         Operation {
             document: document.clone(),
             operation_name: None,
-            variables: Value::Null,
+            variables: Default::default(),
         },
         ExecuteOptions::default(),
     ));
@@ -282,7 +287,7 @@ fn reference_calls_once_per_object() {
         Operation {
             document: document.clone(),
             operation_name: None,
-            variables: Value::Null,
+            variables: Default::default(),
         },
         ExecuteOptions::default(),
     ));

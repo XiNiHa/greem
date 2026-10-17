@@ -203,7 +203,7 @@ fn run(query: &str) -> (Value, Vec<String>) {
         Operation {
             document: document.clone(),
             operation_name: None,
-            variables: Value::Null,
+            variables: Default::default(),
         },
         ExecuteOptions::default(),
     ));
@@ -247,7 +247,7 @@ fn set_based_and_hints() {
                 Operation {
                     document: document.clone(),
                     operation_name: None,
-                    variables: Value::Null,
+                    variables: Default::default(),
                 },
                 ExecuteOptions::default(),
                 |payload| seen.push(serde_json::to_value(&payload).unwrap()),

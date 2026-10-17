@@ -62,7 +62,7 @@ fn run_deep(depth: u32, limit: u32, world: World) -> Value {
         Operation {
             document: document.clone(),
             operation_name: None,
-            variables: Value::Null,
+            variables: Default::default(),
         },
         ExecuteOptions::default(),
     ));
@@ -113,7 +113,7 @@ fn cancel_after(depth: u32, world: World, polls: usize) -> Vec<(&'static str, u3
             Operation {
                 document: document.clone(),
                 operation_name: None,
-                variables: Value::Null,
+                variables: Default::default(),
             },
             ExecuteOptions::default(),
         );
@@ -220,7 +220,7 @@ fn a_thousand_stream_turns_do_not_add_depth() {
                     Operation {
                         document: document.clone(),
                         operation_name: None,
-                        variables: Value::Null,
+                        variables: Default::default(),
                     },
                     ExecuteOptions {
                         incremental: IncrementalDelivery::Enabled,
@@ -284,7 +284,7 @@ fn a_thousand_streamed_errors_are_retired_with_their_turns() {
                     Operation {
                         document: document.clone(),
                         operation_name: None,
-                        variables: Value::Null,
+                        variables: Default::default(),
                     },
                     ExecuteOptions {
                         incremental: IncrementalDelivery::Enabled,
@@ -356,7 +356,7 @@ fn abandoned_nested_groups_are_reclaimed_after_parent_failure() {
                     Operation {
                         document: document.clone(),
                         operation_name: None,
-                        variables: Value::Null,
+                        variables: Default::default(),
                     },
                     ExecuteOptions {
                         incremental: IncrementalDelivery::Enabled,
@@ -405,7 +405,7 @@ fn a_thousand_mutation_roots_do_not_add_depth() {
             Operation {
                 document: document.clone(),
                 operation_name: None,
-                variables: Value::Null,
+                variables: Default::default(),
             },
             ExecuteOptions::default(),
         ));
@@ -444,7 +444,7 @@ fn reference_executor_runs_on_a_larger_stack() {
                 Operation {
                     document: document.clone(),
                     operation_name: None,
-                    variables: Value::Null,
+                    variables: Default::default(),
                 },
                 ExecuteOptions::default(),
             ))

@@ -301,7 +301,7 @@ fn run<Q: Outputs<schema::types::Query, App> + Send + Sync>(
         Operation {
             document,
             operation_name: None,
-            variables: Value::Null,
+            variables: Default::default(),
         },
         ExecuteOptions::default(),
     ));

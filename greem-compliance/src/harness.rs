@@ -7,7 +7,7 @@ use greem::__private::SchemaInfo;
 use greem::{
     ExecuteOptions, IncrementalDelivery, Operation, Outputs, Roots, Schema, SchemaBuilder,
 };
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -229,7 +229,7 @@ pub trait Area: HasHarness + Clone + Send + Sync + Sized + 'static {
             Operation {
                 document,
                 operation_name: operation_name.map(str::to_owned),
-                variables,
+                variables: variable_map(variables),
             },
             options,
         ));
@@ -256,7 +256,7 @@ pub trait Area: HasHarness + Clone + Send + Sync + Sized + 'static {
             Operation {
                 document,
                 operation_name: None,
-                variables: Value::Null,
+                variables: Default::default(),
             },
             options,
             |payload| serde_json::to_value(&payload).unwrap(),
@@ -353,11 +353,19 @@ pub trait Area: HasHarness + Clone + Send + Sync + Sized + 'static {
             Operation {
                 document,
                 operation_name: operation_name.map(str::to_owned),
-                variables,
+                variables: variable_map(variables),
             },
             options,
         ));
         (out.response, out.calls)
+    }
+}
+
+fn variable_map(variables: Value) -> Map<String, Value> {
+    match variables {
+        Value::Null => Map::new(),
+        Value::Object(map) => map,
+        other => panic!("variables must be a map: {other}"),
     }
 }
 

@@ -156,17 +156,17 @@ fn well_formed(mut params: Map<String, Value>) -> Result<Request, String> {
         Some(_) => return Err("operationName must be a string".into()),
     };
     Ok(Request {
-        query: Some(query),
+        query,
         operation_name,
         variables: map_param(params.remove("variables"), "variables")?,
         extensions: map_param(params.remove("extensions"), "extensions")?,
     })
 }
 
-fn map_param(value: Option<Value>, name: &str) -> Result<Option<Value>, String> {
+fn map_param(value: Option<Value>, name: &str) -> Result<Option<Map<String, Value>>, String> {
     match value {
         None | Some(Value::Null) => Ok(None),
-        Some(value @ Value::Object(_)) => Ok(Some(value)),
+        Some(Value::Object(map)) => Ok(Some(map)),
         Some(_) => Err(format!("{name} must be a map")),
     }
 }
@@ -190,12 +190,12 @@ mod tests {
         )
         .unwrap();
         let request = well_formed(params).unwrap();
-        assert_eq!(
-            request.query.as_deref(),
-            Some("query Q($id: ID!) { __typename }")
-        );
+        assert_eq!(request.query, "query Q($id: ID!) { __typename }");
         assert_eq!(request.operation_name.as_deref(), Some("Q"));
-        assert_eq!(request.variables, Some(serde_json::json!({"id": 1})));
+        assert_eq!(
+            request.variables.map(Value::Object),
+            Some(serde_json::json!({"id": 1}))
+        );
         assert_eq!(request.extensions, None);
     }
 
