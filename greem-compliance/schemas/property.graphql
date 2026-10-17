@@ -184,6 +184,18 @@ type UserPatchOut {
   role: Role!
 }
 
+type Subscription {
+  """
+  One event per entry of the world's event list: the user with that id, or
+  an error item for an entry that has none.
+  """
+  userEvents: User
+  """
+  As `userEvents`, at a non-null position: an error item nulls `data`.
+  """
+  postEvents: Post!
+}
+
 type Mutation {
   rename(id: ID!, name: String!): User
   patch(id: ID!, patch: UserPatch!): User

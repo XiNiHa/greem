@@ -5,7 +5,7 @@
 use futures::StreamExt;
 use futures::executor::block_on;
 use greem::{ExecuteOptions, IncrementalDelivery, Operation, Roots};
-use greem_compliance::world::{MutationRoot, QueryRoot, World};
+use greem_compliance::world::{MutationRoot, QueryRoot, SubscriptionRoot, World};
 use serde_json::Value;
 use std::sync::atomic::Ordering::Relaxed;
 
@@ -34,7 +34,9 @@ fn run(query: &str, users: u32, items_per_user: u32) -> Work {
     block_on(
         schema
             .execute_stream(
-                Roots::query(QueryRoot).with_mutation(MutationRoot),
+                Roots::query(QueryRoot)
+                    .with_mutation(MutationRoot)
+                    .with_subscription(SubscriptionRoot),
                 World::seeded(users, 3),
                 Operation::new(document),
                 ExecuteOptions {

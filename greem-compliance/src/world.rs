@@ -4,6 +4,7 @@
 pub use crate::harness::Failure;
 use crate::harness::{Area, Harness, HasHarness};
 use crate::schema;
+use futures::{Stream, StreamExt, stream};
 use greem::{
     Args, Context, DeliveryGroup, Error, HintRegistry, Planning, Resolver, Roots, SchemaBuilder,
     Streamed,
@@ -23,6 +24,9 @@ pub struct World {
     pub panic_after_stream_error: bool,
     /// `User.drafts` of this user is a stream that panics when polled.
     pub panic_drafts: Option<u32>,
+    /// The subscription event sources, pre-seeded: `Some(id)` is the user
+    /// (or post) with that id, `None` an error item.
+    pub events: Vec<Option<u32>>,
 }
 
 thread_local! {
@@ -43,16 +47,20 @@ impl Area for World {
     type Info = schema::__private::Info;
     type Query = QueryRoot;
     type Mutation = MutationRoot;
-    type Subscription = greem::NoSubscription;
+    type Subscription = SubscriptionRoot;
 
-    fn builder() -> SchemaBuilder<Self::Info, Self, Self::Query, Self::Mutation> {
+    fn builder() -> SchemaBuilder<Self::Info, Self, Self::Query, Self::Mutation, Self::Subscription>
+    {
         schema::Schema::<World>::builder()
             .query::<QueryRoot>()
             .mutation::<MutationRoot>()
+            .subscription::<SubscriptionRoot>()
     }
 
-    fn roots() -> Roots<QueryRoot, MutationRoot> {
-        Roots::query(QueryRoot).with_mutation(MutationRoot)
+    fn roots() -> Roots<QueryRoot, MutationRoot, SubscriptionRoot> {
+        Roots::query(QueryRoot)
+            .with_mutation(MutationRoot)
+            .with_subscription(SubscriptionRoot)
     }
 }
 
@@ -80,6 +88,48 @@ impl World {
 
 pub struct QueryRoot;
 pub struct MutationRoot;
+pub struct SubscriptionRoot;
+
+/// The event sources: the world's events in order, each traced as a call
+/// of the field so the interleaving paces them.
+#[greem::object(type = "Subscription", context = World)]
+impl SubscriptionRoot {
+    async fn user_events(
+        &self,
+        _args: &Args<schema::Subscription::userEvents>,
+        ctx: &Context<World>,
+    ) -> impl Stream<Item = Result<Option<User>, Error>> + Send {
+        let world = ctx.app();
+        world.harness.trace("Subscription.userEvents", 1).await;
+        stream::iter(world.events.clone()).then(move |event| async move {
+            world.harness.trace("Subscription.userEvents", 1).await;
+            match event {
+                Some(id) => Ok(Some(User(id))),
+                None => Err(Error::new("no such user event")),
+            }
+        })
+    }
+
+    async fn post_events(
+        &self,
+        _args: &Args<schema::Subscription::postEvents>,
+        ctx: &Context<World>,
+    ) -> impl Stream<Item = Result<Post, Error>> + Send {
+        let world = ctx.app();
+        world.harness.trace("Subscription.postEvents", 1).await;
+        stream::iter(world.events.clone()).then(move |event| async move {
+            world.harness.trace("Subscription.postEvents", 1).await;
+            match event {
+                Some(id) => Ok(Post {
+                    owner: id,
+                    index: id % 2,
+                    tracked: false,
+                }),
+                None => Err(Error::new("no such post event")),
+            }
+        })
+    }
+}
 
 pub struct User {
     pub id: u32,
@@ -891,12 +941,8 @@ resolver!(
     |parents, args, _ctx| { parents.iter().map(|_| args.id).collect() }
 );
 
-pub type Schema = schema::Schema<World, QueryRoot, MutationRoot>;
+pub type Schema = schema::Schema<World, QueryRoot, MutationRoot, SubscriptionRoot>;
 
 pub fn build_schema() -> Schema {
-    schema::Schema::<World>::builder()
-        .query::<QueryRoot>()
-        .mutation::<MutationRoot>()
-        .build()
-        .expect("property schema builds")
+    World::builder().build().expect("property schema builds")
 }

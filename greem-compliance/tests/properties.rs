@@ -6,7 +6,7 @@ mod common;
 
 use common::*;
 use greem::{ErrorBehavior, ExecuteOptions, IncrementalDelivery};
-use greem_compliance::harness::Harness;
+use greem_compliance::harness::{Area, Harness};
 use greem_compliance::world::{Failure, World};
 use proptest::prelude::*;
 use serde_json::{Value, json};
@@ -75,6 +75,11 @@ fn make_world(users: u32, posts: u32, failures: &BTreeSet<Failure>, yields: &[u3
     }
 }
 
+/// The world's subscription events: user (or post) ids, and error items.
+fn events() -> impl Strategy<Value = Vec<Option<u32>>> {
+    prop::collection::vec(prop::option::weighted(0.8, 0..3u32), 0..4)
+}
+
 fn variables(flag: bool) -> Value {
     json!({"flag": flag, "patch": {"name": "v", "email": null}})
 }
@@ -108,6 +113,57 @@ proptest! {
             let errors = halted["errors"].as_array().unwrap();
             prop_assert_eq!(errors.len(), 1);
             prop_assert!(null_errors.contains(&errors[0]), "halt error {} not among null-mode errors {:?}", errors[0], null_errors);
+        }
+    }
+
+    /// One response per event, each equal to the reference executor's,
+    /// whatever the interleaving; an error item is an error response.
+    #[test]
+    fn subscription_bfs_equals_dfs(doc in subscription(), (users, posts, failures) in world(), events in events(), yields in interleaving(), flag in any::<bool>(), behavior in prop::sample::select(vec![ErrorBehavior::Propagate, ErrorBehavior::Null])) {
+        let options = ExecuteOptions { default_error_behavior: behavior, ..Default::default() };
+        let world = World { events: events.clone(), ..make_world(users, posts, &failures, &yields) };
+        let (bfs, _) = run(world.clone(), &doc, variables(flag), options);
+        let (reference, _) = world.reference_responses(None, &doc, variables(flag), options);
+        if bfs.first().is_some_and(|first| first.get("data").is_none()) {
+            // A request error: the generator wrote an invalid document.
+            prop_assert_eq!(bfs.len(), 1, "doc: {}\nbfs: {:?}", doc, bfs);
+            prop_assert!(reference.len() == 1 && reference[0].get("data").is_none(), "doc: {}\nref: {:?}", doc, reference);
+            return Ok(());
+        }
+        prop_assert_eq!(bfs.len(), events.len(), "doc: {}\nbfs: {:?}", doc, bfs);
+        prop_assert_eq!(reference.len(), events.len(), "doc: {}\nref: {:?}", doc, reference);
+        for (event, (bfs, reference)) in bfs.iter().zip(&reference).enumerate() {
+            prop_assert_eq!(bfs.get("data"), reference.get("data"), "event {}\ndoc: {}\nbfs: {}\nref: {}", event, doc, bfs, reference);
+            prop_assert_eq!(sorted_errors(bfs), sorted_errors(reference), "event {}\ndoc: {}\nbfs: {}\nref: {}", event, doc, bfs, reference);
+        }
+    }
+
+    /// `HALT` ends an event's response, not the subscription: every event
+    /// still answers, and a halted one is `data: null` with one of the
+    /// errors null mode reports for it.
+    #[test]
+    fn subscription_halt_is_per_event(doc in subscription(), (users, posts, failures) in world(), events in events(), flag in any::<bool>()) {
+        let halt = ExecuteOptions { default_error_behavior: ErrorBehavior::Halt, ..Default::default() };
+        let null = ExecuteOptions { default_error_behavior: ErrorBehavior::Null, ..Default::default() };
+        let world = World { events: events.clone(), ..make_world(users, posts, &failures, &[]) };
+        let (halted, _) = run(world.clone(), &doc, variables(flag), halt);
+        let (nulled, _) = run(world, &doc, variables(flag), null);
+        if halted.first().is_some_and(|first| first.get("data").is_none()) {
+            prop_assert_eq!(&halted, &nulled); // request error
+            return Ok(());
+        }
+        prop_assert_eq!(halted.len(), events.len(), "doc: {}\nhalted: {:?}", doc, halted);
+        prop_assert_eq!(nulled.len(), events.len());
+        for (halted, nulled) in halted.iter().zip(&nulled) {
+            let null_errors = sorted_errors(nulled);
+            if null_errors.is_empty() {
+                prop_assert_eq!(halted, nulled);
+            } else {
+                prop_assert_eq!(halted["data"].clone(), Value::Null, "doc: {}\nhalted: {}\nnulled: {}", doc, halted, nulled);
+                let errors = halted["errors"].as_array().unwrap();
+                prop_assert_eq!(errors.len(), 1);
+                prop_assert!(null_errors.contains(&errors[0]), "halt error {} not among null-mode errors {:?}", errors[0], null_errors);
+            }
         }
     }
 
@@ -176,13 +232,13 @@ proptest! {
         let query = format!("{{ users {{ {query} }} }}");
         let schema = greem_compliance::schema::Schema::<World>::builder()
             .query::<greem_compliance::world::QueryRoot>()
-            .mutation::<greem_compliance::world::MutationRoot>()
+            .mutation::<greem_compliance::world::MutationRoot>().subscription::<greem_compliance::world::SubscriptionRoot>()
             .max_depth(limit)
             .build()
             .unwrap();
         let document = schema.parse(&query).unwrap();
         let output = futures::executor::block_on(schema.execute(
-            greem::Roots::query(greem_compliance::world::QueryRoot).with_mutation(greem_compliance::world::MutationRoot),
+            greem::Roots::query(greem_compliance::world::QueryRoot).with_mutation(greem_compliance::world::MutationRoot).with_subscription(greem_compliance::world::SubscriptionRoot),
             World::seeded(2, 0),
             greem::Operation::new(document.clone()),
             ExecuteOptions::default(),
@@ -190,7 +246,7 @@ proptest! {
         let response: Value = serde_json::from_slice(&output.payloads[0].json).unwrap();
         let reference = futures::executor::block_on(greem_reference::execute(
             &schema,
-            greem::Roots::query(greem_compliance::world::QueryRoot).with_mutation(greem_compliance::world::MutationRoot),
+            greem::Roots::query(greem_compliance::world::QueryRoot).with_mutation(greem_compliance::world::MutationRoot).with_subscription(greem_compliance::world::SubscriptionRoot),
             World::seeded(2, 0),
             greem::Operation::new(document.clone()),
             ExecuteOptions::default(),

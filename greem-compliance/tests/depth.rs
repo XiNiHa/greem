@@ -8,7 +8,7 @@ use futures::StreamExt;
 use futures::executor::block_on;
 use greem::{ExecuteOptions, IncrementalDelivery, Operation, Roots};
 use greem_compliance::harness::Harness;
-use greem_compliance::world::{MutationRoot, QueryRoot, World, take_drops};
+use greem_compliance::world::{MutationRoot, QueryRoot, SubscriptionRoot, World, take_drops};
 use serde_json::Value;
 use std::future::Future;
 use std::pin::pin;
@@ -38,6 +38,7 @@ fn schema_with_depth(limit: u32) -> greem_compliance::world::Schema {
     greem_compliance::schema::Schema::<World>::builder()
         .query::<QueryRoot>()
         .mutation::<MutationRoot>()
+        .subscription::<SubscriptionRoot>()
         .max_depth(limit)
         .build()
         .unwrap()
@@ -53,12 +54,16 @@ fn parse_deep(bytes: &[u8]) -> Value {
 fn run_deep(depth: u32, limit: u32, world: World) -> Value {
     let schema = schema_with_depth(limit);
     let document = schema.parse(&deep_query(depth)).unwrap();
-    let output = block_on(schema.execute(
-        Roots::query(QueryRoot).with_mutation(MutationRoot),
-        world,
-        Operation::new(document.clone()),
-        ExecuteOptions::default(),
-    ));
+    let output = block_on(
+        schema.execute(
+            Roots::query(QueryRoot)
+                .with_mutation(MutationRoot)
+                .with_subscription(SubscriptionRoot),
+            world,
+            Operation::new(document.clone()),
+            ExecuteOptions::default(),
+        ),
+    );
     parse_deep(&output.payloads[0].json)
 }
 
@@ -98,7 +103,9 @@ fn cancel_after(depth: u32, world: World, polls: usize) -> Vec<(&'static str, u3
     take_drops();
     {
         let future = schema.execute(
-            Roots::query(QueryRoot).with_mutation(MutationRoot),
+            Roots::query(QueryRoot)
+                .with_mutation(MutationRoot)
+                .with_subscription(SubscriptionRoot),
             world,
             Operation::new(document.clone()),
             ExecuteOptions::default(),
@@ -184,6 +191,7 @@ fn a_thousand_stream_turns_do_not_add_depth() {
         let schema = greem_compliance::schema::Schema::<World>::builder()
             .query::<QueryRoot>()
             .mutation::<MutationRoot>()
+            .subscription::<SubscriptionRoot>()
             .max_depth(64)
             .stream_capacity(1)
             .build()
@@ -198,7 +206,9 @@ fn a_thousand_stream_turns_do_not_add_depth() {
         block_on(
             schema
                 .execute_stream(
-                    Roots::query(QueryRoot).with_mutation(MutationRoot),
+                    Roots::query(QueryRoot)
+                        .with_mutation(MutationRoot)
+                        .with_subscription(SubscriptionRoot),
                     World::seeded(1, 1000),
                     Operation::new(document.clone()),
                     ExecuteOptions {
@@ -244,6 +254,7 @@ fn a_thousand_streamed_errors_are_retired_with_their_turns() {
         let schema = greem_compliance::schema::Schema::<World>::builder()
             .query::<QueryRoot>()
             .mutation::<MutationRoot>()
+            .subscription::<SubscriptionRoot>()
             .stream_capacity(1)
             .build()
             .unwrap();
@@ -255,7 +266,9 @@ fn a_thousand_streamed_errors_are_retired_with_their_turns() {
         block_on(
             schema
                 .execute_stream(
-                    Roots::query(QueryRoot).with_mutation(MutationRoot),
+                    Roots::query(QueryRoot)
+                        .with_mutation(MutationRoot)
+                        .with_subscription(SubscriptionRoot),
                     World::seeded(1, 0),
                     Operation::new(document.clone()),
                     ExecuteOptions {
@@ -296,6 +309,7 @@ fn abandoned_nested_groups_are_reclaimed_after_parent_failure() {
         let schema = greem_compliance::schema::Schema::<World>::builder()
             .query::<QueryRoot>()
             .mutation::<MutationRoot>()
+            .subscription::<SubscriptionRoot>()
             .stream_capacity(1)
             .build()
             .unwrap();
@@ -320,7 +334,9 @@ fn abandoned_nested_groups_are_reclaimed_after_parent_failure() {
         block_on(
             schema
                 .execute_stream(
-                    Roots::query(QueryRoot).with_mutation(MutationRoot),
+                    Roots::query(QueryRoot)
+                        .with_mutation(MutationRoot)
+                        .with_subscription(SubscriptionRoot),
                     world,
                     Operation::new(document.clone()),
                     ExecuteOptions {
@@ -361,12 +377,16 @@ fn a_thousand_mutation_roots_do_not_add_depth() {
             .collect();
         let query = format!("mutation {{ {} }}", roots.join(" "));
         let document = schema.parse(&query).unwrap();
-        let output = block_on(schema.execute(
-            Roots::query(QueryRoot).with_mutation(MutationRoot),
-            World::seeded(2, 0),
-            Operation::new(document.clone()),
-            ExecuteOptions::default(),
-        ));
+        let output = block_on(
+            schema.execute(
+                Roots::query(QueryRoot)
+                    .with_mutation(MutationRoot)
+                    .with_subscription(SubscriptionRoot),
+                World::seeded(2, 0),
+                Operation::new(document.clone()),
+                ExecuteOptions::default(),
+            ),
+        );
         let v = parse_deep(&output.payloads[0].json);
         assert!(v.get("errors").is_none());
         assert_eq!(v["data"].as_object().unwrap().len(), 1000);
@@ -394,7 +414,9 @@ fn reference_executor_runs_on_a_larger_stack() {
             let document = schema.parse(&deep_query(40)).unwrap();
             block_on(greem_reference::execute(
                 &schema,
-                Roots::query(QueryRoot).with_mutation(MutationRoot),
+                Roots::query(QueryRoot)
+                    .with_mutation(MutationRoot)
+                    .with_subscription(SubscriptionRoot),
                 World::seeded(2, 0),
                 Operation::new(document.clone()),
                 ExecuteOptions::default(),

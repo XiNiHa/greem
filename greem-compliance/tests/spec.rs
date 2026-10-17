@@ -929,6 +929,7 @@ fn streamed_items_ship_in_list_order_per_parent() {
     let schema = greem_compliance::schema::Schema::<World>::builder()
         .query::<greem_compliance::world::QueryRoot>()
         .mutation::<greem_compliance::world::MutationRoot>()
+        .subscription::<greem_compliance::world::SubscriptionRoot>()
         .stream_capacity(1)
         .build()
         .unwrap();
@@ -939,7 +940,8 @@ fn streamed_items_ship_in_list_order_per_parent() {
         futures::executor::block_on(
             schema.execute(
                 greem::Roots::query(greem_compliance::world::QueryRoot)
-                    .with_mutation(greem_compliance::world::MutationRoot),
+                    .with_mutation(greem_compliance::world::MutationRoot)
+                    .with_subscription(greem_compliance::world::SubscriptionRoot),
                 World::seeded(2, 4),
                 greem::Operation::new(document.clone()),
                 options,
@@ -1015,6 +1017,7 @@ fn reused_turn_slots_register_progress() {
     let schema = greem_compliance::schema::Schema::<World>::builder()
         .query::<greem_compliance::world::QueryRoot>()
         .mutation::<greem_compliance::world::MutationRoot>()
+        .subscription::<greem_compliance::world::SubscriptionRoot>()
         .stream_capacity(2)
         .build()
         .unwrap();
@@ -1023,7 +1026,8 @@ fn reused_turn_slots_register_progress() {
     let output = futures::executor::block_on(
         schema.execute(
             greem::Roots::query(greem_compliance::world::QueryRoot)
-                .with_mutation(greem_compliance::world::MutationRoot),
+                .with_mutation(greem_compliance::world::MutationRoot)
+                .with_subscription(greem_compliance::world::SubscriptionRoot),
             World::seeded(1, 3),
             greem::Operation::new(document.clone()),
             incremental(),
@@ -1875,6 +1879,7 @@ fn depth_counts_composites_defer_and_stream() {
             let schema = greem_compliance::schema::Schema::<World>::builder()
                 .query::<greem_compliance::world::QueryRoot>()
                 .mutation::<greem_compliance::world::MutationRoot>()
+                .subscription::<greem_compliance::world::SubscriptionRoot>()
                 .max_depth(limit)
                 .build()
                 .unwrap();
@@ -1882,7 +1887,8 @@ fn depth_counts_composites_defer_and_stream() {
             let output = futures::executor::block_on(
                 schema.execute(
                     greem::Roots::query(greem_compliance::world::QueryRoot)
-                        .with_mutation(greem_compliance::world::MutationRoot),
+                        .with_mutation(greem_compliance::world::MutationRoot)
+                        .with_subscription(greem_compliance::world::SubscriptionRoot),
                     World::seeded(1, 1),
                     greem::Operation::new(document.clone()),
                     incremental(),

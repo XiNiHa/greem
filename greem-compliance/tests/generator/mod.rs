@@ -278,6 +278,18 @@ pub fn unique_labels(doc: String) -> String {
     out
 }
 
+/// A subscription of one root field over a generated selection of its
+/// type. Directives stay off the root field, as validation requires, and
+/// incremental delivery is off: it is not allowed in a subscription.
+pub fn subscription() -> impl Strategy<Value = String> {
+    prop_oneof![
+        selection(Ty::User, 1, false)
+            .prop_map(|s| format!("subscription S{} {{ userEvents {{ {s} }} }}", declare(&s))),
+        selection(Ty::Post, 1, false)
+            .prop_map(|s| format!("subscription S{} {{ postEvents {{ {s} }} }}", declare(&s))),
+    ]
+}
+
 pub fn document(incremental: bool) -> impl Strategy<Value = String> {
     prop_oneof![
         5 => selection(Ty::Query, 0, incremental).prop_map(|s| unique_labels(format!("query Q{} {{ {s} }}", declare(&s)))),
