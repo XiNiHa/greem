@@ -185,6 +185,7 @@ impl Post {
 }
 
 pub type Schema = schema::Schema<App, QueryRoot>;
+pub type Plan = schema::Plan<App, QueryRoot>;
 
 pub fn build_schema() -> Schema {
     schema::Schema::<App>::builder()

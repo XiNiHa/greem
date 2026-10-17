@@ -1,7 +1,7 @@
 //! Running one workload at one size: what the bench and the expected-output
 //! test share.
 
-use crate::app::{App, QueryRoot, Schema};
+use crate::app::{App, Plan, QueryRoot, Schema};
 use crate::workload::Workload;
 use futures::{Stream, StreamExt};
 use greem::{Document, ExecuteOptions, IncrementalDelivery, Operation, Payload, Roots};
@@ -43,6 +43,14 @@ pub fn operation(document: &Arc<Document>, workload: &Workload, size: u32) -> Op
         operation_name: None,
         variables: workload.variables_at(size),
     }
+}
+
+/// Plans one run: variable coercion, tree build and lookbehind planning, the
+/// per-request work before any resolver runs.
+pub fn plan(schema: &Schema, workload: &Workload, app: &App, op: &Operation) -> Plan {
+    schema
+        .plan(op, app, options(workload))
+        .unwrap_or_else(|e| panic!("{}: {}", workload.name, e.into_payload().as_str()))
 }
 
 /// Executes one run, handing every payload to `encode` while it is borrowed.

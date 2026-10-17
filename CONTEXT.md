@@ -97,6 +97,10 @@ _Avoid_: Plan cache (nothing is cached), node data, side table
 The per-request set of Plan entries, filled during tree build and lookbehind planning and frozen before the first generation runs.
 _Avoid_: Plan store, plan arena, cache
 
+**Plan**:
+Lookbehind planning's output for one request, handed to execution as a value: the plan table, the introspection result and the operation kind, bound to the request context and options it was planned under. It exists before any resolver runs and belongs to that one request; hints read the request context, so a plan is never reused across requests.
+_Avoid_: Prepared operation, compiled query, cached plan, execution tree (which is data-free and precedes it)
+
 **Hint**:
 A typed note a field leaves for an ancestor during lookbehind planning, describing what it will need; it is part of the ancestor's meaning, so a field may answer differently depending on what its descendants asked for.
 _Avoid_: Attribute, planning note, lookahead, fetch hint (implies it cannot change the result)

@@ -218,6 +218,40 @@ impl Operation {
     }
 }
 
+/// Lookbehind planning's output for one request: the frozen Plan table, the
+/// introspection result and the operation kind, bound to the options it was
+/// planned under. Hints read the request context during planning, so a plan
+/// belongs to the request it was made for and is never reused across
+/// requests. Its typed entries are the generated plan types of one schema,
+/// so a plan runs only on the `Schema` value that made it.
+pub struct Plan<I: SchemaInfo, C = (), Q = (), M = NoMutation> {
+    schema: Arc<Inner>,
+    table: Arc<PlanTable>,
+    introspection: Option<serde_json::Value>,
+    is_mutation: bool,
+    options: ExecuteOptions,
+    _marker: Marker<I, C, Q, M>,
+}
+
+impl<I: SchemaInfo, C, Q, M> Plan<I, C, Q, M> {
+    /// The reference executor's view: the table, the introspection JSON and
+    /// the operation kind.
+    #[doc(hidden)]
+    #[cfg(feature = "reference-executor")]
+    pub fn __parts(self) -> (Arc<PlanTable>, Option<serde_json::Value>, bool) {
+        (self.table, self.introspection, self.is_mutation)
+    }
+}
+
+impl<I: SchemaInfo, C, Q, M> std::fmt::Debug for Plan<I, C, Q, M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Plan")
+            .field("is_mutation", &self.is_mutation)
+            .field("options", &self.options)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A serialized payload owned by the caller.
 #[derive(Clone, Debug)]
 pub struct OwnedPayload {
@@ -395,22 +429,23 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
         Ok(Some(data))
     }
 
-    /// Builds the execution tree and runs the planning pass over it. Returns
-    /// the frozen Plan table, the introspection JSON and whether the
-    /// operation is a mutation.
-    fn plan(
+    /// Plans one request: coerces its variables, builds the execution tree
+    /// and runs lookbehind planning over it with `ctx` as the request
+    /// context, before any resolver runs. A request error here is the whole
+    /// response; `execute_plan_stream` runs the result.
+    pub fn plan(
         &self,
         op: &Operation,
-        app: &C,
+        ctx: &C,
         options: ExecuteOptions,
-    ) -> Result<(Arc<PlanTable>, Option<serde_json::Value>, bool), RequestErrors>
+    ) -> Result<Plan<I, C, Q, M>, RequestErrors>
     where
         Q: Outputs<I::Query, C>,
         M: Outputs<I::Mutation, C>,
     {
         let mut tree = self.prepare(op, options)?;
         let introspection = self.introspection(&tree)?;
-        let planning_ctx = Context::new(app, None);
+        let planning_ctx = Context::new(ctx, None);
         let mut table = PlanTable::default();
         let is_mutation = tree.is_mutation();
         let walk = {
@@ -424,28 +459,14 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
         walk.map_err(|Abort(kind, errors)| RequestErrors { kind, errors })?;
         table.usages = tree.usages.clone();
         table.compute_beneath();
-        Ok((Arc::new(table), introspection, is_mutation))
-    }
-
-    /// Prepares a request for the reference executor: the same planning as
-    /// `execute_stream`, always non-incremental.
-    #[doc(hidden)]
-    #[cfg(feature = "reference-executor")]
-    pub fn __prepare_reference(
-        &self,
-        op: &Operation,
-        app: Arc<C>,
-        options: ExecuteOptions,
-    ) -> Result<(Arc<PlanTable>, Option<serde_json::Value>, bool), RequestErrors>
-    where
-        Q: Outputs<I::Query, C>,
-        M: Outputs<I::Mutation, C>,
-    {
-        let options = ExecuteOptions {
-            incremental: IncrementalDelivery::Disabled,
-            ..options
-        };
-        self.plan(op, &app, options)
+        Ok(Plan {
+            schema: self.inner.clone(),
+            table: Arc::new(table),
+            introspection,
+            is_mutation,
+            options,
+            _marker: PhantomData,
+        })
     }
 
     /// Plans and executes one request as a stream of payloads, each passed
@@ -470,7 +491,40 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
     {
         let schema = self.clone();
         pull(encode, move |mut outlet| async move {
-            schema.run(roots, ctx, &op, options, &mut outlet).await
+            match schema.plan(&op, &ctx, options) {
+                Ok(plan) => schema.run(roots, ctx, plan, &mut outlet).await,
+                Err(errors) => outlet.ship(errors.payload()),
+            }
+        })
+    }
+
+    /// Executes a plan this schema made with `plan` and the same `ctx`,
+    /// streaming like `execute_stream`.
+    ///
+    /// # Panics
+    ///
+    /// If the plan was made by another `Schema` value, whose depth and
+    /// stream limits it was checked against.
+    pub fn execute_plan_stream<T, E>(
+        &self,
+        roots: Roots<Q, M>,
+        ctx: C,
+        plan: Plan<I, C, Q, M>,
+        encode: E,
+    ) -> impl Stream<Item = T> + Send + use<I, C, Q, M, T, E>
+    where
+        Q: Outputs<I::Query, C> + Send + Sync,
+        M: Outputs<I::Mutation, C> + Send + Sync,
+        T: Send,
+        E: for<'p> FnMut(Payload<'p>) -> T + Send,
+    {
+        assert!(
+            Arc::ptr_eq(&self.inner, &plan.schema),
+            "a Plan runs only on the Schema that made it"
+        );
+        let schema = self.clone();
+        pull(encode, move |mut outlet| async move {
+            schema.run(roots, ctx, plan, &mut outlet).await
         })
     }
 
@@ -492,8 +546,11 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
     {
         let schema = self.clone();
         pull(encode, move |mut outlet| async move {
-            match schema.operation(request) {
-                Ok(op) => schema.run(roots, ctx, &op, options, &mut outlet).await,
+            let planned = schema
+                .operation(request)
+                .and_then(|op| schema.plan(&op, &ctx, options));
+            match planned {
+                Ok(plan) => schema.run(roots, ctx, plan, &mut outlet).await,
                 Err(errors) => outlet.ship(errors.payload()),
             }
         })
@@ -556,24 +613,18 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
         })
     }
 
-    async fn run(
-        &self,
-        roots: Roots<Q, M>,
-        ctx: C,
-        op: &Operation,
-        options: ExecuteOptions,
-        outlet: &mut dyn Ship,
-    ) where
+    async fn run(&self, roots: Roots<Q, M>, ctx: C, plan: Plan<I, C, Q, M>, outlet: &mut dyn Ship)
+    where
         Q: Outputs<I::Query, C> + Send + Sync,
         M: Outputs<I::Mutation, C> + Send + Sync,
     {
-        let (table, introspection, is_mutation) = match self.plan(op, &ctx, options) {
-            Ok(planned) => planned,
-            Err(errors) => {
-                outlet.ship(errors.payload());
-                return;
-            }
-        };
+        let Plan {
+            table,
+            introspection,
+            is_mutation,
+            options,
+            ..
+        } = plan;
         let shared = Shared {
             groups: Mutex::new(Groups::new()),
             behavior: options.error_behavior,

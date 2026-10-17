@@ -285,6 +285,85 @@ fn depth_limit() {
 }
 
 #[test]
+fn a_plan_executes_like_the_operation_it_was_made_from() {
+    let schema = build_schema();
+    let document = schema
+        .parse("{ users { name posts(first: 1) { title } } }")
+        .unwrap();
+    let op = Operation {
+        document,
+        operation_name: None,
+        variables: Default::default(),
+    };
+    let plan = schema
+        .plan(&op, &App::default(), ExecuteOptions::default())
+        .unwrap();
+    let planned: Vec<Value> = block_on(
+        schema
+            .execute_plan_stream(
+                Roots {
+                    query: QueryRoot,
+                    mutation: MutationRoot,
+                },
+                App::default(),
+                plan,
+                |payload| serde_json::to_value(payload).unwrap(),
+            )
+            .collect(),
+    );
+    let direct = block_on(schema.execute(
+        Roots {
+            query: QueryRoot,
+            mutation: MutationRoot,
+        },
+        App::default(),
+        op,
+        ExecuteOptions::default(),
+    ));
+    let direct: Vec<Value> = direct
+        .payloads
+        .iter()
+        .map(|p| serde_json::from_slice(&p.json).unwrap())
+        .collect();
+    assert_eq!(planned, direct);
+}
+
+#[test]
+#[should_panic(expected = "a Plan runs only on the Schema that made it")]
+fn a_plan_runs_only_on_the_schema_that_made_it() {
+    let lax = build_schema();
+    let strict = schema::Schema::<App>::builder()
+        .query::<QueryRoot>()
+        .mutation::<MutationRoot>()
+        .max_depth(2)
+        .build()
+        .unwrap();
+    let document = lax
+        .parse("{ users { posts { author { name } } } }")
+        .unwrap();
+    let plan = lax
+        .plan(
+            &Operation {
+                document,
+                operation_name: None,
+                variables: Default::default(),
+            },
+            &App::default(),
+            ExecuteOptions::default(),
+        )
+        .unwrap();
+    let _ = strict.execute_plan_stream(
+        Roots {
+            query: QueryRoot,
+            mutation: MutationRoot,
+        },
+        App::default(),
+        plan,
+        |payload| serde_json::to_value(payload).unwrap(),
+    );
+}
+
+#[test]
 fn defer() {
     let (p, _) = run(
         App::default(),

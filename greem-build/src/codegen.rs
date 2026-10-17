@@ -408,6 +408,8 @@ impl Gen<'_> {
             pub mod __private { #private }
             #allow
             pub type Schema<C = (), Q = (), M = ::greem::NoMutation> = ::greem::Schema<__private::Info, C, Q, M>;
+            #allow
+            pub type Plan<C = (), Q = (), M = ::greem::NoMutation> = ::greem::Plan<__private::Info, C, Q, M>;
         }
     }
 

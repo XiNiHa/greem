@@ -22,6 +22,12 @@ fn workloads(c: &mut Criterion) {
             b.iter(|| black_box(run::parse(&schema, &workload)))
         });
         let document = run::parse(&schema, &workload);
+        // Planning is per node, not per object, so one size is enough.
+        let app = run::app(&workload);
+        let op = run::operation(&document, &workload, workload.sizes[0]);
+        group.bench_function("plan", |b| {
+            b.iter(|| black_box(run::plan(&schema, &workload, &app, &op)))
+        });
         let sizes = if smallest_only {
             &workload.sizes[..1]
         } else {
