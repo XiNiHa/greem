@@ -8,7 +8,9 @@ use crate::exec::payload::{Payload, PayloadKind};
 use crate::exec::pull::{Ship, pull};
 use crate::exec::run::run_loop;
 use crate::exec::scope::{Batch, ObjectMeta, ScopeMeta};
-use crate::exec::state::{ExecuteOptions, GroupKind, Groups, IncrementalDelivery, Shared};
+use crate::exec::state::{
+    ErrorBehavior, ExecuteOptions, GroupKind, Groups, IncrementalDelivery, Shared,
+};
 use crate::plan::{Leaf, PlanTable, Walker};
 use crate::resolver::{NoMutation, Outputs};
 use crate::tree::{Abort, Document, Tree, json_to_input, span_location};
@@ -199,14 +201,58 @@ impl RequestErrors {
     }
 }
 
-/// One operation of a parsed document plus its variables.
+/// One operation of a parsed document plus its variables and the error
+/// behavior the request asked for, if any.
 pub struct Operation {
     pub document: Arc<Document>,
     pub operation_name: Option<String>,
     pub variables: serde_json::Map<String, serde_json::Value>,
+    pub on_error: Option<ErrorBehavior>,
 }
 
 impl Operation {
+    pub fn new(document: Arc<Document>) -> Self {
+        Operation {
+            document,
+            operation_name: None,
+            variables: Default::default(),
+            on_error: None,
+        }
+    }
+
+    pub fn with_operation_name(mut self, name: impl Into<String>) -> Self {
+        self.operation_name = Some(name.into());
+        self
+    }
+
+    pub fn with_variables(mut self, variables: serde_json::Map<String, serde_json::Value>) -> Self {
+        self.variables = variables;
+        self
+    }
+
+    pub fn with_on_error(mut self, on_error: ErrorBehavior) -> Self {
+        self.on_error = Some(on_error);
+        self
+    }
+
+    /// The error behavior this operation runs under: the request's `onError`,
+    /// else `NULL` when the executed operation carries graphql-js's
+    /// `@experimental_disableErrorPropagation` (which the schema has to
+    /// declare for the document to validate), else the server's default.
+    fn error_behavior(
+        &self,
+        operation: &apollo_compiler::executable::Operation,
+        options: ExecuteOptions,
+    ) -> ErrorBehavior {
+        self.on_error
+            .or_else(|| {
+                operation
+                    .directives
+                    .has("experimental_disableErrorPropagation")
+                    .then_some(ErrorBehavior::Null)
+            })
+            .unwrap_or(options.default_error_behavior)
+    }
     /// Whether the operation to execute is a mutation; false when it cannot
     /// be determined, which execution reports as a request error.
     pub(crate) fn is_mutation(&self) -> bool {
@@ -229,17 +275,37 @@ pub struct Plan<I: SchemaInfo, C = (), Q = (), M = NoMutation> {
     table: Arc<PlanTable>,
     introspection: Option<serde_json::Value>,
     is_mutation: bool,
+    /// Resolved from the operation and the options; see
+    /// `Operation::error_behavior`.
+    error_behavior: ErrorBehavior,
     options: ExecuteOptions,
     _marker: Marker<I, C, Q, M>,
 }
 
 impl<I: SchemaInfo, C, Q, M> Plan<I, C, Q, M> {
-    /// The reference executor's view: the table, the introspection JSON and
-    /// the operation kind.
+    /// The error behavior the plan runs under.
+    pub fn error_behavior(&self) -> ErrorBehavior {
+        self.error_behavior
+    }
+
+    /// The reference executor's view: the table, the introspection JSON, the
+    /// operation kind and the error behavior.
     #[doc(hidden)]
     #[cfg(feature = "reference-executor")]
-    pub fn __parts(self) -> (Arc<PlanTable>, Option<serde_json::Value>, bool) {
-        (self.table, self.introspection, self.is_mutation)
+    pub fn __parts(
+        self,
+    ) -> (
+        Arc<PlanTable>,
+        Option<serde_json::Value>,
+        bool,
+        ErrorBehavior,
+    ) {
+        (
+            self.table,
+            self.introspection,
+            self.is_mutation,
+            self.error_behavior,
+        )
     }
 }
 
@@ -247,6 +313,7 @@ impl<I: SchemaInfo, C, Q, M> std::fmt::Debug for Plan<I, C, Q, M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Plan")
             .field("is_mutation", &self.is_mutation)
+            .field("error_behavior", &self.error_behavior)
             .field("options", &self.options)
             .finish_non_exhaustive()
     }
@@ -444,6 +511,7 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
         M: Outputs<I::Mutation, C>,
     {
         let mut tree = self.prepare(op, options)?;
+        let error_behavior = op.error_behavior(&tree.operation, options);
         let introspection = self.introspection(&tree)?;
         let planning_ctx = Context::new(ctx, None);
         let mut table = PlanTable::default();
@@ -464,6 +532,7 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
             table: Arc::new(table),
             introspection,
             is_mutation,
+            error_behavior,
             options,
             _marker: PhantomData,
         })
@@ -604,12 +673,14 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
             query,
             operation_name,
             variables,
+            on_error,
             ..
         } = request;
         Ok(Operation {
             document: self.parse(&query)?,
             operation_name,
             variables: variables.unwrap_or_default(),
+            on_error,
         })
     }
 
@@ -622,12 +693,13 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
             table,
             introspection,
             is_mutation,
+            error_behavior,
             options,
             ..
         } = plan;
         let shared = Shared {
             groups: Mutex::new(Groups::new()),
-            behavior: options.error_behavior,
+            behavior: error_behavior,
             incremental: options.incremental == IncrementalDelivery::Enabled,
             capacity: self.inner.stream_capacity,
             table: table.clone(),

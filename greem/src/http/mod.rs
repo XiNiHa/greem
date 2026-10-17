@@ -18,23 +18,29 @@ pub use request::RequestParts;
 pub use response::{Body, Response};
 
 use crate::exec::payload::{Payload, PayloadKind};
-use crate::exec::state::{ExecuteOptions, IncrementalDelivery};
+use crate::exec::state::{ErrorBehavior, ExecuteOptions, IncrementalDelivery};
 use crate::resolver::Outputs;
 use crate::schema::{Roots, Schema, SchemaInfo};
 use futures::{StreamExt, future, stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-/// A GraphQL-over-HTTP request body.
+/// A GraphQL-over-HTTP request body: the four standard parameters and the
+/// `onError` attribute of graphql-spec #1163 (unmerged, October 2026), the
+/// error behavior the client asks for. A request that names none gets
+/// [`ExecuteOptions::default_error_behavior`].
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Request {
     pub query: String,
-    #[serde(default, rename = "operationName")]
+    #[serde(default)]
     pub operation_name: Option<String>,
     #[serde(default)]
     pub variables: Option<Map<String, Value>>,
     #[serde(default)]
     pub extensions: Option<Map<String, Value>>,
+    #[serde(default)]
+    pub on_error: Option<ErrorBehavior>,
 }
 
 impl Request {
@@ -44,7 +50,13 @@ impl Request {
             operation_name: None,
             variables: None,
             extensions: None,
+            on_error: None,
         }
+    }
+
+    pub fn with_on_error(mut self, on_error: ErrorBehavior) -> Self {
+        self.on_error = Some(on_error);
+        self
     }
 
     pub fn with_variables(mut self, variables: Map<String, Value>) -> Self {

@@ -38,11 +38,7 @@ pub fn parse(schema: &Schema, workload: &Workload) -> Arc<Document> {
 }
 
 pub fn operation(document: &Arc<Document>, workload: &Workload, size: u32) -> Operation {
-    Operation {
-        document: document.clone(),
-        operation_name: None,
-        variables: workload.variables_at(size),
-    }
+    Operation::new(document.clone()).with_variables(workload.variables_at(size))
 }
 
 /// Plans one run: variable coercion, tree build and lookbehind planning, the

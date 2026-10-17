@@ -41,7 +41,7 @@ where
             ..options
         },
     );
-    let (table, introspection, is_mutation) = match planned {
+    let (table, introspection, is_mutation, behavior) = match planned {
         Ok(plan) => plan.__parts(),
         Err(errors) => {
             return ReferenceOutput {
@@ -53,7 +53,7 @@ where
     let shared = RefShared {
         table,
         app,
-        behavior: options.error_behavior,
+        behavior,
         introspection,
         errors: Mutex::new(Vec::new()),
         calls: Mutex::new(0),
@@ -69,7 +69,7 @@ where
     let mut errors = std::mem::take(&mut *shared.errors.lock().unwrap());
     let calls = *shared.calls.lock().unwrap();
     let mut data = data.unwrap_or(serde_json::Value::Null);
-    if options.error_behavior == ErrorBehavior::Halt && !errors.is_empty() {
+    if behavior == ErrorBehavior::Halt && !errors.is_empty() {
         data = serde_json::Value::Null;
         errors.truncate(1);
     }

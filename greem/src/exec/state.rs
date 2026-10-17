@@ -7,8 +7,11 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 pub type GroupId = u32;
 
-/// What an execution error does to the data around it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// What an execution error does to the data around it. On the wire it is the
+/// request's `onError` attribute, `NULL`, `PROPAGATE` or `HALT`, as
+/// graphql-spec #1163 (unmerged, October 2026) names them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ErrorBehavior {
     /// Null the failed position only.
     Null,
@@ -28,7 +31,10 @@ pub enum IncrementalDelivery {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ExecuteOptions {
-    pub error_behavior: ErrorBehavior,
+    /// The error behavior of a request that names none, neither with
+    /// `onError` nor with an `@experimental_disableErrorPropagation`
+    /// directive the schema declares.
+    pub default_error_behavior: ErrorBehavior,
     pub incremental: IncrementalDelivery,
 }
 

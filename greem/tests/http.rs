@@ -231,6 +231,74 @@ fn parameters_that_are_not_well_formed_are_422() {
 }
 
 #[test]
+fn on_error_picks_the_error_behavior() {
+    let failing = || App {
+        fail_name: true,
+        ..Default::default()
+    };
+    // The server default, PROPAGATE: the non-null name nulls `users`, then `data`.
+    let sent = send(
+        failing(),
+        post(GRAPHQL, r#"{"query": "{ users { name } }"}"#),
+    );
+    assert_eq!(sent.status, 294);
+    assert_eq!(sent.json()["data"], Value::Null);
+
+    let sent = send(
+        failing(),
+        post(
+            GRAPHQL,
+            r#"{"query": "{ users { name } }", "onError": "NULL"}"#,
+        ),
+    );
+    assert_eq!(sent.status, 294);
+    let response = sent.json();
+    assert_eq!(response["data"]["users"][0]["name"], json!("Ann"));
+    assert_eq!(response["data"]["users"][1]["name"], Value::Null);
+
+    let sent = send(
+        failing(),
+        get("query=%7B+users+%7B+name+%7D+%7D&onError=HALT"),
+    );
+    assert_eq!(sent.status, 294);
+    let response = sent.json();
+    assert_eq!(response["data"], Value::Null);
+    assert_eq!(response["errors"].as_array().unwrap().len(), 1);
+
+    // A request that names none takes the endpoint's default.
+    let sent = send_with(
+        failing(),
+        post(
+            GRAPHQL,
+            r#"{"query": "{ users { name } }", "onError": null}"#,
+        ),
+        ExecuteOptions {
+            default_error_behavior: greem::ErrorBehavior::Null,
+            ..Default::default()
+        },
+    );
+    assert_eq!(sent.json()["data"]["users"][0]["name"], json!("Ann"));
+
+    for body in [
+        r#"{"query": "{ users { name } }", "onError": "null"}"#,
+        r#"{"query": "{ users { name } }", "onError": "ABORT"}"#,
+        r#"{"query": "{ users { name } }", "onError": true}"#,
+    ] {
+        let sent = send(App::default(), post(GRAPHQL, body));
+        assert_eq!(sent.status, 422, "{body}");
+        assert_eq!(
+            sent.json()["errors"][0]["message"],
+            json!("onError must be one of NULL, PROPAGATE and HALT")
+        );
+    }
+    let sent = send(
+        App::default(),
+        get("query=%7B+users+%7B+name+%7D+%7D&onError=halt"),
+    );
+    assert_eq!(sent.status, 422);
+}
+
+#[test]
 fn request_errors_are_400_for_parsing_and_422_otherwise() {
     let cases = [
         (r#"{"query": "{"}"#, 400),

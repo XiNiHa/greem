@@ -67,7 +67,7 @@ A slot rewritten to null by post-hoc null propagation because an execution error
 _Avoid_: Bubbled null, nulled ancestor
 
 **Error behavior**:
-The per-request choice of what an execution error does to the data: null the position, propagate to the nearest nullable ancestor, or halt the operation with a single error.
+The per-request choice of what an execution error does to the data: null the position, propagate to the nearest nullable ancestor, or halt the operation with a single error. The client names it with the request's `onError` attribute (`NULL`, `PROPAGATE`, `HALT`); a request that names none gets the server's default error behavior.
 _Avoid_: onError mode, error mode, error policy
 
 **Set-based resolver**:

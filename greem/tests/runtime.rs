@@ -28,15 +28,11 @@ fn run(
             mutation: MutationRoot,
         },
         app,
-        Operation {
-            document: document.clone(),
-            operation_name: None,
-            variables: match variables {
-                Value::Null => Default::default(),
-                Value::Object(map) => map,
-                other => panic!("variables must be a map: {other}"),
-            },
-        },
+        Operation::new(document.clone()).with_variables(match variables {
+            Value::Null => Default::default(),
+            Value::Object(map) => map,
+            other => panic!("variables must be a map: {other}"),
+        }),
         options,
     ));
     let payloads = output
@@ -83,11 +79,7 @@ fn set_based_calls_once_per_generation() {
             log: Mutex::new(Vec::new()),
             ..Default::default()
         },
-        Operation {
-            document: document.clone(),
-            operation_name: None,
-            variables: Default::default(),
-        },
+        Operation::new(document.clone()),
         ExecuteOptions::default(),
     ));
     let v: Value = serde_json::from_slice(&output.payloads[0].json).unwrap();
@@ -139,7 +131,7 @@ fn error_behavior_null_and_halt() {
         "{ users { name } }",
         Value::Null,
         ExecuteOptions {
-            error_behavior: ErrorBehavior::Null,
+            default_error_behavior: ErrorBehavior::Null,
             ..Default::default()
         },
     );
@@ -153,12 +145,83 @@ fn error_behavior_null_and_halt() {
         "{ users { name email } }",
         Value::Null,
         ExecuteOptions {
-            error_behavior: ErrorBehavior::Halt,
+            default_error_behavior: ErrorBehavior::Halt,
             ..Default::default()
         },
     );
     assert_eq!(p[0]["data"], Value::Null);
     assert_eq!(p[0]["errors"].as_array().unwrap().len(), 1);
+}
+
+/// The request's choice wins over the operation's directive, which wins
+/// over the server's default.
+#[test]
+fn the_error_behavior_comes_from_the_request_then_the_directive_then_the_default() {
+    let schema = build_schema();
+    let plain = schema.parse("{ users { name } }").unwrap();
+    let disabled = schema
+        .parse("query @experimental_disableErrorPropagation { users { name } }")
+        .unwrap();
+    let halting = ExecuteOptions {
+        default_error_behavior: ErrorBehavior::Halt,
+        ..Default::default()
+    };
+    for (op, options, expected) in [
+        (Operation::new(plain.clone()), halting, ErrorBehavior::Halt),
+        (
+            Operation::new(plain.clone()),
+            ExecuteOptions::default(),
+            ErrorBehavior::Propagate,
+        ),
+        (
+            Operation::new(disabled.clone()),
+            halting,
+            ErrorBehavior::Null,
+        ),
+        (
+            Operation::new(disabled.clone()).with_on_error(ErrorBehavior::Halt),
+            ExecuteOptions::default(),
+            ErrorBehavior::Halt,
+        ),
+        (
+            Operation::new(plain.clone()).with_on_error(ErrorBehavior::Null),
+            halting,
+            ErrorBehavior::Null,
+        ),
+    ] {
+        let plan = schema.plan(&op, &App::default(), options).unwrap();
+        assert_eq!(plan.error_behavior(), expected);
+    }
+    let (p, _) = run_operation(
+        App {
+            fail_name: true,
+            ..Default::default()
+        },
+        Operation::new(disabled).with_on_error(ErrorBehavior::Propagate),
+        halting,
+    );
+    assert_eq!(p[0]["data"], Value::Null);
+    assert_eq!(p[0]["errors"].as_array().unwrap().len(), 1);
+    assert_eq!(p[0]["errors"][0]["path"], json!(["users", 1, "name"]));
+}
+
+fn run_operation(app: App, op: Operation, options: ExecuteOptions) -> (Vec<Value>, Vec<String>) {
+    let schema = build_schema();
+    let output = block_on(schema.execute(
+        Roots {
+            query: QueryRoot,
+            mutation: MutationRoot,
+        },
+        app,
+        op,
+        options,
+    ));
+    let payloads = output
+        .payloads
+        .iter()
+        .map(|p| serde_json::from_slice(&p.json).unwrap())
+        .collect();
+    (payloads, Vec::new())
 }
 
 #[test]
@@ -267,11 +330,7 @@ fn depth_limit() {
             mutation: MutationRoot,
         },
         App::default(),
-        Operation {
-            document: document.clone(),
-            operation_name: None,
-            variables: Default::default(),
-        },
+        Operation::new(document.clone()),
         ExecuteOptions::default(),
     ));
     let v: Value = serde_json::from_slice(&output.payloads[0].json).unwrap();
@@ -290,11 +349,7 @@ fn a_plan_executes_like_the_operation_it_was_made_from() {
     let document = schema
         .parse("{ users { name posts(first: 1) { title } } }")
         .unwrap();
-    let op = Operation {
-        document,
-        operation_name: None,
-        variables: Default::default(),
-    };
+    let op = Operation::new(document);
     let plan = schema
         .plan(&op, &App::default(), ExecuteOptions::default())
         .unwrap();
@@ -343,11 +398,7 @@ fn a_plan_runs_only_on_the_schema_that_made_it() {
         .unwrap();
     let plan = lax
         .plan(
-            &Operation {
-                document,
-                operation_name: None,
-                variables: Default::default(),
-            },
+            &Operation::new(document),
             &App::default(),
             ExecuteOptions::default(),
         )
@@ -591,11 +642,7 @@ fn stream_lazy() {
             mutation: MutationRoot,
         },
         App::default(),
-        Operation {
-            document: document.clone(),
-            operation_name: None,
-            variables: Default::default(),
-        },
+        Operation::new(document.clone()),
         ExecuteOptions {
             incremental: IncrementalDelivery::Enabled,
             ..Default::default()
@@ -621,11 +668,7 @@ fn stream_lazy() {
             mutation: MutationRoot,
         },
         App::default(),
-        Operation {
-            document: document.clone(),
-            operation_name: None,
-            variables: Default::default(),
-        },
+        Operation::new(document.clone()),
         ExecuteOptions::default(),
     ));
     let v: Value = serde_json::from_slice(&output.payloads[0].json).unwrap();
@@ -648,11 +691,7 @@ fn execution_waits_for_the_consumer_to_pull() {
             calls: Some(calls.clone()),
             ..Default::default()
         },
-        Operation {
-            document,
-            operation_name: None,
-            variables: Default::default(),
-        },
+        Operation::new(document),
         ExecuteOptions {
             incremental: IncrementalDelivery::Enabled,
             ..Default::default()
@@ -687,11 +726,7 @@ fn dropping_the_stream_cancels_execution() {
             mutation: MutationRoot,
         },
         App::default(),
-        Operation {
-            document,
-            operation_name: None,
-            variables: Default::default(),
-        },
+        Operation::new(document),
         ExecuteOptions {
             incremental: IncrementalDelivery::Enabled,
             ..Default::default()
@@ -779,11 +814,7 @@ fn owned_output_shapes() {
                 mutation: MutationRoot,
             },
             App::default(),
-            Operation {
-                document: document.clone(),
-                operation_name: None,
-                variables: Default::default(),
-            },
+            Operation::new(document.clone()),
             options,
         ));
         output
@@ -882,11 +913,7 @@ fn borrowed_output_shapes() {
             mutation: MutationRoot,
         },
         App::default(),
-        Operation {
-            document: document.clone(),
-            operation_name: None,
-            variables: Default::default(),
-        },
+        Operation::new(document.clone()),
         ExecuteOptions::default(),
     ));
     let v: Value = serde_json::from_slice(&output.payloads[0].json).unwrap();
@@ -1013,11 +1040,7 @@ fn borrowed_wrappers_complete_like_owned_ones() {
                     mutation: MutationRoot,
                 },
                 App::default(),
-                Operation {
-                    document,
-                    operation_name: None,
-                    variables: Default::default(),
-                },
+                Operation::new(document),
                 ExecuteOptions::default(),
             ));
             serde_json::from_slice::<Value>(&output.payloads[0].json).unwrap()
@@ -1120,11 +1143,7 @@ fn owned_slices_complete_without_cloning() {
                 mutation: MutationRoot,
             },
             App::default(),
-            Operation {
-                document: schema.parse(query).unwrap(),
-                operation_name: None,
-                variables: Default::default(),
-            },
+            Operation::new(schema.parse(query).unwrap()),
             options,
         ));
         output
@@ -1219,11 +1238,7 @@ fn kept_rows_retire_with_their_stream_turn() {
             mutation: MutationRoot,
         },
         App::default(),
-        Operation {
-            document: schema.parse("{ ints @stream }").unwrap(),
-            operation_name: None,
-            variables: Default::default(),
-        },
+        Operation::new(schema.parse("{ ints @stream }").unwrap()),
         ExecuteOptions {
             incremental: IncrementalDelivery::Enabled,
             ..Default::default()
@@ -1299,11 +1314,7 @@ fn failed_root_is_reported_once_at_its_position() {
             mutation: MutationRoot,
         },
         App::default(),
-        Operation {
-            document: document.clone(),
-            operation_name: None,
-            variables: Default::default(),
-        },
+        Operation::new(document.clone()),
         ExecuteOptions::default(),
     ));
     assert_eq!(output.payloads.len(), 1);

@@ -59,11 +59,7 @@ fn run_deep(depth: u32, limit: u32, world: World) -> Value {
             mutation: MutationRoot,
         },
         world,
-        Operation {
-            document: document.clone(),
-            operation_name: None,
-            variables: Default::default(),
-        },
+        Operation::new(document.clone()),
         ExecuteOptions::default(),
     ));
     parse_deep(&output.payloads[0].json)
@@ -110,11 +106,7 @@ fn cancel_after(depth: u32, world: World, polls: usize) -> Vec<(&'static str, u3
                 mutation: MutationRoot,
             },
             world,
-            Operation {
-                document: document.clone(),
-                operation_name: None,
-                variables: Default::default(),
-            },
+            Operation::new(document.clone()),
             ExecuteOptions::default(),
         );
         let mut future = pin!(future);
@@ -217,11 +209,7 @@ fn a_thousand_stream_turns_do_not_add_depth() {
                         mutation: MutationRoot,
                     },
                     World::seeded(1, 1000),
-                    Operation {
-                        document: document.clone(),
-                        operation_name: None,
-                        variables: Default::default(),
-                    },
+                    Operation::new(document.clone()),
                     ExecuteOptions {
                         incremental: IncrementalDelivery::Enabled,
                         ..Default::default()
@@ -281,11 +269,7 @@ fn a_thousand_streamed_errors_are_retired_with_their_turns() {
                         mutation: MutationRoot,
                     },
                     World::seeded(1, 0),
-                    Operation {
-                        document: document.clone(),
-                        operation_name: None,
-                        variables: Default::default(),
-                    },
+                    Operation::new(document.clone()),
                     ExecuteOptions {
                         incremental: IncrementalDelivery::Enabled,
                         ..Default::default()
@@ -353,11 +337,7 @@ fn abandoned_nested_groups_are_reclaimed_after_parent_failure() {
                         mutation: MutationRoot,
                     },
                     world,
-                    Operation {
-                        document: document.clone(),
-                        operation_name: None,
-                        variables: Default::default(),
-                    },
+                    Operation::new(document.clone()),
                     ExecuteOptions {
                         incremental: IncrementalDelivery::Enabled,
                         ..Default::default()
@@ -402,11 +382,7 @@ fn a_thousand_mutation_roots_do_not_add_depth() {
                 mutation: MutationRoot,
             },
             World::seeded(2, 0),
-            Operation {
-                document: document.clone(),
-                operation_name: None,
-                variables: Default::default(),
-            },
+            Operation::new(document.clone()),
             ExecuteOptions::default(),
         ));
         let v = parse_deep(&output.payloads[0].json);
@@ -441,11 +417,7 @@ fn reference_executor_runs_on_a_larger_stack() {
                     mutation: MutationRoot,
                 },
                 World::seeded(2, 0),
-                Operation {
-                    document: document.clone(),
-                    operation_name: None,
-                    variables: Default::default(),
-                },
+                Operation::new(document.clone()),
                 ExecuteOptions::default(),
             ))
             .response

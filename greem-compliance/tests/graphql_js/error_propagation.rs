@@ -26,7 +26,7 @@ mod handles_errors {
     "#,
             Value::Null,
             ExecuteOptions {
-                error_behavior: ErrorBehavior::Null,
+                default_error_behavior: ErrorBehavior::Null,
                 ..Default::default()
             },
         );

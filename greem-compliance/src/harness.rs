@@ -230,6 +230,7 @@ pub trait Area: HasHarness + Clone + Send + Sync + Sized + 'static {
                 document,
                 operation_name: operation_name.map(str::to_owned),
                 variables: variable_map(variables),
+                on_error: None,
             },
             options,
         ));
@@ -253,11 +254,7 @@ pub trait Area: HasHarness + Clone + Send + Sync + Sized + 'static {
         let stream = schema.execute_stream(
             Self::roots(),
             self,
-            Operation {
-                document,
-                operation_name: None,
-                variables: Default::default(),
-            },
+            Operation::new(document),
             options,
             |payload| serde_json::to_value(&payload).unwrap(),
         );
@@ -290,7 +287,7 @@ pub trait Area: HasHarness + Clone + Send + Sync + Sized + 'static {
         options: ExecuteOptions,
     ) -> (Value, Calls) {
         let oracle = (!self.harness().is_interactive()
-            && options.error_behavior != greem::ErrorBehavior::Halt)
+            && options.default_error_behavior != greem::ErrorBehavior::Halt)
             .then(|| self.clone());
         let (response, calls) =
             self.single_unchecked_operation(operation_name, query, variables.clone(), options);
@@ -354,6 +351,7 @@ pub trait Area: HasHarness + Clone + Send + Sync + Sized + 'static {
                 document,
                 operation_name: operation_name.map(str::to_owned),
                 variables: variable_map(variables),
+                on_error: None,
             },
             options,
         ));

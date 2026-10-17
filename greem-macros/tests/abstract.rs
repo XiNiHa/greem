@@ -298,11 +298,7 @@ fn run<Q: Outputs<schema::types::Query, App> + Send + Sync>(
             mutation: Mutation,
         },
         app.clone(),
-        Operation {
-            document,
-            operation_name: None,
-            variables: Default::default(),
-        },
+        Operation::new(document),
         ExecuteOptions::default(),
     ));
     let value: Value = serde_json::from_slice(&output.payloads[0].json).unwrap();

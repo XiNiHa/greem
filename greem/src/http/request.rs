@@ -4,6 +4,7 @@
 use super::Request;
 use super::accept::{Specificity, application, entry};
 use super::response::Response;
+use crate::exec::state::ErrorBehavior;
 use serde_json::{Map, Value};
 use std::borrow::Cow;
 
@@ -142,8 +143,10 @@ fn form_decode(text: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// A well-formed GraphQL-over-HTTP request: a string `query`, and an
-/// `operationName` string and `variables` and `extensions` maps where given.
+/// A well-formed GraphQL-over-HTTP request: a string `query`, an
+/// `operationName` string and `variables` and `extensions` maps where given,
+/// and an `onError` that is one of `NULL`, `PROPAGATE` and `HALT` where
+/// given. `null` is the same as absent.
 fn well_formed(mut params: Map<String, Value>) -> Result<Request, String> {
     let query = match params.remove("query") {
         Some(Value::String(query)) => query,
@@ -155,13 +158,26 @@ fn well_formed(mut params: Map<String, Value>) -> Result<Request, String> {
         Some(Value::String(name)) => Some(name),
         Some(_) => return Err("operationName must be a string".into()),
     };
+    let on_error = match params.remove("onError") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(behavior)) => match behavior.as_str() {
+            "NULL" => Some(ErrorBehavior::Null),
+            "PROPAGATE" => Some(ErrorBehavior::Propagate),
+            "HALT" => Some(ErrorBehavior::Halt),
+            _ => return Err(ON_ERROR_VALUES.into()),
+        },
+        Some(_) => return Err(ON_ERROR_VALUES.into()),
+    };
     Ok(Request {
         query,
         operation_name,
         variables: map_param(params.remove("variables"), "variables")?,
         extensions: map_param(params.remove("extensions"), "extensions")?,
+        on_error,
     })
 }
+
+const ON_ERROR_VALUES: &str = "onError must be one of NULL, PROPAGATE and HALT";
 
 fn map_param(value: Option<Value>, name: &str) -> Result<Option<Map<String, Value>>, String> {
     match value {
@@ -186,7 +202,7 @@ mod tests {
     #[test]
     fn get_parameters_come_from_the_query_string() {
         let params = query_params(
-            "query=query+Q(%24id%3A+ID!)+%7B+__typename+%7D&operationName=Q&variables=%7B%22id%22%3A1%7D&extensions=&query=ignored",
+            "query=query+Q(%24id%3A+ID!)+%7B+__typename+%7D&operationName=Q&variables=%7B%22id%22%3A1%7D&extensions=&onError=HALT&query=ignored",
         )
         .unwrap();
         let request = well_formed(params).unwrap();
@@ -197,6 +213,7 @@ mod tests {
             Some(serde_json::json!({"id": 1}))
         );
         assert_eq!(request.extensions, None);
+        assert_eq!(request.on_error, Some(ErrorBehavior::Halt));
     }
 
     #[test]
@@ -207,14 +224,33 @@ mod tests {
             r#"{"query": "{ a }", "operationName": 1}"#,
             r#"{"query": "{ a }", "variables": "{}"}"#,
             r#"{"query": "{ a }", "extensions": []}"#,
+            r#"{"query": "{ a }", "onError": 1}"#,
+            r#"{"query": "{ a }", "onError": "null"}"#,
+            r#"{"query": "{ a }", "onError": "ABORT"}"#,
         ] {
             let params = serde_json::from_str(body).unwrap();
             assert!(well_formed(params).is_err(), "{body}");
         }
-        let params =
-            serde_json::from_str(r#"{"query": "{ a }", "operationName": null, "variables": null}"#)
-                .unwrap();
-        assert!(well_formed(params).is_ok());
+        let params = serde_json::from_str(
+            r#"{"query": "{ a }", "operationName": null, "variables": null, "onError": null}"#,
+        )
+        .unwrap();
+        assert_eq!(well_formed(params).unwrap().on_error, None);
+    }
+
+    #[test]
+    fn on_error_names_an_error_behavior() {
+        for (name, behavior) in [
+            ("NULL", ErrorBehavior::Null),
+            ("PROPAGATE", ErrorBehavior::Propagate),
+            ("HALT", ErrorBehavior::Halt),
+        ] {
+            let body = format!(r#"{{"query": "{{ a }}", "onError": "{name}"}}"#);
+            let params = serde_json::from_str(&body).unwrap();
+            assert_eq!(well_formed(params).unwrap().on_error, Some(behavior));
+            let request: Request = serde_json::from_str(&body).unwrap();
+            assert_eq!(request.on_error, Some(behavior));
+        }
     }
 
     #[test]

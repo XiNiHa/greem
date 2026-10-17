@@ -84,7 +84,7 @@ proptest! {
 
     #[test]
     fn bfs_equals_dfs(doc in document(false), (users, posts, failures) in world(), yields in interleaving(), flag in any::<bool>(), behavior in prop::sample::select(vec![ErrorBehavior::Propagate, ErrorBehavior::Null])) {
-        let options = ExecuteOptions { error_behavior: behavior, ..Default::default() };
+        let options = ExecuteOptions { default_error_behavior: behavior, ..Default::default() };
         let (bfs, _) = single(make_world(users, posts, &failures, &yields), &doc, variables(flag), options);
         let (reference, _) = reference(make_world(users, posts, &failures, &yields), &doc, variables(flag), options);
         prop_assert_eq!(bfs.get("data"), reference.get("data"), "doc: {}\nbfs: {}\nref: {}", doc, bfs, reference);
@@ -93,8 +93,8 @@ proptest! {
 
     #[test]
     fn halt_is_one_error_from_null_mode(doc in document(false), (users, posts, failures) in world(), flag in any::<bool>()) {
-        let halt = ExecuteOptions { error_behavior: ErrorBehavior::Halt, ..Default::default() };
-        let null = ExecuteOptions { error_behavior: ErrorBehavior::Null, ..Default::default() };
+        let halt = ExecuteOptions { default_error_behavior: ErrorBehavior::Halt, ..Default::default() };
+        let null = ExecuteOptions { default_error_behavior: ErrorBehavior::Null, ..Default::default() };
         let (halted, _) = single(make_world(users, posts, &failures, &[]), &doc, variables(flag), halt);
         let (nulled, _) = single(make_world(users, posts, &failures, &[]), &doc, variables(flag), null);
         if halted.get("data").is_none() {
@@ -134,7 +134,7 @@ proptest! {
 
     #[test]
     fn every_pending_id_completes(doc in document(true), (users, posts, failures) in world(), yields in interleaving(), flag in any::<bool>(), capacity in stream_capacity(), behavior in prop::sample::select(vec![ErrorBehavior::Null, ErrorBehavior::Propagate, ErrorBehavior::Halt])) {
-        let options = ExecuteOptions { error_behavior: behavior, incremental: IncrementalDelivery::Enabled };
+        let options = ExecuteOptions { default_error_behavior: behavior, incremental: IncrementalDelivery::Enabled };
         let (payloads, _) = run_at_capacity(make_world(users, posts, &failures, &yields), &doc, variables(flag), options, capacity);
         let ids = |key: &str| {
             let mut ids: Vec<&str> = payloads.iter()
@@ -184,7 +184,7 @@ proptest! {
         let output = futures::executor::block_on(schema.execute(
             greem::Roots { query: greem_compliance::world::QueryRoot, mutation: greem_compliance::world::MutationRoot },
             World::seeded(2, 0),
-            greem::Operation { document: document.clone(), operation_name: None, variables: Default::default() },
+            greem::Operation::new(document.clone()),
             ExecuteOptions::default(),
         ));
         let response: Value = serde_json::from_slice(&output.payloads[0].json).unwrap();
@@ -192,7 +192,7 @@ proptest! {
             &schema,
             greem::Roots { query: greem_compliance::world::QueryRoot, mutation: greem_compliance::world::MutationRoot },
             World::seeded(2, 0),
-            greem::Operation { document: document.clone(), operation_name: None, variables: Default::default() },
+            greem::Operation::new(document.clone()),
             ExecuteOptions::default(),
         ));
         // users adds one level; each friends adds one.

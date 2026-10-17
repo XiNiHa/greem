@@ -200,11 +200,7 @@ fn run(query: &str) -> (Value, Vec<String>) {
             mutation: Mutation,
         },
         app,
-        Operation {
-            document: document.clone(),
-            operation_name: None,
-            variables: Default::default(),
-        },
+        Operation::new(document.clone()),
         ExecuteOptions::default(),
     ));
     let value: Value = serde_json::from_slice(&output.payloads[0].json).unwrap();
@@ -244,11 +240,7 @@ fn set_based_and_hints() {
                     mutation: Mutation,
                 },
                 App::default(),
-                Operation {
-                    document: document.clone(),
-                    operation_name: None,
-                    variables: Default::default(),
-                },
+                Operation::new(document.clone()),
                 ExecuteOptions::default(),
                 |payload| seen.push(serde_json::to_value(&payload).unwrap()),
             )

@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 fn options(behavior: ErrorBehavior) -> ExecuteOptions {
     ExecuteOptions {
-        error_behavior: behavior,
+        default_error_behavior: behavior,
         ..Default::default()
     }
 }
@@ -33,11 +33,7 @@ fn both(
             mutation: MutationRoot,
         },
         make_app(),
-        Operation {
-            document: document.clone(),
-            operation_name: None,
-            variables: variables.clone(),
-        },
+        Operation::new(document.clone()).with_variables(variables.clone()),
         options(behavior),
     ));
     let bfs: Value = serde_json::from_slice(&output.payloads[0].json).unwrap();
@@ -48,11 +44,7 @@ fn both(
             mutation: MutationRoot,
         },
         make_app(),
-        Operation {
-            document: document.clone(),
-            operation_name: None,
-            variables,
-        },
+        Operation::new(document.clone()).with_variables(variables),
         options(behavior),
     ));
     (bfs, reference.response, reference.calls)
@@ -270,11 +262,7 @@ fn reference_calls_once_per_object() {
             calls: Some(bfs_calls.clone()),
             ..Default::default()
         },
-        Operation {
-            document: document.clone(),
-            operation_name: None,
-            variables: Default::default(),
-        },
+        Operation::new(document.clone()),
         ExecuteOptions::default(),
     ));
     let reference = block_on(greem_reference::execute(
@@ -284,11 +272,7 @@ fn reference_calls_once_per_object() {
             mutation: MutationRoot,
         },
         App::default(),
-        Operation {
-            document: document.clone(),
-            operation_name: None,
-            variables: Default::default(),
-        },
+        Operation::new(document.clone()),
         ExecuteOptions::default(),
     ));
     // BFS: users(1) + posts(1) + title(1) + author(1) + name(1) = 5 scope calls.

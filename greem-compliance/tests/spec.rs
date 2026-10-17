@@ -142,7 +142,7 @@ fn error_behavior_modes() {
         query,
         Value::Null,
         ExecuteOptions {
-            error_behavior: ErrorBehavior::Null,
+            default_error_behavior: ErrorBehavior::Null,
             ..Default::default()
         },
     );
@@ -156,7 +156,7 @@ fn error_behavior_modes() {
         query,
         Value::Null,
         ExecuteOptions {
-            error_behavior: ErrorBehavior::Halt,
+            default_error_behavior: ErrorBehavior::Halt,
             ..Default::default()
         },
     );
@@ -183,7 +183,7 @@ fn errors_are_ordered_by_generation_then_field_then_object() {
         "{ users { posts { title } email } }",
         Value::Null,
         ExecuteOptions {
-            error_behavior: ErrorBehavior::Null,
+            default_error_behavior: ErrorBehavior::Null,
             ..Default::default()
         },
     );
@@ -220,7 +220,7 @@ fn errors_within_a_generation_are_field_then_object() {
         "{ users { name email } }",
         Value::Null,
         ExecuteOptions {
-            error_behavior: ErrorBehavior::Null,
+            default_error_behavior: ErrorBehavior::Null,
             ..Default::default()
         },
     );
@@ -244,7 +244,7 @@ fn errors_within_a_generation_are_field_then_object() {
 #[test]
 fn deferred_errors_are_field_then_object_too() {
     let options = ExecuteOptions {
-        error_behavior: ErrorBehavior::Null,
+        default_error_behavior: ErrorBehavior::Null,
         incremental: IncrementalDelivery::Enabled,
     };
     let (payloads, _) = run(
@@ -336,7 +336,7 @@ fn cardinality_failure_is_a_framework_error_per_parent() {
         "{ users { posts { title } } }",
         Value::Null,
         ExecuteOptions {
-            error_behavior: ErrorBehavior::Null,
+            default_error_behavior: ErrorBehavior::Null,
             ..Default::default()
         },
     );
@@ -368,7 +368,7 @@ fn mutation_roots_run_serially_and_stop_on_propagated_null() {
         r#"mutation { a: rename(id: "0", name: "x") { name } fail b: rename(id: "1", name: "y") { name } }"#,
         Value::Null,
         ExecuteOptions {
-            error_behavior: ErrorBehavior::Null,
+            default_error_behavior: ErrorBehavior::Null,
             ..Default::default()
         },
     );
@@ -388,7 +388,7 @@ fn serial_mutation_errors_follow_execution_order() {
         r#"mutation { rename(id: "0", name: "x") { email } fail }"#,
         Value::Null,
         ExecuteOptions {
-            error_behavior: ErrorBehavior::Null,
+            default_error_behavior: ErrorBehavior::Null,
             ..Default::default()
         },
     );
@@ -602,7 +602,7 @@ fn a_custom_scalar_completing_to_null_at_a_non_null_position_is_an_error() {
     };
     for behavior in [ErrorBehavior::Propagate, ErrorBehavior::Halt] {
         let options = ExecuteOptions {
-            error_behavior: behavior,
+            default_error_behavior: behavior,
             ..Default::default()
         };
         let (v, _) = single(world(1, 0), query, Value::Null, options);
@@ -610,7 +610,7 @@ fn a_custom_scalar_completing_to_null_at_a_non_null_position_is_an_error() {
         null_error(&v);
     }
     let options = ExecuteOptions {
-        error_behavior: ErrorBehavior::Null,
+        default_error_behavior: ErrorBehavior::Null,
         ..Default::default()
     };
     let (v, _) = single(world(1, 0), query, Value::Null, options);
@@ -784,7 +784,7 @@ fn stream_non_null_item_error_terminates_the_stream() {
 #[test]
 fn halt_inside_a_deferred_group_leaves_others_alive() {
     let options = ExecuteOptions {
-        error_behavior: ErrorBehavior::Halt,
+        default_error_behavior: ErrorBehavior::Halt,
         incremental: IncrementalDelivery::Enabled,
     };
     let (p, _) = run(
@@ -859,7 +859,7 @@ fn null_behavior_keeps_streaming_past_non_null_item_errors() {
     // drafts: [Post!]!: under Null nothing propagates, so a failed item is null
     // and the source continues, exactly as the Disabled run.
     let options = ExecuteOptions {
-        error_behavior: ErrorBehavior::Null,
+        default_error_behavior: ErrorBehavior::Null,
         incremental: IncrementalDelivery::Enabled,
     };
     let query = "{ users(first: 1) { drafts @stream(initialCount: 0) { id } } }";
@@ -881,7 +881,7 @@ fn null_behavior_keeps_streaming_past_non_null_item_errors() {
         query,
         Value::Null,
         ExecuteOptions {
-            error_behavior: ErrorBehavior::Null,
+            default_error_behavior: ErrorBehavior::Null,
             ..Default::default()
         },
     );
@@ -942,11 +942,7 @@ fn streamed_items_ship_in_list_order_per_parent() {
                 mutation: greem_compliance::world::MutationRoot,
             },
             World::seeded(2, 4),
-            greem::Operation {
-                document: document.clone(),
-                operation_name: None,
-                variables: Default::default(),
-            },
+            greem::Operation::new(document.clone()),
             options,
         ))
         .payloads
@@ -1030,11 +1026,7 @@ fn reused_turn_slots_register_progress() {
             mutation: greem_compliance::world::MutationRoot,
         },
         World::seeded(1, 3),
-        greem::Operation {
-            document: document.clone(),
-            operation_name: None,
-            variables: Default::default(),
-        },
+        greem::Operation::new(document.clone()),
         incremental(),
     ));
     let payloads: Vec<Value> = output
@@ -1099,7 +1091,7 @@ fn an_ended_stream_completes_without_waiting_for_other_streams() {
         world(1, 0),
         "{ noisy(count: 0) @stream(initialCount: 0) stuck @stream(initialCount: 1) }",
         ExecuteOptions {
-            error_behavior: ErrorBehavior::Null,
+            default_error_behavior: ErrorBehavior::Null,
             incremental: IncrementalDelivery::Enabled,
         },
     );
@@ -1135,7 +1127,7 @@ fn halt_reports_the_first_error_while_a_sibling_is_still_pending() {
         gated("User.name", failing(1, 0, &[("User", "email", 0)])),
         "{ users(first: 1) { name email } }",
         ExecuteOptions {
-            error_behavior: ErrorBehavior::Halt,
+            default_error_behavior: ErrorBehavior::Halt,
             ..Default::default()
         },
     );
@@ -1183,7 +1175,7 @@ fn halt_keeps_the_error_recorded_inside_a_pending_column() {
         world(1, 0),
         "{ stuck }",
         ExecuteOptions {
-            error_behavior: ErrorBehavior::Halt,
+            default_error_behavior: ErrorBehavior::Halt,
             ..Default::default()
         },
     );
@@ -1207,7 +1199,7 @@ fn halt_ships_an_initial_pull_error_while_another_parent_still_pulls() {
         },
         "{ users(first: 2) { drafts @stream(initialCount: 2) { id } } }",
         ExecuteOptions {
-            error_behavior: ErrorBehavior::Halt,
+            default_error_behavior: ErrorBehavior::Halt,
             incremental: IncrementalDelivery::Enabled,
         },
     );
@@ -1225,7 +1217,7 @@ fn halt_stops_pulling_a_nullable_stream_at_the_first_error() {
     // numbers: [Int] absorbs item errors under other behaviors; under Halt the
     // source must not be polled again (it panics if it is).
     let options = ExecuteOptions {
-        error_behavior: ErrorBehavior::Halt,
+        default_error_behavior: ErrorBehavior::Halt,
         incremental: IncrementalDelivery::Enabled,
     };
     let world = || World {
@@ -1264,7 +1256,7 @@ fn halt_does_not_pull_later_parents_of_the_halted_group() {
             query,
             Value::Null,
             ExecuteOptions {
-                error_behavior: ErrorBehavior::Halt,
+                default_error_behavior: ErrorBehavior::Halt,
                 incremental: IncrementalDelivery::Enabled,
             },
         );
@@ -1287,7 +1279,7 @@ fn halt_stops_pulling_at_an_item_its_scalar_cannot_represent() {
             world(1, 0),
             query,
             ExecuteOptions {
-                error_behavior: ErrorBehavior::Halt,
+                default_error_behavior: ErrorBehavior::Halt,
                 incremental: IncrementalDelivery::Enabled,
             },
         );
@@ -1368,7 +1360,7 @@ fn an_initial_pull_stops_at_a_custom_scalar_null_a_non_null_item_cannot_hold() {
     // pull waits for a second item.
     for behavior in [ErrorBehavior::Propagate, ErrorBehavior::Halt] {
         let options = ExecuteOptions {
-            error_behavior: behavior,
+            default_error_behavior: behavior,
             incremental: IncrementalDelivery::Enabled,
         };
         let payloads = run_until_stalled(
@@ -1403,7 +1395,7 @@ fn halted_stream_groups_fail_with_their_error() {
         "{ numbers(fail: 0) @stream(initialCount: 0) }",
         Value::Null,
         ExecuteOptions {
-            error_behavior: ErrorBehavior::Halt,
+            default_error_behavior: ErrorBehavior::Halt,
             incremental: IncrementalDelivery::Enabled,
         },
     );
@@ -1425,7 +1417,7 @@ fn halted_stream_groups_fail_with_their_error() {
         gated("Post.id", failing(1, 1, &[("Post", "title", 0)])),
         "{ users(first: 1) { drafts @stream(initialCount: 0) { id title } } }",
         ExecuteOptions {
-            error_behavior: ErrorBehavior::Halt,
+            default_error_behavior: ErrorBehavior::Halt,
             incremental: IncrementalDelivery::Enabled,
         },
     );
@@ -1449,7 +1441,7 @@ fn announced_fragments_under_a_failed_stream_fail_with_it() {
         "{ search @stream(initialCount: 0) { ... on User { id ... @defer { friends { id } } } } }",
         Value::Null,
         ExecuteOptions {
-            error_behavior: ErrorBehavior::Halt,
+            default_error_behavior: ErrorBehavior::Halt,
             incremental: IncrementalDelivery::Enabled,
         },
         Some(1),
@@ -1893,11 +1885,7 @@ fn depth_counts_composites_defer_and_stream() {
                     mutation: greem_compliance::world::MutationRoot,
                 },
                 World::seeded(1, 1),
-                greem::Operation {
-                    document: document.clone(),
-                    operation_name: None,
-                    variables: Default::default(),
-                },
+                greem::Operation::new(document.clone()),
                 incremental(),
             ));
             let v: Value = serde_json::from_slice(&output.payloads[0].json).unwrap();

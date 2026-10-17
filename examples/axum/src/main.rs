@@ -350,7 +350,7 @@ async fn graphql(State(schema): State<Schema>, parts: Parts, body: Bytes) -> Res
         mutation: MutationRoot,
     };
     let options = ExecuteOptions {
-        error_behavior: ErrorBehavior::Propagate,
+        default_error_behavior: ErrorBehavior::Propagate,
         incremental: IncrementalDelivery::Enabled,
     };
     let request = greem::http::RequestParts::from_http(&parts, &body);
@@ -559,11 +559,7 @@ mod tests {
                     mutation: MutationRoot,
                 },
                 app,
-                greem::Operation {
-                    document,
-                    operation_name: None,
-                    variables: Default::default(),
-                },
+                greem::Operation::new(document),
                 ExecuteOptions::default(),
             )
             .await;

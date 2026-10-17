@@ -39,11 +39,7 @@ fn run(query: &str, users: u32, items_per_user: u32) -> Work {
                     mutation: MutationRoot,
                 },
                 World::seeded(users, 3),
-                Operation {
-                    document,
-                    operation_name: None,
-                    variables: Default::default(),
-                },
+                Operation::new(document),
                 ExecuteOptions {
                     incremental: IncrementalDelivery::Enabled,
                     ..Default::default()

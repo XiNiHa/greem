@@ -274,6 +274,17 @@ error its non-null item cannot absorb, one that reaches the item through
 non-null positions only, so such an item never waits for the next one. Delivered data is never rewritten: a walk that
 would cross a delivery boundary fails the group instead.
 
+The behavior is chosen per request, following graphql-spec #1163 (unmerged,
+October 2026): the request's top-level `onError` attribute, `NULL`,
+`PROPAGATE` or `HALT`, on GET, POST and QUERY alike. Any other value is not
+well-formed (422, before the document is parsed); `null` is absent.
+`Schema::plan` resolves the effective behavior in this order: `onError`, then
+`NULL` if the executed operation carries graphql-js's
+`@experimental_disableErrorPropagation` (only a schema that declares the
+directive validates such a document; greem-build does not inject it), then
+`ExecuteOptions::default_error_behavior`. There is no server allowlist and no
+support advertisement, and the RFC's contested `pathNonNull` is not emitted.
+
 ### Incremental delivery
 
 - A delivery group instance is `(defer usage, object)` or `(stream field, parent object)`
