@@ -153,6 +153,16 @@ _Avoid_: Message, stream turn (that is `@stream`), payload, tick
 A subscription's output: one complete response per event, in event-source order, pulled like any execution and cancelled by being dropped; it ends when the event source ends.
 _Avoid_: Subscription stream, event stream, incremental stream, payload stream
 
+### HTTP
+
+**Transport**:
+The protocol that carries operations to greem and responses back: GraphQL over HTTP, which greem serves without owning a connection, or a connection protocol such as graphql-ws, which an adapter owns. Every transport receives the same response stream; the executor never sees one.
+_Avoid_: Protocol (alone), endpoint, server, integration (that is the adapter or handler using a transport)
+
+**Framing**:
+How one execution's payloads are laid out inside an HTTP response: a single body, multipart parts, or server-sent events. Chosen by negotiating the client's `Accept` before the first payload exists; the executor ships the same payloads under any framing.
+_Avoid_: Encoding (that is the payload's serialization), mode, format, transport (a framing lives inside one)
+
 ### Codegen
 
 **Schema compilation**:
