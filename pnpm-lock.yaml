@@ -20,6 +20,9 @@ importers:
       graphql-http:
         specifier: 1.23.1
         version: 1.23.1(graphql@17.0.2)
+      graphql-sse:
+        specifier: 2.6.3
+        version: 2.6.3(graphql@17.0.2)
 
 packages:
 
@@ -151,6 +154,12 @@ packages:
     peerDependencies:
       graphql: '>=0.11 <=17'
 
+  graphql-sse@2.6.3:
+    resolution: {integrity: sha512-UCSx3a+IklDOqJt8gpxGwDhnmWiZLJ5wNPMJ7TLGOQ68PhiKIDxLJBB2i+nKEGyWYLtiSLpTJ5fFEG5kkAxppA==}
+    engines: {node: '>=12'}
+    peerDependencies:
+      graphql: '>=0.11 <=17'
+
   graphql@17.0.2:
     resolution: {integrity: sha512-FRWbddMxfkjiB7z+aQDWIR+E34xo9I8c9mtK2RPv8PmMzKRvrdsreHL/Ui/TmwHJfhHChEtsFPyMHKI+xuarQQ==}
     engines: {node: ^22.0.0 || ^24.0.0 || ^25.0.0 || >=26.0.0}
@@ -235,6 +244,10 @@ snapshots:
     optional: true
 
   graphql-http@1.23.1(graphql@17.0.2):
+    dependencies:
+      graphql: 17.0.2
+
+  graphql-sse@2.6.3(graphql@17.0.2):
     dependencies:
       graphql: 17.0.2
 

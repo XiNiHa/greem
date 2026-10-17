@@ -18,11 +18,13 @@ what codegen emits: build any consumer and open `target/debug/build/<crate>-*/ou
 - `cargo test -p greem --all-features --test http`
   - `greem::http::handle` over `greem-test-app`: GET, POST and QUERY, `Accept` negotiation across JSON, `multipart/mixed` and `text/event-stream`, the status codes and media types of the GraphQL-over-HTTP draft and ADR-0014's SSE-only exception, subscriptions as event streams and the 406 without one, through the `http` feature too.
 - `cargo test -p greem-example-axum`
-  - The axum example: `build.rs` codegen, hand-written and sugared resolvers, a member enum, a lookbehind hint, JSON and `multipart/mixed` responses through `greem::http::handle`.
+  - The axum example: `build.rs` codegen, hand-written and sugared resolvers, a member enum, a lookbehind hint, a subscription, and JSON, `multipart/mixed` and `text/event-stream` responses through `greem::http::handle`.
 - `cargo run -p greem-example-axum`
   - Serves GET, POST and QUERY `/graphql` on `127.0.0.1:8080`.
 - `node http-audit/audit.mjs [url]`
   - graphql-http's GraphQL-over-HTTP server audits against a running server, the example by default (`pnpm install` first; Node and pnpm are pinned in `mise.toml`), gated with `http-audit/overrides.json` (ADR-0012). `.github/workflows/http-audit.yml` runs it against the example on every push and pull request, and `http-audit-comment.yml` posts the report on the pull request.
+- `node http-audit/sse.mjs [url]`
+  - The graphql-sse reference client in distinct connections mode against a running server: a query, a subscription, incremental delivery and a validation error, each read as events (ADR-0014). The same workflow runs it after the audit.
 - `cargo test -p greem-bench --features http`
   - Every workload under `bench/workloads/` at its smallest size still produces its oracle, the merged response for an incremental workload (`GREEM_BENCH_BLESS=1` rewrites them); the merge itself; the `serve` binary's router over the bench `App`.
 - `cd bench && cargo run --release -p greem-bench-driver`

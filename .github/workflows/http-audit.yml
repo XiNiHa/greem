@@ -45,6 +45,9 @@ jobs:
           mkdir -p "$RUNNER_TEMP/report"
           node http-audit/audit.mjs "$URL" --report "$RUNNER_TEMP/report/report.md"
 
+      - name: Check the event framing with the graphql-sse client
+        run: node http-audit/sse.mjs "$URL"
+
       - name: Summarize
         if: always() && steps.audit.outcome != 'skipped'
         run: |
