@@ -222,15 +222,18 @@ impl Operation {
 /// introspection result and the operation kind, bound to the options it was
 /// planned under. Hints read the request context during planning, so a plan
 /// belongs to the request it was made for and is never reused across
-/// requests.
-pub struct Plan {
+/// requests. Its typed entries are the generated plan types of one schema,
+/// so a plan runs only on the `Schema` value that made it.
+pub struct Plan<I: SchemaInfo, C = (), Q = (), M = NoMutation> {
+    schema: Arc<Inner>,
     table: Arc<PlanTable>,
     introspection: Option<serde_json::Value>,
     is_mutation: bool,
     options: ExecuteOptions,
+    _marker: Marker<I, C, Q, M>,
 }
 
-impl Plan {
+impl<I: SchemaInfo, C, Q, M> Plan<I, C, Q, M> {
     /// The reference executor's view: the table, the introspection JSON and
     /// the operation kind.
     #[doc(hidden)]
@@ -240,7 +243,7 @@ impl Plan {
     }
 }
 
-impl std::fmt::Debug for Plan {
+impl<I: SchemaInfo, C, Q, M> std::fmt::Debug for Plan<I, C, Q, M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Plan")
             .field("is_mutation", &self.is_mutation)
@@ -435,7 +438,7 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
         op: &Operation,
         ctx: &C,
         options: ExecuteOptions,
-    ) -> Result<Plan, RequestErrors>
+    ) -> Result<Plan<I, C, Q, M>, RequestErrors>
     where
         Q: Outputs<I::Query, C>,
         M: Outputs<I::Mutation, C>,
@@ -457,10 +460,12 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
         table.usages = tree.usages.clone();
         table.compute_beneath();
         Ok(Plan {
+            schema: self.inner.clone(),
             table: Arc::new(table),
             introspection,
             is_mutation,
             options,
+            _marker: PhantomData,
         })
     }
 
@@ -493,13 +498,18 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
         })
     }
 
-    /// Executes a plan made by `plan` with the same `ctx`, streaming like
-    /// `execute_stream`.
+    /// Executes a plan this schema made with `plan` and the same `ctx`,
+    /// streaming like `execute_stream`.
+    ///
+    /// # Panics
+    ///
+    /// If the plan was made by another `Schema` value, whose depth and
+    /// stream limits it was checked against.
     pub fn execute_plan_stream<T, E>(
         &self,
         roots: Roots<Q, M>,
         ctx: C,
-        plan: Plan,
+        plan: Plan<I, C, Q, M>,
         encode: E,
     ) -> impl Stream<Item = T> + Send + use<I, C, Q, M, T, E>
     where
@@ -508,6 +518,10 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
         T: Send,
         E: for<'p> FnMut(Payload<'p>) -> T + Send,
     {
+        assert!(
+            Arc::ptr_eq(&self.inner, &plan.schema),
+            "a Plan runs only on the Schema that made it"
+        );
         let schema = self.clone();
         pull(encode, move |mut outlet| async move {
             schema.run(roots, ctx, plan, &mut outlet).await
@@ -599,7 +613,7 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
         })
     }
 
-    async fn run(&self, roots: Roots<Q, M>, ctx: C, plan: Plan, outlet: &mut dyn Ship)
+    async fn run(&self, roots: Roots<Q, M>, ctx: C, plan: Plan<I, C, Q, M>, outlet: &mut dyn Ship)
     where
         Q: Outputs<I::Query, C> + Send + Sync,
         M: Outputs<I::Mutation, C> + Send + Sync,
@@ -609,6 +623,7 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
             introspection,
             is_mutation,
             options,
+            ..
         } = plan;
         let shared = Shared {
             groups: Mutex::new(Groups::new()),
