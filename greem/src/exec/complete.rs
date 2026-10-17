@@ -13,9 +13,10 @@ use crate::exec::scope::{
 };
 use crate::exec::state::{ErrorBehavior, GroupId, GroupKind, Shared};
 use crate::exec::stream::{StreamDriver, StreamState};
+use crate::exec::subscription::{EventSourceState, Events, SubscribeFuture};
 use crate::plan::{Leaf as LeafPath, PlanHeader, PlanId, PlanTable, Walker};
 use crate::resolver::{
-    Args, As, Either, Field, List, Nullable, Outputs, Resolver, Shape, Streamed,
+    Args, As, Either, EventSource, Field, List, Nullable, Outputs, Resolver, Shape, Streamed,
 };
 use crate::tree::{Abort, FieldKind, NodeId};
 use crate::value::{ToLeaf, Value};
@@ -138,6 +139,32 @@ pub trait Completes<T, C>: Sized {
         C: 'a,
     {
         unreachable!("start_fields is only implemented by object type tags")
+    }
+
+    /// The subscription root tag only: resolves the operation's one root
+    /// field on `root` and hands back its event source.
+    fn subscribe<'a>(_cx: &FieldsCx<'a, C>, _root: &'a T) -> SubscribeFuture<'a, C>
+    where
+        T: 'a,
+        C: 'a,
+    {
+        unreachable!("subscribe is only implemented by the subscription root tag")
+    }
+
+    /// Event-source tags only: the events a subscription root field's output
+    /// yields, each to be executed at `field` as one response, or the error
+    /// that is the subscription's one response instead.
+    fn events<'a>(
+        _value: T,
+        _field: u32,
+        _shape: Shape,
+        _objects: bool,
+    ) -> Result<Box<dyn Events<'a, C> + 'a>, Error>
+    where
+        T: 'a,
+        C: 'a,
+    {
+        unreachable!("events is only implemented by event-source tags")
     }
 }
 
@@ -547,6 +574,125 @@ pub struct ObjectBatch<'a, T, Ty, C> {
     pub tag: PhantomData<fn() -> Ty>,
 }
 
+impl<'a, T, Ty, C> ObjectBatch<'a, T, Ty, C>
+where
+    T: Outputs<Ty, C> + Send + Sync + 'a,
+    Ty: 'static,
+    C: Send + Sync + 'a,
+{
+    fn fields_cx(&self) -> FieldsCx<'_, C> {
+        let base_groups: Vec<GroupId> = self.meta.objects.iter().map(|o| o.group).collect();
+        FieldsCx {
+            shared: self.shared,
+            app: self.app,
+            table: self.table,
+            header: self.header,
+            entry: self.entry,
+            meta: &self.meta,
+            contexts: &self.contexts,
+            groups: Arc::from(&base_groups[..]),
+            path: self.path.clone(),
+            signal: self.signal.clone(),
+            keep: &self.keep,
+        }
+    }
+
+    /// The subscription root: resolves the operation's one root field once
+    /// and hands back its event source.
+    pub(crate) fn subscribe(&self) -> SubscribeFuture<'_, C> {
+        let cx = self.fields_cx();
+        T::__subscribe(&cx, &self.values[0])
+    }
+}
+
+/// The root scope's owner: one root value under the root Plan entry.
+pub(crate) fn root_batch<'a, T, Ty, C>(
+    value: T,
+    shared: &'a Shared,
+    app: &'a C,
+    table: &'a PlanTable,
+    serial: bool,
+) -> ObjectBatch<'a, T, Ty, C>
+where
+    T: Outputs<Ty, C> + Send + Sync,
+    C: Send + Sync,
+{
+    let entry = table
+        .lookup(0, &LeafPath::default())
+        .expect("root plan entry");
+    let header = table.header(entry);
+    let mut pending = SmallVec::new();
+    let shared_sets;
+    {
+        let mut groups = shared.groups();
+        for &usage in &header.introduced {
+            let usage_def = &table.usages[usage as usize];
+            let parent_group = match usage_def.parent {
+                Some(p) => pending
+                    .iter()
+                    .find(|(u, _)| *u == p)
+                    .map(|(_, g)| *g)
+                    .unwrap_or(0),
+                None => 0,
+            };
+            let g = groups.alloc(
+                GroupKind::Defer {
+                    usage,
+                    label: usage_def.label.clone(),
+                    path: Arc::from([]),
+                    after: None,
+                },
+                parent_group,
+            );
+            groups.set_carrier(g, Arc::from(Vec::new()), 0);
+            pending.push((usage, g));
+        }
+        groups.retain(0);
+        for &(_, g) in &pending {
+            groups.retain(g);
+        }
+        shared_sets = groups.alloc_shared(&header.sets, &pending, 0);
+    }
+    let contexts = (0..header.fields.len())
+        .map(|i| {
+            Context::new(
+                app,
+                Some(HintAddr {
+                    table,
+                    entry,
+                    field: i as u32,
+                }),
+            )
+        })
+        .collect();
+    ObjectBatch {
+        values: vec![value],
+        contexts,
+        path: Arc::from(Vec::new()),
+        signal: Signal::root(),
+        meta: ScopeMeta {
+            entry,
+            generation: 0,
+            objects: vec![ObjectMeta {
+                group: 0,
+                parent: 0,
+                indices: SmallVec::new(),
+                pending,
+                shared: shared_sets,
+            }],
+            serial,
+            parent: None,
+        },
+        shared,
+        app,
+        table,
+        header,
+        entry,
+        keep: Default::default(),
+        tag: PhantomData,
+    }
+}
+
 impl<T, Ty, C> Drop for ObjectBatch<'_, T, Ty, C> {
     fn drop(&mut self) {
         if let Some(mut groups) = self.shared.groups_for_drop() {
@@ -580,19 +726,7 @@ where
     fn start<'this>(&'this self) -> Scope<'this> {
         let parents: Vec<&'this T> = self.values.iter().collect();
         let base_groups: Vec<GroupId> = self.meta.objects.iter().map(|o| o.group).collect();
-        let cx = FieldsCx {
-            shared: self.shared,
-            app: self.app,
-            table: self.table,
-            header: self.header,
-            entry: self.entry,
-            meta: &self.meta,
-            contexts: &self.contexts,
-            groups: Arc::from(&base_groups[..]),
-            path: self.path.clone(),
-            signal: self.signal.clone(),
-            keep: &self.keep,
-        };
+        let cx = self.fields_cx();
         let futures = T::__start_fields(&cx, &parents, 0);
         let deferred = (1..self.header.sets.len())
             .map(|set| {
@@ -691,6 +825,8 @@ pub(crate) fn new_column<'a>(
 /// Whether the innermost position of `Ty` is an object (child scopes) or a leaf.
 pub trait InnerKind {
     const OBJECTS: bool;
+    /// A subscription root field: its output is an event source, not a value.
+    const EVENTS: bool = false;
 }
 
 impl<Ty: InnerKind> InnerKind for List<Ty> {
@@ -698,6 +834,10 @@ impl<Ty: InnerKind> InnerKind for List<Ty> {
 }
 impl<Ty: InnerKind> InnerKind for Nullable<Ty> {
     const OBJECTS: bool = Ty::OBJECTS;
+}
+impl<Ty: InnerKind> InnerKind for EventSource<Ty> {
+    const OBJECTS: bool = Ty::OBJECTS;
+    const EVENTS: bool = true;
 }
 impl InnerKind for crate::value::scalars::Int {
     const OBJECTS: bool = false;
@@ -750,9 +890,10 @@ where
         };
         let mut cc =
             Completion::immediate(&cx, index, &mut column, LeafPath::default(), generation);
-        let args = match args {
-            Ok(args) => args,
-            Err(error) => {
+        let refused = cx.header.fields[index as usize].refused.as_ref();
+        let args = match (args, refused) {
+            (Ok(args), None) => args,
+            (Err(error), _) | (_, Some(error)) => {
                 for &i in &live {
                     cc.error(&base(i), error.clone());
                 }
@@ -1599,6 +1740,105 @@ where
 {
     <Ty as Completes<A, C>>::walk(w, node, &leaf.push(0))?;
     <Ty as Completes<B, C>>::walk(w, node, &leaf.push(1))
+}
+
+/// A subscription root field's output: any stream of `Result<T, Error>` whose
+/// items output the field's type. The field is never completed as a column;
+/// its events are each executed as one response.
+impl<S, T, Ty, C> Completes<S, C> for EventSource<Ty>
+where
+    S: Stream<Item = Result<T, Error>> + Send,
+    T: Outputs<Ty, C> + Send,
+    Ty: 'static,
+    C: Send + Sync,
+{
+    fn walk<'a>(w: &mut Walker<'_, C>, node: NodeId, leaf: &LeafPath) -> Result<(), Abort>
+    where
+        S: 'a,
+        C: 'a,
+    {
+        T::__walk(w, node, leaf)
+    }
+
+    fn complete<'a>(_: Vec<S>, _: Vec<Pos>, _: &mut Completion<'a, '_, C>)
+    where
+        S: 'a,
+        C: 'a,
+    {
+        unreachable!("an event source is subscribed to, never completed as a column")
+    }
+
+    fn events<'a>(
+        value: S,
+        field: u32,
+        shape: Shape,
+        objects: bool,
+    ) -> Result<Box<dyn Events<'a, C> + 'a>, Error>
+    where
+        S: 'a,
+        C: 'a,
+    {
+        Ok(Box::new(EventSourceState::<S, Ty, C>::new(
+            value, field, shape, objects,
+        )))
+    }
+
+    #[cfg(feature = "reference-executor")]
+    fn reference<'v, 's: 'v>(value: S, rc: &RefCompletion<'s, C>) -> BoxFuture<'v, RefValue>
+    where
+        S: 'v,
+        C: 'v,
+    {
+        let rc = rc.clone();
+        Box::pin(async move {
+            let mut source = value.boxed();
+            while let Some(item) = source.next().await {
+                let value = match (&rc.refused, item) {
+                    (Some(refused), _) => rc.error(refused.clone()).await,
+                    (None, Ok(value)) => T::__reference(value, &rc).await,
+                    (None, Err(error)) => rc.error(error).await,
+                };
+                rc.push_event(value);
+            }
+            Ok(serde_json::Value::Null)
+        })
+    }
+}
+
+impl<C> Completes<crate::resolver::NoSubscription, C> for crate::resolver::NoSubscriptionType {
+    fn walk<'a>(_: &mut Walker<'_, C>, _: NodeId, _: &LeafPath) -> Result<(), Abort>
+    where
+        crate::resolver::NoSubscription: 'a,
+        C: 'a,
+    {
+        Err(Abort::one(
+            crate::error::RequestErrorKind::Operation,
+            "the schema declares no subscription type",
+            Vec::new(),
+        ))
+    }
+
+    fn complete<'a>(
+        _: Vec<crate::resolver::NoSubscription>,
+        _: Vec<Pos>,
+        _: &mut Completion<'a, '_, C>,
+    ) where
+        crate::resolver::NoSubscription: 'a,
+        C: 'a,
+    {
+    }
+
+    #[cfg(feature = "reference-executor")]
+    fn reference<'v, 's: 'v>(
+        _: crate::resolver::NoSubscription,
+        _: &RefCompletion<'s, C>,
+    ) -> BoxFuture<'v, RefValue>
+    where
+        crate::resolver::NoSubscription: 'v,
+        C: 'v,
+    {
+        Box::pin(async { Err(()) })
+    }
 }
 
 impl<C> Completes<crate::resolver::NoMutation, C> for crate::resolver::NoMutationType {

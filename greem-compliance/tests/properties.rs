@@ -182,7 +182,7 @@ proptest! {
             .unwrap();
         let document = schema.parse(&query).unwrap();
         let output = futures::executor::block_on(schema.execute(
-            greem::Roots { query: greem_compliance::world::QueryRoot, mutation: greem_compliance::world::MutationRoot },
+            greem::Roots::query(greem_compliance::world::QueryRoot).with_mutation(greem_compliance::world::MutationRoot),
             World::seeded(2, 0),
             greem::Operation::new(document.clone()),
             ExecuteOptions::default(),
@@ -190,7 +190,7 @@ proptest! {
         let response: Value = serde_json::from_slice(&output.payloads[0].json).unwrap();
         let reference = futures::executor::block_on(greem_reference::execute(
             &schema,
-            greem::Roots { query: greem_compliance::world::QueryRoot, mutation: greem_compliance::world::MutationRoot },
+            greem::Roots::query(greem_compliance::world::QueryRoot).with_mutation(greem_compliance::world::MutationRoot),
             World::seeded(2, 0),
             greem::Operation::new(document.clone()),
             ExecuteOptions::default(),
@@ -198,7 +198,7 @@ proptest! {
         // users adds one level; each friends adds one.
         let rejected = depth + 1 > limit;
         prop_assert_eq!(response.get("data").is_none(), rejected, "depth {} limit {}: {}", depth, limit, response);
-        prop_assert_eq!(reference.response.get("data").is_none(), rejected);
+        prop_assert_eq!(reference.response().get("data").is_none(), rejected);
     }
 }
 

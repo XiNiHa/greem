@@ -158,8 +158,8 @@ pub enum RequestErrorKind {
     /// The document fails validation or one of greem's own checks on it,
     /// such as the execution depth.
     Validation,
-    /// The operation to execute cannot be determined, or greem does not
-    /// execute its kind.
+    /// The operation to execute cannot be determined, or the schema declares
+    /// no root type for its kind.
     Operation,
     /// The variables do not coerce to the operation's variable types.
     Variables,

@@ -428,7 +428,7 @@ pub(crate) fn stalled(groups: &mut Groups, initial_shipped: bool) -> BarrierOutp
     );
     if !initial_shipped {
         return BarrierOutput {
-            kind: PayloadKind::Initial,
+            kind: PayloadKind::Response,
             data: Data::Null,
             errors: vec![error],
             entries: Entries::default(),
@@ -457,7 +457,7 @@ pub(crate) fn stalled(groups: &mut Groups, initial_shipped: bool) -> BarrierOutp
         });
     }
     BarrierOutput {
-        kind: PayloadKind::Subsequent,
+        kind: PayloadKind::Incremental,
         data: Data::Absent,
         errors: Vec::new(),
         entries,
@@ -487,7 +487,7 @@ pub(crate) fn barrier(
     if let ControlFlow::Break(errors) = barrier.ship_groups() {
         state.done = true;
         return Some(BarrierOutput {
-            kind: PayloadKind::Initial,
+            kind: PayloadKind::Response,
             data: Data::Null,
             errors,
             entries: barrier.out,
@@ -1110,7 +1110,7 @@ impl Barrier<'_, '_> {
                 state.done = true;
             }
             return Some(BarrierOutput {
-                kind: PayloadKind::Initial,
+                kind: PayloadKind::Response,
                 data,
                 errors,
                 entries: self.out,
@@ -1126,7 +1126,7 @@ impl Barrier<'_, '_> {
             return None;
         }
         Some(BarrierOutput {
-            kind: PayloadKind::Subsequent,
+            kind: PayloadKind::Incremental,
             data: Data::Absent,
             errors: Vec::new(),
             entries: self.out,
@@ -1188,7 +1188,7 @@ mod tests {
         groups.set_state(shared, GroupState::Released);
 
         let output = stalled(&mut groups, true);
-        assert_eq!(output.kind, PayloadKind::Subsequent);
+        assert_eq!(output.kind, PayloadKind::Incremental);
         assert_eq!(output.has_next, Some(false));
         let failed: Vec<String> = output
             .entries
@@ -1215,7 +1215,7 @@ mod tests {
     #[test]
     fn a_stall_before_the_initial_payload_nulls_the_data() {
         let output = stalled(&mut Groups::new(), false);
-        assert_eq!(output.kind, PayloadKind::Initial);
+        assert_eq!(output.kind, PayloadKind::Response);
         assert!(matches!(output.data, Data::Null));
         assert_eq!(output.has_next, None);
         assert_eq!(output.errors.len(), 1);

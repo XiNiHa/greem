@@ -3,6 +3,7 @@
 //! any resolver runs.
 
 use crate::error::{Error, GraphQLError, Location, RequestErrorKind};
+use crate::schema::OperationKind;
 use crate::value::InputValue;
 use apollo_compiler::Node;
 use apollo_compiler::ast::{self, Type};
@@ -89,6 +90,9 @@ pub struct SelectedField {
     pub usages: Vec<UsageId>,
     pub stream: Option<StreamInfo>,
     pub spans: Vec<Location>,
+    /// An execution error the operation's shape raises at this field before
+    /// its resolver runs: `@stream` taking effect inside a subscription.
+    pub refused: Option<Error>,
     pub(crate) definition: Node<ast::FieldDefinition>,
     pub(crate) occurrences: Vec<Occurrence>,
 }
@@ -112,6 +116,9 @@ pub struct TreeNode {
     /// The defer usages the field producing this node's objects is delivered
     /// under; its fields are grouped relative to them.
     pub base: Vec<UsageId>,
+    /// `@defer` took effect in this node's selections inside a subscription:
+    /// the execution error the field producing the node raises per event.
+    pub refused: Option<Error>,
     source: Source,
 }
 
@@ -271,6 +278,7 @@ impl Tree {
             depth: 0,
             stream: None,
             base: Vec::new(),
+            refused: None,
             source: Source::Root,
         };
         Self {
@@ -298,8 +306,43 @@ impl Tree {
         &self.usages[id as usize]
     }
 
-    pub fn is_mutation(&self) -> bool {
-        self.operation.operation_type == ast::OperationType::Mutation
+    pub fn kind(&self) -> OperationKind {
+        match self.operation.operation_type {
+            ast::OperationType::Query => OperationKind::Query,
+            ast::OperationType::Mutation => OperationKind::Mutation,
+            ast::OperationType::Subscription => OperationKind::Subscription,
+        }
+    }
+
+    fn is_subscription(&self) -> bool {
+        self.operation.operation_type == ast::OperationType::Subscription
+    }
+
+    /// `@defer`/`@stream` taking effect inside a subscription: written with
+    /// a literal `if` it is a validation error, which apollo already raises
+    /// for `@defer`; bound to a variable it passes validation and is an
+    /// execution error at the enclosing field, once per event.
+    fn refuse_in_subscription(
+        &self,
+        directive: &Node<executable::Directive>,
+    ) -> Result<Error, Abort> {
+        let message = format!(
+            "`@{}` is not supported in a subscription; disable it by setting its `if` argument to false",
+            directive.name
+        );
+        let variable = matches!(
+            directive.specified_argument_by_name("if").map(Node::as_ref),
+            Some(ast::Value::Variable(_))
+        );
+        if variable {
+            Ok(Error::new(message))
+        } else {
+            Err(Abort::one(
+                RequestErrorKind::Validation,
+                message,
+                span_location(directive.location(), &self.doc.doc),
+            ))
+        }
     }
 
     pub(crate) fn usage_is_ancestor(&self, ancestor: UsageId, mut usage: UsageId) -> bool {
@@ -382,7 +425,12 @@ impl Tree {
             };
             // Disabled ignores the directive: its arguments are only
             // validated when it takes effect.
+            let mut refused = None;
             let stream = match directive {
+                Some((stream, _)) if self.is_subscription() => {
+                    refused = Some(self.refuse_in_subscription(stream)?);
+                    None
+                }
                 Some((_, arguments)) if self.incremental => Some(self.stream_info(arguments)?),
                 _ => None,
             };
@@ -431,6 +479,7 @@ impl Tree {
                     depth,
                     stream: stream.clone(),
                     base: set,
+                    refused: None,
                     source: Source::Fields(occurrences.clone()),
                 });
                 Some(id)
@@ -452,6 +501,7 @@ impl Tree {
                 usages,
                 stream,
                 spans,
+                refused,
                 definition,
                 occurrences,
             });
@@ -575,6 +625,13 @@ impl Tree {
         let Some(defer) = directives.get("defer") else {
             return Ok(usage_path.to_vec());
         };
+        if self.is_subscription() {
+            if self.incremental_condition(defer)? {
+                let refused = self.refuse_in_subscription(defer)?;
+                self.nodes[node as usize].refused.get_or_insert(refused);
+            }
+            return Ok(usage_path.to_vec());
+        }
         if !self.incremental {
             return Ok(usage_path.to_vec());
         }

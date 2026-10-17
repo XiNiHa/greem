@@ -1,8 +1,6 @@
 //! graphql-js `src/execution/__tests__/subscribe-test.ts`, case by case in upstream order.
 //!
-//! greem executes no subscription yet (#40): the cases that subscribe are
-//! written against the world's pre-seeded source and ignored; the cases
-//! rejected at parse pass today.
+//! The cases that subscribe run against the world's pre-seeded source.
 
 use crate::common::*;
 use greem::ExecuteOptions;
@@ -33,7 +31,6 @@ mod subscription_initialization_phase {
 
     /// it('accepts multiple subscription fields defined in schema')
     #[test]
-    #[ignore = "#40"]
     fn accepts_multiple_subscription_fields_defined_in_schema() {
         let (payloads, _) = foo_world().run(
             "subscription { foo }",
@@ -45,7 +42,6 @@ mod subscription_initialization_phase {
 
     /// it('accepts type definition with sync subscribe function')
     #[test]
-    #[ignore = "#40"]
     fn accepts_type_definition_with_sync_subscribe_function() {
         let (payloads, _) = foo_world().run(
             "subscription { foo }",
@@ -59,7 +55,6 @@ mod subscription_initialization_phase {
     ///
     /// The source is created after one yield.
     #[test]
-    #[ignore = "#40"]
     fn accepts_type_definition_with_async_subscribe_function() {
         let world = World {
             harness: Harness {
@@ -156,10 +151,8 @@ mod subscription_initialization_phase {
     ///
     /// Upstream's "returning an error" and "throwing an error": the source
     /// fails before any event, so the result is one error response with no
-    /// data, the error at the root field. greem's shape for a failed
-    /// source is undecided (#40); upstream's stands in.
+    /// data, the error at the root field.
     #[test]
-    #[ignore = "#40"]
     fn resolves_to_an_error_for_subscription_resolver_errors() {
         let world = World {
             source_error: Some("test error"),
@@ -185,7 +178,6 @@ mod subscription_initialization_phase {
     /// The async half of the case above, upstream's "resolving to an error"
     /// and "rejecting with an error": the source fails after one yield.
     #[test]
-    #[ignore = "#40"]
     fn resolves_to_an_error_for_subscription_resolver_errors_async() {
         let world = World {
             harness: Harness {
@@ -214,11 +206,8 @@ mod subscription_initialization_phase {
 
     /// it('resolves to an error if variables were wrong type')
     ///
-    /// Today the subscription is rejected before its variables are coerced.
-    /// The coercion wording was learnt by running the same variable against
-    /// a query operation; greem's coercion error carries no location.
+    /// greem's coercion error carries no location.
     #[test]
-    #[ignore = "#40"]
     fn resolves_to_an_error_if_variables_were_wrong_type() {
         let (payloads, _) = foo_world().run(
             r#"
@@ -298,7 +287,6 @@ mod subscription_publish_phase {
 
     /// it('produces a payload when queried fields are async')
     #[test]
-    #[ignore = "#40"]
     fn produces_a_payload_when_queried_fields_are_async() {
         let (payloads, _) = World::email_world(vec![yuzhi()]).run(
             SUBSCRIPTION,
@@ -327,7 +315,6 @@ mod subscription_publish_phase {
     /// The two events; the `return()` that follows them, the emit it
     /// refuses and the completed `next()` are the iterator protocol.
     #[test]
-    #[ignore = "#40"]
     fn produces_a_payload_per_subscription_event() {
         let (payloads, _) = World::email_world(vec![yuzhi(), hyo()]).run(
             SUBSCRIPTION,
@@ -360,10 +347,9 @@ mod subscription_publish_phase {
     /// it('subscribe function returns errors with @defer')
     ///
     /// `@defer` with a variable `if` passes validation and is an execution
-    /// error at the root field once the variable is true, for every event.
-    /// greem's wording for it is undecided (#40); upstream's stands in.
+    /// error at the root field once the variable is true, for every event;
+    /// the wording is greem's.
     #[test]
-    #[ignore = "#40"]
     fn subscribe_function_returns_errors_with_defer() {
         let (payloads, _) = World::email_world(vec![yuzhi(), hyo()]).run(
             SUBSCRIPTION,
@@ -373,7 +359,7 @@ mod subscription_publish_phase {
         let error_payload = json!({
             "data": {"importantEmail": null},
             "errors": [{
-                "message": "`@defer` directive not supported on subscription operations. Disable `@defer` by setting the `if` argument to `false`.",
+                "message": "`@defer` is not supported in a subscription; disable it by setting its `if` argument to false",
                 "locations": [{"line": 8, "column": 7}],
                 "path": ["importantEmail"],
             }],
@@ -386,7 +372,6 @@ mod subscription_publish_phase {
     /// As above at the streamed field: the error nulls `emails` and the
     /// rest of the event completes.
     #[test]
-    #[ignore = "#40"]
     fn subscribe_function_returns_errors_with_stream() {
         let (payloads, _) = World::email_world(vec![yuzhi(), hyo()]).run(
             SUBSCRIPTION,
@@ -394,7 +379,7 @@ mod subscription_publish_phase {
             incremental(),
         );
         let error = json!({
-            "message": "`@stream` directive not supported on subscription operations. Disable `@stream` by setting the `if` argument to `false`.",
+            "message": "`@stream` is not supported in a subscription; disable it by setting its `if` argument to false",
             "locations": [{"line": 18, "column": 13}],
             "path": ["importantEmail", "inbox", "emails"],
         });
@@ -425,7 +410,6 @@ mod subscription_publish_phase {
 
     /// it('produces a payload when there are multiple events')
     #[test]
-    #[ignore = "#40"]
     fn produces_a_payload_when_there_are_multiple_events() {
         let second = Email {
             from: "yuzhi@graphql.org",
@@ -474,7 +458,6 @@ mod subscription_publish_phase {
     ///
     /// An event's execution error is one response; the stream goes on.
     #[test]
-    #[ignore = "#40"]
     fn should_handle_error_during_execution_of_source_event() {
         let world = World {
             events: vec![

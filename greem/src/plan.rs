@@ -34,6 +34,10 @@ pub struct FieldHeader {
     pub stream: Option<StreamInfo>,
     pub spans: Vec<Location>,
     pub args_error: Option<Error>,
+    /// An execution error the operation's shape raises at this field before
+    /// its resolver runs, or at every event of a subscription root field:
+    /// `@defer` or `@stream` taking effect inside a subscription.
+    pub refused: Option<Error>,
     pub hints: Vec<(TypeId, Box<dyn Any + Send + Sync>)>,
     pub children: Vec<PlanId>,
     /// Defer usages of every deferred field set at or beneath this field's
@@ -212,6 +216,7 @@ impl<C> Walker<'_, C> {
                 stream: f.stream.clone(),
                 spans: f.spans.clone(),
                 args_error: None,
+                refused: f.refused.clone(),
                 hints: Vec::new(),
                 children: Vec::new(),
                 beneath: Vec::new(),
@@ -299,6 +304,12 @@ impl<C> Walker<'_, C> {
         let result = walk(self, child, &Leaf::default());
         self.parent = saved;
         result?;
+        // A `@defer` the child's selections refuse is the field's error.
+        if let Some(refused) = self.tree.nodes[child as usize].refused.clone() {
+            self.table.headers[entry as usize].fields[field]
+                .refused
+                .get_or_insert(refused);
+        }
         let created: Vec<PlanId> = (before..self.table.headers.len())
             .map(|i| i as PlanId)
             .filter(|&id| self.table.headers[id as usize].parent == Some((entry, field as u32)))

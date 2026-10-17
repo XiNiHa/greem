@@ -11,3 +11,4 @@ pub mod scope;
 pub mod settle;
 pub mod state;
 pub mod stream;
+pub mod subscription;

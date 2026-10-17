@@ -3,23 +3,22 @@
 
 use crate::context::Context;
 use crate::error::{GraphQLError, InputError, RequestErrorKind, SchemaError};
-use crate::exec::complete::ObjectBatch;
+use crate::exec::complete::root_batch;
 use crate::exec::payload::{Payload, PayloadKind};
 use crate::exec::pull::{Ship, pull};
 use crate::exec::run::run_loop;
-use crate::exec::scope::{Batch, ObjectMeta, ScopeMeta};
-use crate::exec::state::{
-    ErrorBehavior, ExecuteOptions, GroupKind, Groups, IncrementalDelivery, Shared,
-};
+use crate::exec::scope::Batch;
+use crate::exec::state::{ErrorBehavior, ExecuteOptions, IncrementalDelivery, Shared};
+use crate::exec::subscription::EventEnv;
 use crate::plan::{Leaf, PlanTable, Walker};
-use crate::resolver::{NoMutation, Outputs};
+use crate::resolver::{NoMutation, NoSubscription, Outputs};
 use crate::tree::{Abort, Document, Tree, json_to_input, span_location};
 use crate::value::InputValue;
 use apollo_compiler::validation::Valid;
 use apollo_compiler::{ExecutableDocument, Schema as ApolloSchema};
 use futures::{Stream, StreamExt};
 use std::marker::PhantomData;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Generated per schema module: the embedded SDL and the root type tags.
 pub trait SchemaInfo: Send + Sync + 'static {
@@ -27,6 +26,7 @@ pub trait SchemaInfo: Send + Sync + 'static {
     const BUILD_VERSION: &'static str;
     type Query;
     type Mutation;
+    type Subscription;
 
     /// Runs the codec of the custom scalar `name` over an input value, so a
     /// variable is validated before execution; other names accept anything.
@@ -36,24 +36,52 @@ pub trait SchemaInfo: Send + Sync + 'static {
 }
 
 /// The root values for one request.
-pub struct Roots<Q, M = NoMutation> {
+pub struct Roots<Q, M = NoMutation, S = NoSubscription> {
     pub query: Q,
     pub mutation: M,
+    pub subscription: S,
 }
 
-impl<Q> Roots<Q, NoMutation> {
+impl<Q> Roots<Q, NoMutation, NoSubscription> {
     pub fn query(query: Q) -> Self {
         Roots {
             query,
             mutation: NoMutation,
+            subscription: NoSubscription,
         }
     }
 }
 
+impl<Q, M, S> Roots<Q, M, S> {
+    pub fn with_mutation<M2>(self, mutation: M2) -> Roots<Q, M2, S> {
+        Roots {
+            query: self.query,
+            mutation,
+            subscription: self.subscription,
+        }
+    }
+
+    pub fn with_subscription<S2>(self, subscription: S2) -> Roots<Q, M, S2> {
+        Roots {
+            query: self.query,
+            mutation: self.mutation,
+            subscription,
+        }
+    }
+}
+
+/// The kind of the operation a request executes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OperationKind {
+    Query,
+    Mutation,
+    Subscription,
+}
+
 /// A handle to a built schema; clones share it.
-pub struct Schema<I: SchemaInfo, C = (), Q = (), M = NoMutation> {
+pub struct Schema<I: SchemaInfo, C = (), Q = (), M = NoMutation, S = NoSubscription> {
     inner: Arc<Inner>,
-    _marker: Marker<I, C, Q, M>,
+    _marker: Marker<I, C, Q, M, S>,
 }
 
 struct Inner {
@@ -68,7 +96,7 @@ struct Inner {
     token_limit: Option<usize>,
 }
 
-impl<I: SchemaInfo, C, Q, M> Clone for Schema<I, C, Q, M> {
+impl<I: SchemaInfo, C, Q, M, S> Clone for Schema<I, C, Q, M, S> {
     fn clone(&self) -> Self {
         Schema {
             inner: self.inner.clone(),
@@ -77,18 +105,18 @@ impl<I: SchemaInfo, C, Q, M> Clone for Schema<I, C, Q, M> {
     }
 }
 
-type Marker<I, C, Q, M> = PhantomData<fn() -> (I, C, Q, M)>;
+type Marker<I, C, Q, M, S> = PhantomData<fn() -> (I, C, Q, M, S)>;
 
-pub struct SchemaBuilder<I: SchemaInfo, C, Q, M> {
+pub struct SchemaBuilder<I: SchemaInfo, C, Q, M, S = NoSubscription> {
     max_depth: u32,
     stream_capacity: usize,
     recursion_limit: Option<usize>,
     token_limit: Option<usize>,
-    _marker: Marker<I, C, Q, M>,
+    _marker: Marker<I, C, Q, M, S>,
 }
 
-impl<I: SchemaInfo, C: Send + Sync + 'static> Schema<I, C, (), NoMutation> {
-    pub fn builder() -> SchemaBuilder<I, C, (), NoMutation> {
+impl<I: SchemaInfo, C: Send + Sync + 'static> Schema<I, C, (), NoMutation, NoSubscription> {
+    pub fn builder() -> SchemaBuilder<I, C, (), NoMutation, NoSubscription> {
         SchemaBuilder {
             max_depth: 32,
             stream_capacity: 100,
@@ -99,8 +127,8 @@ impl<I: SchemaInfo, C: Send + Sync + 'static> Schema<I, C, (), NoMutation> {
     }
 }
 
-impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> SchemaBuilder<I, C, Q, M> {
-    pub fn query<Q2: Outputs<I::Query, C>>(self) -> SchemaBuilder<I, C, Q2, M> {
+impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M, S> SchemaBuilder<I, C, Q, M, S> {
+    pub fn query<Q2: Outputs<I::Query, C>>(self) -> SchemaBuilder<I, C, Q2, M, S> {
         SchemaBuilder {
             max_depth: self.max_depth,
             stream_capacity: self.stream_capacity,
@@ -110,7 +138,17 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> SchemaBuilder<I, C, Q, M> {
         }
     }
 
-    pub fn mutation<M2: Outputs<I::Mutation, C>>(self) -> SchemaBuilder<I, C, Q, M2> {
+    pub fn mutation<M2: Outputs<I::Mutation, C>>(self) -> SchemaBuilder<I, C, Q, M2, S> {
+        SchemaBuilder {
+            max_depth: self.max_depth,
+            stream_capacity: self.stream_capacity,
+            recursion_limit: self.recursion_limit,
+            token_limit: self.token_limit,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn subscription<S2: Outputs<I::Subscription, C>>(self) -> SchemaBuilder<I, C, Q, M, S2> {
         SchemaBuilder {
             max_depth: self.max_depth,
             stream_capacity: self.stream_capacity,
@@ -142,12 +180,14 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> SchemaBuilder<I, C, Q, M> {
         self
     }
 
-    /// Both roots must be configured for what the schema declares: a
-    /// declared `Mutation` without `.mutation::<M>()` does not compile.
-    pub fn build(self) -> Result<Schema<I, C, Q, M>, SchemaError>
+    /// Every root must be configured for what the schema declares: a
+    /// declared `Mutation` without `.mutation::<M>()`, or a declared
+    /// `Subscription` without `.subscription::<S>()`, does not compile.
+    pub fn build(self) -> Result<Schema<I, C, Q, M, S>, SchemaError>
     where
         Q: Outputs<I::Query, C>,
         M: Outputs<I::Mutation, C>,
+        S: Outputs<I::Subscription, C>,
     {
         if I::BUILD_VERSION != crate::BUILD_VERSION {
             return Err(SchemaError(format!(
@@ -262,6 +302,16 @@ impl Operation {
             .get(self.operation_name.as_deref())
             .is_ok_and(|operation| operation.is_mutation())
     }
+
+    /// Whether the operation to execute is a subscription; false when it
+    /// cannot be determined.
+    pub(crate) fn is_subscription(&self) -> bool {
+        self.document
+            .doc
+            .operations
+            .get(self.operation_name.as_deref())
+            .is_ok_and(|operation| operation.is_subscription())
+    }
 }
 
 /// Lookbehind planning's output for one request: the frozen Plan table, the
@@ -270,22 +320,29 @@ impl Operation {
 /// belongs to the request it was made for and is never reused across
 /// requests. Its typed entries are the generated plan types of one schema,
 /// so a plan runs only on the `Schema` value that made it.
-pub struct Plan<I: SchemaInfo, C = (), Q = (), M = NoMutation> {
+pub struct Plan<I: SchemaInfo, C = (), Q = (), M = NoMutation, S = NoSubscription> {
     schema: Arc<Inner>,
     table: Arc<PlanTable>,
     introspection: Option<serde_json::Value>,
-    is_mutation: bool,
+    kind: OperationKind,
     /// Resolved from the operation and the options; see
     /// `Operation::error_behavior`.
     error_behavior: ErrorBehavior,
     options: ExecuteOptions,
-    _marker: Marker<I, C, Q, M>,
+    _marker: Marker<I, C, Q, M, S>,
 }
 
-impl<I: SchemaInfo, C, Q, M> Plan<I, C, Q, M> {
+impl<I: SchemaInfo, C, Q, M, S> Plan<I, C, Q, M, S> {
     /// The error behavior the plan runs under.
     pub fn error_behavior(&self) -> ErrorBehavior {
         self.error_behavior
+    }
+
+    /// The kind of operation the plan executes: a subscription's stream has
+    /// one complete response per event, so a transport can tell before the
+    /// first payload.
+    pub fn kind(&self) -> OperationKind {
+        self.kind
     }
 
     /// The reference executor's view: the table, the introspection JSON, the
@@ -297,22 +354,22 @@ impl<I: SchemaInfo, C, Q, M> Plan<I, C, Q, M> {
     ) -> (
         Arc<PlanTable>,
         Option<serde_json::Value>,
-        bool,
+        OperationKind,
         ErrorBehavior,
     ) {
         (
             self.table,
             self.introspection,
-            self.is_mutation,
+            self.kind,
             self.error_behavior,
         )
     }
 }
 
-impl<I: SchemaInfo, C, Q, M> std::fmt::Debug for Plan<I, C, Q, M> {
+impl<I: SchemaInfo, C, Q, M, S> std::fmt::Debug for Plan<I, C, Q, M, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Plan")
-            .field("is_mutation", &self.is_mutation)
+            .field("kind", &self.kind)
             .field("error_behavior", &self.error_behavior)
             .field("options", &self.options)
             .finish_non_exhaustive()
@@ -353,14 +410,15 @@ impl ExecutionOutput {
         self.payloads.first().is_some_and(|p| p.has_next.is_some())
     }
 
-    /// The initial payload, or the request error. Every execution that runs
-    /// to completion ships at least one payload.
-    pub fn first(&self) -> &OwnedPayload {
-        &self.payloads[0]
+    /// The initial payload, or the request error. A query or mutation that
+    /// runs to completion always has one; a subscription whose event source
+    /// ends without an event has none.
+    pub fn first(&self) -> Option<&OwnedPayload> {
+        self.payloads.first()
     }
 }
 
-impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
+impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M, S> Schema<I, C, Q, M, S> {
     /// The schema this runtime serves: the merged SDL from greem-build, with
     /// any `@defer` and `@stream` definitions it supplied.
     pub fn sdl(&self) -> &'static str {
@@ -416,13 +474,6 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
                 )
             })?
             .clone();
-        if operation.is_subscription() {
-            return Err(RequestErrors::one(
-                RequestErrorKind::Operation,
-                "subscriptions are not supported",
-                Vec::new(),
-            ));
-        }
         let variables: apollo_compiler::response::JsonMap = op
             .variables
             .iter()
@@ -505,33 +556,44 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
         op: &Operation,
         ctx: &C,
         options: ExecuteOptions,
-    ) -> Result<Plan<I, C, Q, M>, RequestErrors>
+    ) -> Result<Plan<I, C, Q, M, S>, RequestErrors>
     where
         Q: Outputs<I::Query, C>,
         M: Outputs<I::Mutation, C>,
+        S: Outputs<I::Subscription, C>,
     {
         let mut tree = self.prepare(op, options)?;
         let error_behavior = op.error_behavior(&tree.operation, options);
         let introspection = self.introspection(&tree)?;
         let planning_ctx = Context::new(ctx, None);
         let mut table = PlanTable::default();
-        let is_mutation = tree.is_mutation();
+        let kind = tree.kind();
         let walk = {
             let mut walker = Walker::new(&mut tree, &mut table, &planning_ctx);
-            if is_mutation {
-                M::__walk(&mut walker, 0, &Leaf::default())
-            } else {
-                Q::__walk(&mut walker, 0, &Leaf::default())
+            match kind {
+                OperationKind::Query => Q::__walk(&mut walker, 0, &Leaf::default()),
+                OperationKind::Mutation => M::__walk(&mut walker, 0, &Leaf::default()),
+                OperationKind::Subscription => S::__walk(&mut walker, 0, &Leaf::default()),
             }
         };
         walk.map_err(|Abort(kind, errors)| RequestErrors { kind, errors })?;
+        // Validation leaves a subscription exactly one root field, with no
+        // `@skip`/`@include` that could exclude it; the subscribe step
+        // indexes it, so the invariant is checked rather than assumed.
+        if kind == OperationKind::Subscription && table.header(0).sets[0].1.len() != 1 {
+            return Err(RequestErrors::one(
+                RequestErrorKind::Validation,
+                "a subscription must select exactly one root field",
+                Vec::new(),
+            ));
+        }
         table.usages = tree.usages.clone();
         table.compute_beneath();
         Ok(Plan {
             schema: self.inner.clone(),
             table: Arc::new(table),
             introspection,
-            is_mutation,
+            kind,
             error_behavior,
             options,
             _marker: PhantomData,
@@ -546,15 +608,16 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
     /// included.
     pub fn execute_stream<T, E>(
         &self,
-        roots: Roots<Q, M>,
+        roots: Roots<Q, M, S>,
         ctx: C,
         op: Operation,
         options: ExecuteOptions,
         encode: E,
-    ) -> impl Stream<Item = T> + Send + use<I, C, Q, M, T, E>
+    ) -> impl Stream<Item = T> + Send + use<I, C, Q, M, S, T, E>
     where
         Q: Outputs<I::Query, C> + Send + Sync,
         M: Outputs<I::Mutation, C> + Send + Sync,
+        S: Outputs<I::Subscription, C> + Send + Sync,
         T: Send,
         E: for<'p> FnMut(Payload<'p>) -> T + Send,
     {
@@ -576,14 +639,15 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
     /// stream limits it was checked against.
     pub fn execute_plan_stream<T, E>(
         &self,
-        roots: Roots<Q, M>,
+        roots: Roots<Q, M, S>,
         ctx: C,
-        plan: Plan<I, C, Q, M>,
+        plan: Plan<I, C, Q, M, S>,
         encode: E,
-    ) -> impl Stream<Item = T> + Send + use<I, C, Q, M, T, E>
+    ) -> impl Stream<Item = T> + Send + use<I, C, Q, M, S, T, E>
     where
         Q: Outputs<I::Query, C> + Send + Sync,
         M: Outputs<I::Mutation, C> + Send + Sync,
+        S: Outputs<I::Subscription, C> + Send + Sync,
         T: Send,
         E: for<'p> FnMut(Payload<'p>) -> T + Send,
     {
@@ -601,15 +665,16 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
     /// like `execute_stream`.
     pub fn execute_request_stream<T, E>(
         &self,
-        roots: Roots<Q, M>,
+        roots: Roots<Q, M, S>,
         ctx: C,
         request: crate::http::Request,
         options: ExecuteOptions,
         encode: E,
-    ) -> impl Stream<Item = T> + Send + use<I, C, Q, M, T, E>
+    ) -> impl Stream<Item = T> + Send + use<I, C, Q, M, S, T, E>
     where
         Q: Outputs<I::Query, C> + Send + Sync,
         M: Outputs<I::Mutation, C> + Send + Sync,
+        S: Outputs<I::Subscription, C> + Send + Sync,
         T: Send,
         E: for<'p> FnMut(Payload<'p>) -> T + Send,
     {
@@ -628,7 +693,7 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
     /// Executes and returns every payload as owned JSON.
     pub async fn execute(
         &self,
-        roots: Roots<Q, M>,
+        roots: Roots<Q, M, S>,
         ctx: C,
         op: Operation,
         options: ExecuteOptions,
@@ -636,6 +701,7 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
     where
         Q: Outputs<I::Query, C> + Send + Sync,
         M: Outputs<I::Mutation, C> + Send + Sync,
+        S: Outputs<I::Subscription, C> + Send + Sync,
     {
         ExecutionOutput {
             payloads: self
@@ -648,7 +714,7 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
     /// The text path, returning every payload as owned JSON.
     pub async fn execute_request(
         &self,
-        roots: Roots<Q, M>,
+        roots: Roots<Q, M, S>,
         ctx: C,
         request: crate::http::Request,
         options: ExecuteOptions,
@@ -656,6 +722,7 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
     where
         Q: Outputs<I::Query, C> + Send + Sync,
         M: Outputs<I::Mutation, C> + Send + Sync,
+        S: Outputs<I::Subscription, C> + Send + Sync,
     {
         ExecutionOutput {
             payloads: self
@@ -684,36 +751,36 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
         })
     }
 
-    async fn run(&self, roots: Roots<Q, M>, ctx: C, plan: Plan<I, C, Q, M>, outlet: &mut dyn Ship)
-    where
+    async fn run(
+        &self,
+        roots: Roots<Q, M, S>,
+        ctx: C,
+        plan: Plan<I, C, Q, M, S>,
+        outlet: &mut dyn Ship,
+    ) where
         Q: Outputs<I::Query, C> + Send + Sync,
         M: Outputs<I::Mutation, C> + Send + Sync,
+        S: Outputs<I::Subscription, C> + Send + Sync,
     {
         let Plan {
             table,
             introspection,
-            is_mutation,
+            kind,
             error_behavior,
             options,
             ..
         } = plan;
-        let shared = Shared {
-            groups: Mutex::new(Groups::new()),
-            behavior: error_behavior,
-            incremental: options.incremental == IncrementalDelivery::Enabled,
-            capacity: self.inner.stream_capacity,
-            table: table.clone(),
-            introspection,
-            has_streams: std::sync::atomic::AtomicBool::new(false),
-            live_streams: std::sync::atomic::AtomicUsize::new(0),
-            halted: std::sync::atomic::AtomicBool::new(false),
-        };
-        let Roots { query, mutation } = roots;
+        let capacity = self.inner.stream_capacity;
+        let Roots {
+            query,
+            mutation,
+            subscription,
+        } = roots;
         // A failed root is marked once, at its own position, like any object.
-        let failed = if is_mutation {
-            mutation.__parent_error()
-        } else {
-            query.__parent_error()
+        let failed = match kind {
+            OperationKind::Query => query.__parent_error(),
+            OperationKind::Mutation => mutation.__parent_error(),
+            OperationKind::Subscription => subscription.__parent_error(),
         };
         if let Some(error) = failed {
             outlet.ship(Payload::failed_root(GraphQLError::from_error(
@@ -723,100 +790,89 @@ impl<I: SchemaInfo, C: Send + Sync + 'static, Q, M> Schema<I, C, Q, M> {
             )));
             return;
         }
-        if is_mutation {
-            let batch = root_batch::<M, I::Mutation, C>(mutation, &shared, &ctx, &table, true);
-            let mut root = batch.start();
-            run_loop(&mut root, &shared, outlet).await;
-        } else {
-            let batch = root_batch::<Q, I::Query, C>(query, &shared, &ctx, &table, false);
-            let mut root = batch.start();
-            run_loop(&mut root, &shared, outlet).await;
+        let incremental = options.incremental == IncrementalDelivery::Enabled;
+        match kind {
+            OperationKind::Query => {
+                let shared = Shared::new(
+                    table.clone(),
+                    error_behavior,
+                    incremental,
+                    capacity,
+                    introspection,
+                );
+                let batch = root_batch::<Q, I::Query, C>(query, &shared, &ctx, &table, false);
+                let mut root = batch.start();
+                run_loop(&mut root, &shared, outlet).await;
+            }
+            OperationKind::Mutation => {
+                let shared = Shared::new(
+                    table.clone(),
+                    error_behavior,
+                    incremental,
+                    capacity,
+                    introspection,
+                );
+                let batch = root_batch::<M, I::Mutation, C>(mutation, &shared, &ctx, &table, true);
+                let mut root = batch.start();
+                run_loop(&mut root, &shared, outlet).await;
+            }
+            OperationKind::Subscription => {
+                subscribe_and_run::<S, I::Subscription, C>(
+                    subscription,
+                    &ctx,
+                    &table,
+                    error_behavior,
+                    capacity,
+                    outlet,
+                )
+                .await;
+            }
         }
     }
 }
 
-fn root_batch<'a, T, Ty, C>(
-    value: T,
-    shared: &'a Shared,
-    app: &'a C,
-    table: &'a PlanTable,
-    serial: bool,
-) -> ObjectBatch<'a, T, Ty, C>
-where
-    T: Outputs<Ty, C> + Send + Sync,
+/// Runs a subscription: the subscribe step once, then one execution per
+/// event, each polled from the event source only once the consumer has taken
+/// the previous response. Incremental delivery is off: a subscription cannot
+/// defer or stream, so every event is one complete response.
+async fn subscribe_and_run<S, Ty, C>(
+    root: S,
+    app: &C,
+    table: &Arc<PlanTable>,
+    behavior: ErrorBehavior,
+    capacity: usize,
+    outlet: &mut dyn Ship,
+) where
+    S: Outputs<Ty, C> + Send + Sync,
+    Ty: 'static,
     C: Send + Sync,
 {
-    let entry = table.lookup(0, &Leaf::default()).expect("root plan entry");
-    let header = table.header(entry);
-    let mut pending = smallvec::SmallVec::new();
-    let shared_sets;
-    {
-        let mut groups = shared.groups();
-        for &usage in &header.introduced {
-            let usage_def = &table.usages[usage as usize];
-            let parent_group = match usage_def.parent {
-                Some(p) => pending
-                    .iter()
-                    .find(|(u, _)| *u == p)
-                    .map(|(_, g)| *g)
-                    .unwrap_or(0),
-                None => 0,
-            };
-            let g = groups.alloc(
-                GroupKind::Defer {
-                    usage,
-                    label: usage_def.label.clone(),
-                    path: std::sync::Arc::from([]),
-                    after: None,
-                },
-                parent_group,
-            );
-            groups.set_carrier(g, std::sync::Arc::from(Vec::new()), 0);
-            pending.push((usage, g));
+    let shared = Shared::new(table.clone(), behavior, false, capacity, None);
+    let batch = root_batch::<S, Ty, C>(root, &shared, app, table, false);
+    let mut events = match batch.subscribe().await {
+        Ok(events) => events,
+        Err(error) => {
+            let header = table.header(0);
+            let field = &header.fields[header.sets[0].1[0] as usize];
+            outlet.ship(Payload::subscribe_failed(GraphQLError::from_error(
+                &error,
+                field.spans.clone(),
+                vec![crate::error::PathSegment::Key(field.key.clone())],
+            )));
+            return;
         }
-        groups.retain(0);
-        for &(_, g) in &pending {
-            groups.retain(g);
+    };
+    loop {
+        futures::future::poll_fn(|_| outlet.poll_taken()).await;
+        let shared = Shared::new(table.clone(), behavior, false, capacity, None);
+        let env = EventEnv {
+            shared: &shared,
+            app,
+            table,
+        };
+        if !events.next_event(env, outlet).await {
+            break;
         }
-        shared_sets = groups.alloc_shared(&header.sets, &pending, 0);
-    }
-    let contexts = (0..header.fields.len())
-        .map(|i| {
-            Context::new(
-                app,
-                Some(crate::context::HintAddr {
-                    table,
-                    entry,
-                    field: i as u32,
-                }),
-            )
-        })
-        .collect();
-    ObjectBatch {
-        values: vec![value],
-        contexts,
-        path: std::sync::Arc::from(Vec::new()),
-        signal: crate::exec::scope::Signal::root(),
-        meta: ScopeMeta {
-            entry,
-            generation: 0,
-            objects: vec![ObjectMeta {
-                group: 0,
-                parent: 0,
-                indices: smallvec::SmallVec::new(),
-                pending,
-                shared: shared_sets,
-            }],
-            serial,
-            parent: None,
-        },
-        shared,
-        app,
-        table,
-        header,
-        entry,
-        keep: Default::default(),
-        tag: PhantomData,
     }
 }
 

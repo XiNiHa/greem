@@ -4,6 +4,7 @@
 //! implements, so each case's fragments spread at the root unchanged.
 
 use crate::harness::{Area, Harness, HasHarness, pending_once};
+use futures::Stream;
 use greem::{Args, As, Context, Error, Roots, SchemaBuilder};
 
 pub mod schema {
@@ -44,28 +45,45 @@ impl Area for World {
     type Info = schema::__private::Info;
     type Query = QueryRoot;
     type Mutation = MutationRoot;
+    type Subscription = SubscriptionRoot;
 
-    fn builder() -> SchemaBuilder<Self::Info, Self, Self::Query, Self::Mutation> {
+    fn builder() -> SchemaBuilder<Self::Info, Self, Self::Query, Self::Mutation, Self::Subscription>
+    {
         schema::Schema::<World>::builder()
             .query::<QueryRoot>()
             .mutation::<MutationRoot>()
+            .subscription::<SubscriptionRoot>()
     }
 
-    fn roots() -> Roots<QueryRoot, MutationRoot> {
-        Roots {
-            query: QueryRoot,
-            mutation: MutationRoot,
-        }
+    fn roots() -> Roots<QueryRoot, MutationRoot, SubscriptionRoot> {
+        Roots::query(QueryRoot)
+            .with_mutation(MutationRoot)
+            .with_subscription(SubscriptionRoot)
     }
 }
 
-pub type Schema = schema::Schema<World, QueryRoot, MutationRoot>;
+pub type Schema = schema::Schema<World, QueryRoot, MutationRoot, SubscriptionRoot>;
 
 /// The root object; also the value at every `DataType` and `Type` position,
 /// since upstream's `promise`, `deeper` and `deep` hand the root back.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct QueryRoot;
 pub struct MutationRoot;
+/// Upstream's subscription root: `a` is one event, the root value's `a`.
+pub struct SubscriptionRoot;
+
+#[greem::object(schema = crate::graphql_js::executor::schema, type = "Subscription", context = World)]
+impl SubscriptionRoot {
+    async fn a(
+        &self,
+        _args: &Args<schema::Subscription::a>,
+        ctx: &Context<World>,
+    ) -> impl Stream<Item = Result<Option<String>, Error>> + Send {
+        ctx.app().harness.trace("Subscription.a", 1).await;
+        let value = ctx.app().a.clone();
+        futures::stream::once(async move { Ok(value) })
+    }
+}
 
 /// Upstream's `deepData`.
 #[derive(Clone, Debug, Default)]

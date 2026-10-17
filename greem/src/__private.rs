@@ -8,10 +8,11 @@ pub use crate::exec::complete::{
 };
 #[cfg(feature = "reference-executor")]
 pub use crate::exec::reference::{
-    RefCompletion, RefShared, RefValue, list, nullable, reference_field, reference_object,
+    RefCompletion, RefShared, RefValue, list, nullable, reference_field, reference_object, response,
 };
 pub use crate::exec::scope::FieldFuture;
 pub use crate::exec::state::{GroupId, Shared};
+pub use crate::exec::subscription::{SubscribeFuture, subscribe};
 pub use crate::plan::{FieldHeader, Leaf, PlanHeader, PlanId, PlanTable, Walker};
 pub use crate::resolver::seal;
 pub use crate::schema::SchemaInfo;

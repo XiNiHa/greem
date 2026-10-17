@@ -83,16 +83,14 @@ impl Area for World {
     type Info = schema::__private::Info;
     type Query = QueryRoot;
     type Mutation = NoMutation;
+    type Subscription = greem::NoSubscription;
 
     fn builder() -> SchemaBuilder<Self::Info, Self, Self::Query, Self::Mutation> {
         schema::Schema::<World>::builder().query::<QueryRoot>()
     }
 
     fn roots() -> Roots<QueryRoot, NoMutation> {
-        Roots {
-            query: QueryRoot,
-            mutation: NoMutation,
-        }
+        Roots::query(QueryRoot).with_mutation(NoMutation)
     }
 }
 

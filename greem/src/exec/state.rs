@@ -680,6 +680,26 @@ pub struct Shared {
 }
 
 impl Shared {
+    pub(crate) fn new(
+        table: Arc<PlanTable>,
+        behavior: ErrorBehavior,
+        incremental: bool,
+        capacity: usize,
+        introspection: Option<serde_json::Value>,
+    ) -> Self {
+        Shared {
+            groups: Mutex::new(Groups::new()),
+            behavior,
+            incremental,
+            capacity,
+            table,
+            introspection,
+            has_streams: std::sync::atomic::AtomicBool::new(false),
+            live_streams: std::sync::atomic::AtomicUsize::new(0),
+            halted: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
     pub fn groups(&self) -> MutexGuard<'_, Groups> {
         self.groups_for_drop().expect("group table poisoned")
     }

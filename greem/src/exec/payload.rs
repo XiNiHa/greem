@@ -20,10 +20,12 @@ pub enum Step {
 pub enum PayloadKind {
     /// Request-level failure: `errors` and no `data`.
     RequestError(RequestErrorKind),
-    /// The first (or only) response: `data`, optionally `pending` and `hasNext`.
-    Initial,
+    /// A complete response: the only payload of a query or mutation, the
+    /// first of an incremental run (then with `pending` and `hasNext`), or one
+    /// event of a subscription.
+    Response,
     /// A subsequent incremental result.
-    Subsequent,
+    Incremental,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -125,8 +127,23 @@ impl<'p> Payload<'p> {
     pub(crate) fn failed_root(error: GraphQLError) -> Self {
         Payload {
             root: None,
-            kind: PayloadKind::Initial,
+            kind: PayloadKind::Response,
             data: Data::Null,
+            errors: vec![error],
+            pending: Vec::new(),
+            incremental: Vec::new(),
+            completed: Vec::new(),
+            has_next: None,
+        }
+    }
+
+    /// The subscribe step failed: the subscription's one response, the error
+    /// at the root field and no `data`.
+    pub(crate) fn subscribe_failed(error: GraphQLError) -> Self {
+        Payload {
+            root: None,
+            kind: PayloadKind::Response,
+            data: Data::Absent,
             errors: vec![error],
             pending: Vec::new(),
             incremental: Vec::new(),
@@ -162,7 +179,7 @@ impl<'p> Payload<'p> {
     }
 
     pub fn is_empty(&self) -> bool {
-        matches!(self.kind, PayloadKind::Subsequent)
+        matches!(self.kind, PayloadKind::Incremental)
             && self.incremental.is_empty()
             && self.completed.is_empty()
             && self.pending.is_empty()
@@ -176,7 +193,7 @@ impl Serialize for Payload<'_> {
             PayloadKind::RequestError(_) => {
                 map.serialize_entry("errors", &self.errors)?;
             }
-            PayloadKind::Initial => {
+            PayloadKind::Response => {
                 match self.data {
                     Data::Absent => {}
                     Data::Null => map.serialize_entry("data", &())?,
@@ -194,7 +211,7 @@ impl Serialize for Payload<'_> {
                     map.serialize_entry("hasNext", &has_next)?;
                 }
             }
-            PayloadKind::Subsequent => {
+            PayloadKind::Incremental => {
                 if !self.pending.is_empty() {
                     map.serialize_entry("pending", &self.pending)?;
                 }

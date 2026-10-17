@@ -28,10 +28,7 @@ fn both(
     let schema = build_schema();
     let document = schema.parse(query).unwrap_or_else(|e| panic!("{e:?}"));
     let output = block_on(schema.execute(
-        Roots {
-            query: QueryRoot,
-            mutation: MutationRoot,
-        },
+        Roots::query(QueryRoot).with_mutation(MutationRoot),
         make_app(),
         Operation::new(document.clone()).with_variables(variables.clone()),
         options(behavior),
@@ -39,15 +36,12 @@ fn both(
     let bfs: Value = serde_json::from_slice(&output.payloads[0].json).unwrap();
     let reference = block_on(greem_reference::execute(
         &schema,
-        Roots {
-            query: QueryRoot,
-            mutation: MutationRoot,
-        },
+        Roots::query(QueryRoot).with_mutation(MutationRoot),
         make_app(),
         Operation::new(document.clone()).with_variables(variables),
         options(behavior),
     ));
-    (bfs, reference.response, reference.calls)
+    (bfs, reference.response().clone(), reference.calls)
 }
 
 fn sorted_errors(v: &Value) -> Vec<String> {
@@ -254,10 +248,7 @@ fn reference_calls_once_per_object() {
     let document = schema.parse(query).unwrap();
     let bfs_calls = std::sync::Arc::new(Mutex::new(0usize));
     block_on(schema.execute(
-        Roots {
-            query: QueryRoot,
-            mutation: MutationRoot,
-        },
+        Roots::query(QueryRoot).with_mutation(MutationRoot),
         App {
             calls: Some(bfs_calls.clone()),
             ..Default::default()
@@ -267,10 +258,7 @@ fn reference_calls_once_per_object() {
     ));
     let reference = block_on(greem_reference::execute(
         &schema,
-        Roots {
-            query: QueryRoot,
-            mutation: MutationRoot,
-        },
+        Roots::query(QueryRoot).with_mutation(MutationRoot),
         App::default(),
         Operation::new(document.clone()),
         ExecuteOptions::default(),

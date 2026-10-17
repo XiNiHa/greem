@@ -54,10 +54,7 @@ fn run_deep(depth: u32, limit: u32, world: World) -> Value {
     let schema = schema_with_depth(limit);
     let document = schema.parse(&deep_query(depth)).unwrap();
     let output = block_on(schema.execute(
-        Roots {
-            query: QueryRoot,
-            mutation: MutationRoot,
-        },
+        Roots::query(QueryRoot).with_mutation(MutationRoot),
         world,
         Operation::new(document.clone()),
         ExecuteOptions::default(),
@@ -101,10 +98,7 @@ fn cancel_after(depth: u32, world: World, polls: usize) -> Vec<(&'static str, u3
     take_drops();
     {
         let future = schema.execute(
-            Roots {
-                query: QueryRoot,
-                mutation: MutationRoot,
-            },
+            Roots::query(QueryRoot).with_mutation(MutationRoot),
             world,
             Operation::new(document.clone()),
             ExecuteOptions::default(),
@@ -204,10 +198,7 @@ fn a_thousand_stream_turns_do_not_add_depth() {
         block_on(
             schema
                 .execute_stream(
-                    Roots {
-                        query: QueryRoot,
-                        mutation: MutationRoot,
-                    },
+                    Roots::query(QueryRoot).with_mutation(MutationRoot),
                     World::seeded(1, 1000),
                     Operation::new(document.clone()),
                     ExecuteOptions {
@@ -264,10 +255,7 @@ fn a_thousand_streamed_errors_are_retired_with_their_turns() {
         block_on(
             schema
                 .execute_stream(
-                    Roots {
-                        query: QueryRoot,
-                        mutation: MutationRoot,
-                    },
+                    Roots::query(QueryRoot).with_mutation(MutationRoot),
                     World::seeded(1, 0),
                     Operation::new(document.clone()),
                     ExecuteOptions {
@@ -332,10 +320,7 @@ fn abandoned_nested_groups_are_reclaimed_after_parent_failure() {
         block_on(
             schema
                 .execute_stream(
-                    Roots {
-                        query: QueryRoot,
-                        mutation: MutationRoot,
-                    },
+                    Roots::query(QueryRoot).with_mutation(MutationRoot),
                     world,
                     Operation::new(document.clone()),
                     ExecuteOptions {
@@ -377,10 +362,7 @@ fn a_thousand_mutation_roots_do_not_add_depth() {
         let query = format!("mutation {{ {} }}", roots.join(" "));
         let document = schema.parse(&query).unwrap();
         let output = block_on(schema.execute(
-            Roots {
-                query: QueryRoot,
-                mutation: MutationRoot,
-            },
+            Roots::query(QueryRoot).with_mutation(MutationRoot),
             World::seeded(2, 0),
             Operation::new(document.clone()),
             ExecuteOptions::default(),
@@ -412,15 +394,13 @@ fn reference_executor_runs_on_a_larger_stack() {
             let document = schema.parse(&deep_query(40)).unwrap();
             block_on(greem_reference::execute(
                 &schema,
-                Roots {
-                    query: QueryRoot,
-                    mutation: MutationRoot,
-                },
+                Roots::query(QueryRoot).with_mutation(MutationRoot),
                 World::seeded(2, 0),
                 Operation::new(document.clone()),
                 ExecuteOptions::default(),
             ))
-            .response
+            .response()
+            .clone()
         })
         .unwrap();
     let v = handle.join().unwrap();

@@ -52,6 +52,7 @@ pub(crate) fn generate(
     }
     let schema = builder.build().map_err(|e| Error(e.to_string()))?;
     let schema = schema.validate().map_err(|e| Error(e.to_string()))?;
+    subscription_root_stands_alone(&schema)?;
     let generator = Gen {
         schema: &schema,
         scalars,
@@ -66,6 +67,53 @@ pub(crate) fn generate(
         env!("CARGO_PKG_VERSION"),
         prettyplease::unparse(&file)
     ))
+}
+
+/// The subscription root type's fields resolve to event sources, which
+/// only the subscribe step can run, so the type has no meaning as an output
+/// anywhere else: not as a field's type, not as a union member, and not
+/// behind an interface it implements.
+fn subscription_root_stands_alone(schema: &Schema) -> Result<(), Error> {
+    let Some(root) = schema.root_operation(apollo_compiler::ast::OperationType::Subscription)
+    else {
+        return Ok(());
+    };
+    let fields = schema.types.values().flat_map(|ty| match ty {
+        ExtendedType::Object(object) => Some((object.name.as_str(), object.fields.values())),
+        ExtendedType::Interface(interface) => {
+            Some((interface.name.as_str(), interface.fields.values()))
+        }
+        _ => None,
+    });
+    for (parent, fields) in fields {
+        for field in fields {
+            if field.ty.inner_named_type() == root {
+                return Err(Error(format!(
+                    "`{parent}.{}` outputs the subscription root type `{root}`, which only a subscription can execute",
+                    field.name
+                )));
+            }
+        }
+    }
+    for union in schema.types.values().filter_map(|ty| match ty {
+        ExtendedType::Union(union) => Some(union),
+        _ => None,
+    }) {
+        if union.members.contains(root) {
+            return Err(Error(format!(
+                "union `{}` has the subscription root type `{root}` as a member, which only a subscription can execute",
+                union.name
+            )));
+        }
+    }
+    if let Some(ExtendedType::Object(object)) = schema.types.get(root)
+        && let Some(interface) = object.implements_interfaces.iter().next()
+    {
+        return Err(Error(format!(
+            "the subscription root type `{root}` implements `{interface}`, but only a subscription can execute it"
+        )));
+    }
+    Ok(())
 }
 
 /// The directive names the SDL declares, from its parsed definitions (so
@@ -407,9 +455,9 @@ impl Gen<'_> {
             #[doc(hidden)]
             pub mod __private { #private }
             #allow
-            pub type Schema<C = (), Q = (), M = ::greem::NoMutation> = ::greem::Schema<__private::Info, C, Q, M>;
+            pub type Schema<C = (), Q = (), M = ::greem::NoMutation, S = ::greem::NoSubscription> = ::greem::Schema<__private::Info, C, Q, M, S>;
             #allow
-            pub type Plan<C = (), Q = (), M = ::greem::NoMutation> = ::greem::Plan<__private::Info, C, Q, M>;
+            pub type Plan<C = (), Q = (), M = ::greem::NoMutation, S = ::greem::NoSubscription> = ::greem::Plan<__private::Info, C, Q, M, S>;
         }
     }
 
@@ -431,9 +479,16 @@ impl Gen<'_> {
         quote!(#(#items)*)
     }
 
+    fn is_subscription_root(&self, object: &ObjectType) -> bool {
+        self.schema
+            .root_operation(apollo_compiler::ast::OperationType::Subscription)
+            .is_some_and(|name| *name == object.name)
+    }
+
     fn field_module(&self, object: &ObjectType) -> TokenStream {
         let module = ident(&object.name);
         let doc = Self::doc(&object.description);
+        let subscription = self.is_subscription_root(object);
         let markers: Vec<TokenStream> = object
             .fields
             .values()
@@ -442,6 +497,13 @@ impl Gen<'_> {
                 let name = field.name.as_str();
                 let fdoc = Self::doc(&field.description);
                 let ty = self.type_tag(&field.ty, 1);
+                // A subscription root field's resolver returns the event
+                // source of the field's type, not a value of it.
+                let ty = if subscription {
+                    quote!(::greem::EventSource<#ty>)
+                } else {
+                    ty
+                };
                 let shape = Self::shape(&field.ty);
                 let args = if field.arguments.is_empty() {
                     quote!(())
@@ -603,6 +665,16 @@ impl Gen<'_> {
             }
             None => quote!(::greem::NoMutationType),
         };
+        let subscription = match self
+            .schema
+            .root_operation(apollo_compiler::ast::OperationType::Subscription)
+        {
+            Some(s) => {
+                let s = ident(s);
+                quote!(super::types::#s)
+            }
+            None => quote!(::greem::NoSubscriptionType),
+        };
         // The generator's own version, embedded as a literal: the runtime compares
         // it with its own at `build()`.
         let build_version = env!("CARGO_PKG_VERSION");
@@ -631,6 +703,7 @@ impl Gen<'_> {
                 const BUILD_VERSION: &'static ::core::primitive::str = #build_version;
                 type Query = #query;
                 type Mutation = #mutation;
+                type Subscription = #subscription;
                 fn check_scalar(name: &::core::primitive::str, value: &::greem::InputValue) -> ::core::result::Result<(), ::greem::InputError> {
                     match name {
                         #(#scalar_checks)*
@@ -746,6 +819,23 @@ impl Gen<'_> {
             .first()
             .expect("object types have at least one field")
             .clone();
+        // The subscription root resolves its one selected field once, for
+        // its event source; apollo validation leaves no other kind of field
+        // at a subscription root.
+        let subscribe = self.is_subscription_root(object).then(|| {
+            quote! {
+                fn subscribe<'a>(cx: &rt::FieldsCx<'a, C>, root: &'a T) -> rt::SubscribeFuture<'a, C>
+                where T: 'a, C: 'a,
+                {
+                    let plan: &'a plans::#module::Plan = cx.table.typed(cx.entry);
+                    let i = cx.header.sets[0].1[0];
+                    match &plan.0[i as usize] {
+                        #(plans::#module::Field::#markers(args) => rt::subscribe::<T, super::#module::#markers, C>(cx, i, root, args),)*
+                        plans::#module::Field::__other => unreachable!("a subscription root field is never an introspection field"),
+                    }
+                }
+            }
+        });
         let reference = quote! {
             rt::reference! {
                 fn reference<'v, 's: 'v>(value: T, rc: &rt::RefCompletion<'s, C>) -> rt::futures::future::BoxFuture<'v, rt::RefValue>
@@ -839,6 +929,7 @@ impl Gen<'_> {
                     }).collect()
                 }
 
+                #subscribe
                 #reference
             }
         }
@@ -1195,6 +1286,22 @@ mod tests {
             // Count definitions, not mentions: the embedded SDL keeps its comments.
             assert_eq!(code.matches("@defer(").count(), 1, "{sdl}");
             assert_eq!(code.matches("@stream(").count(), 1, "{sdl}");
+        }
+    }
+
+    #[test]
+    fn the_subscription_root_type_is_only_ever_the_subscription_root() {
+        let ok = "type Query { a: Int }\ntype Subscription { a: Int }";
+        assert!(generate_sdl(ok).is_ok());
+        let rejected = [
+            "type Query { s: Subscription }\ntype Subscription { a: Int }",
+            "type Query { n: N }\ninterface N { s: Subscription }\ntype Subscription { a: Int }",
+            "type Query { u: U }\nunion U = Query | Subscription\ntype Subscription { a: Int }",
+            "type Query { n: Node }\ninterface Node { a: Int }\ntype Subscription implements Node { a: Int }",
+        ];
+        for sdl in rejected {
+            let error = generate_sdl(sdl).expect_err(sdl).0;
+            assert!(error.contains("Subscription"), "{sdl}: {error}");
         }
     }
 

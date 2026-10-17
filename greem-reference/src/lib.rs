@@ -4,24 +4,39 @@
 //! breadth-first executor and exists to prove that executor equivalent.
 
 use greem::__private::SchemaInfo;
-use greem::__private::{RefCompletion, RefShared};
+use greem::__private::{RefCompletion, RefShared, response};
 use greem::{
-    ErrorBehavior, ExecuteOptions, IncrementalDelivery, Operation, Outputs, Roots, Schema, Shape,
+    ExecuteOptions, IncrementalDelivery, Operation, OperationKind, Outputs, Roots, Schema, Shape,
 };
 use std::sync::{Arc, Mutex};
 
-/// A non-incremental response plus the number of resolver invocations.
+/// The non-incremental responses plus the number of resolver invocations:
+/// one response for a query or mutation, one per event for a subscription.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReferenceOutput {
-    pub response: serde_json::Value,
+    pub responses: Vec<serde_json::Value>,
     pub calls: u64,
 }
 
+impl ReferenceOutput {
+    /// The one response of a query or mutation.
+    pub fn response(&self) -> &serde_json::Value {
+        assert_eq!(
+            self.responses.len(),
+            1,
+            "one response: {:?}",
+            self.responses
+        );
+        &self.responses[0]
+    }
+}
+
 /// Executes `op` depth-first over the same Plan table the breadth-first
-/// executor would build. `@defer` and `@stream` are ignored.
-pub async fn execute<I, C, Q, M>(
-    schema: &Schema<I, C, Q, M>,
-    roots: Roots<Q, M>,
+/// executor would build. `@defer` and `@stream` are ignored. A subscription
+/// drains its event source and executes every event in turn.
+pub async fn execute<I, C, Q, M, S>(
+    schema: &Schema<I, C, Q, M, S>,
+    roots: Roots<Q, M, S>,
     ctx: C,
     op: Operation,
     options: ExecuteOptions,
@@ -31,6 +46,7 @@ where
     C: Send + Sync + 'static,
     Q: Outputs<I::Query, C> + Send + Sync,
     M: Outputs<I::Mutation, C> + Send + Sync,
+    S: Outputs<I::Subscription, C> + Send + Sync,
 {
     let app = Arc::new(ctx);
     let planned = schema.plan(
@@ -41,11 +57,11 @@ where
             ..options
         },
     );
-    let (table, introspection, is_mutation, behavior) = match planned {
+    let (table, introspection, kind, behavior) = match planned {
         Ok(plan) => plan.__parts(),
         Err(errors) => {
             return ReferenceOutput {
-                response: serde_json::json!({ "errors": errors.errors }),
+                responses: vec![serde_json::json!({ "errors": errors.errors })],
                 calls: 0,
             };
         }
@@ -57,32 +73,51 @@ where
         introspection,
         errors: Mutex::new(Vec::new()),
         calls: Mutex::new(0),
-        serial_root: is_mutation,
+        serial_root: kind == OperationKind::Mutation,
+        responses: Mutex::new(Vec::new()),
     };
     let rc = RefCompletion::new(&shared, 0, Vec::new(), Shape::new(&[], false), Vec::new());
-    let Roots { query, mutation } = roots;
-    let data = if is_mutation {
-        <M as Outputs<I::Mutation, C>>::__reference(mutation, &rc).await
-    } else {
-        <Q as Outputs<I::Query, C>>::__reference(query, &rc).await
+    let Roots {
+        query,
+        mutation,
+        subscription,
+    } = roots;
+    // A failed subscription root is `data: null` at the root, like any
+    // failed root; the subscribe step never runs.
+    let failed_root = match kind {
+        OperationKind::Subscription => subscription.__parent_error().cloned(),
+        _ => None,
     };
-    let mut errors = std::mem::take(&mut *shared.errors.lock().unwrap());
+    let data = match (kind, &failed_root) {
+        (OperationKind::Query, _) => <Q as Outputs<I::Query, C>>::__reference(query, &rc).await,
+        (OperationKind::Mutation, _) => {
+            <M as Outputs<I::Mutation, C>>::__reference(mutation, &rc).await
+        }
+        (OperationKind::Subscription, Some(error)) => rc.error(error.clone()).await,
+        (OperationKind::Subscription, None) => {
+            <S as Outputs<I::Subscription, C>>::__reference(subscription, &rc).await
+        }
+    };
+    let errors = std::mem::take(&mut *shared.errors.lock().unwrap());
     let calls = *shared.calls.lock().unwrap();
-    let mut data = data.unwrap_or(serde_json::Value::Null);
-    if behavior == ErrorBehavior::Halt && !errors.is_empty() {
-        data = serde_json::Value::Null;
-        errors.truncate(1);
-    }
-    let mut response = serde_json::Map::new();
-    response.insert("data".into(), data);
-    if !errors.is_empty() {
-        response.insert(
-            "errors".into(),
-            serde_json::to_value(errors).expect("errors serialize"),
-        );
-    }
-    ReferenceOutput {
-        response: serde_json::Value::Object(response),
-        calls,
-    }
+    let responses = match kind {
+        OperationKind::Query | OperationKind::Mutation => vec![response(
+            data.unwrap_or(serde_json::Value::Null),
+            errors,
+            behavior,
+        )],
+        OperationKind::Subscription if failed_root.is_some() => {
+            vec![response(serde_json::Value::Null, errors, behavior)]
+        }
+        // Every event pushed its own response; an error left over is the
+        // subscribe step's, the subscription's one response.
+        OperationKind::Subscription => {
+            let mut responses = std::mem::take(&mut *shared.responses.lock().unwrap());
+            if !errors.is_empty() {
+                responses.push(serde_json::json!({ "errors": errors }));
+            }
+            responses
+        }
+    };
+    ReferenceOutput { responses, calls }
 }

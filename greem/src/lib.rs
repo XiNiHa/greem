@@ -26,11 +26,12 @@ pub use error::{
 pub use exec::payload::{Payload, PayloadKind};
 pub use exec::state::{ErrorBehavior, ExecuteOptions, IncrementalDelivery};
 pub use resolver::{
-    Args, As, Either, Field, Items, List, NoMutation, NoMutationType, Nullable, Outputs, Resolver,
-    Shape, Streamed,
+    Args, As, Either, EventSource, Field, Items, List, NoMutation, NoMutationType, NoSubscription,
+    NoSubscriptionType, Nullable, Outputs, Resolver, Shape, Streamed,
 };
 pub use schema::{
-    ExecutionOutput, Operation, OwnedPayload, Plan, RequestErrors, Roots, Schema, SchemaBuilder,
+    ExecutionOutput, Operation, OperationKind, OwnedPayload, Plan, RequestErrors, Roots, Schema,
+    SchemaBuilder,
 };
 pub use tree::Document;
 pub use value::{Enum, FromInput, InputValue, Maybe, Scalar, Value, scalars};

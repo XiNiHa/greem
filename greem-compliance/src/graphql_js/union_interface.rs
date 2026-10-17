@@ -137,6 +137,7 @@ impl Area for World {
     type Info = schema::__private::Info;
     type Query = Person;
     type Mutation = NoMutation;
+    type Subscription = greem::NoSubscription;
 
     fn builder() -> SchemaBuilder<Self::Info, Self, Self::Query, Self::Mutation> {
         schema::Schema::<World>::builder().query::<Person>()

@@ -169,15 +169,16 @@ pub trait Area: HasHarness + Clone + Send + Sync + Sized + 'static {
     type Info: SchemaInfo;
     type Query: Outputs<<Self::Info as SchemaInfo>::Query, Self> + Send + Sync;
     type Mutation: Outputs<<Self::Info as SchemaInfo>::Mutation, Self> + Send + Sync;
+    type Subscription: Outputs<<Self::Info as SchemaInfo>::Subscription, Self> + Send + Sync;
 
     /// The schema builder with the roots set; [`Area::schema`] finishes it.
-    fn builder() -> SchemaBuilder<Self::Info, Self, Self::Query, Self::Mutation>;
-    fn roots() -> Roots<Self::Query, Self::Mutation>;
+    fn builder() -> SchemaBuilder<Self::Info, Self, Self::Query, Self::Mutation, Self::Subscription>;
+    fn roots() -> Roots<Self::Query, Self::Mutation, Self::Subscription>;
 
     /// The schema, with the items buffered per stream turn set when given.
     fn schema(
         stream_capacity: Option<usize>,
-    ) -> Schema<Self::Info, Self, Self::Query, Self::Mutation> {
+    ) -> Schema<Self::Info, Self, Self::Query, Self::Mutation, Self::Subscription> {
         let builder = Self::builder();
         match stream_capacity {
             Some(capacity) => builder.stream_capacity(capacity),
@@ -338,10 +339,30 @@ pub trait Area: HasHarness + Clone + Send + Sync + Sized + 'static {
         variables: Value,
         options: ExecuteOptions,
     ) -> (Value, u64) {
+        let (mut responses, calls) =
+            self.reference_responses(operation_name, query, variables, options);
+        assert_eq!(responses.len(), 1, "one response: {responses:?}");
+        (responses.remove(0), calls)
+    }
+
+    /// The reference executor's responses (one per event of a subscription)
+    /// and call count.
+    fn reference_responses(
+        self,
+        operation_name: Option<&str>,
+        query: &str,
+        variables: Value,
+        options: ExecuteOptions,
+    ) -> (Vec<Value>, u64) {
         let schema = Self::schema(None);
         let document = match schema.parse(query) {
             Ok(d) => d,
-            Err(e) => return (serde_json::from_slice(&e.into_payload().json).unwrap(), 0),
+            Err(e) => {
+                return (
+                    vec![serde_json::from_slice(&e.into_payload().json).unwrap()],
+                    0,
+                );
+            }
         };
         let out = block_on(greem_reference::execute(
             &schema,
@@ -355,7 +376,7 @@ pub trait Area: HasHarness + Clone + Send + Sync + Sized + 'static {
             },
             options,
         ));
-        (out.response, out.calls)
+        (out.responses, out.calls)
     }
 }
 

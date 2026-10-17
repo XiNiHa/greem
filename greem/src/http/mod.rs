@@ -84,7 +84,7 @@ pub const MULTIPART_CONTENT_TYPE: &str = "multipart/mixed; boundary=\"-\"; incre
 /// arrives, not when the next one starts.
 pub fn multipart_part(payload: &Payload<'_>) -> Vec<u8> {
     let mut out = Vec::new();
-    if payload.kind() != PayloadKind::Subsequent {
+    if payload.kind() != PayloadKind::Incremental {
         out.extend_from_slice(b"\r\n---\r\n");
     }
     out.extend_from_slice(b"Content-Type: application/json; charset=utf-8\r\n\r\n");
@@ -104,9 +104,9 @@ pub fn multipart_part(payload: &Payload<'_>) -> Vec<u8> {
 /// gets any successful result as parts. `options.incremental` is whether this
 /// endpoint allows incremental delivery at all; a request also has to accept
 /// it.
-pub async fn handle<I, C, Q, M>(
-    schema: &Schema<I, C, Q, M>,
-    roots: Roots<Q, M>,
+pub async fn handle<I, C, Q, M, S>(
+    schema: &Schema<I, C, Q, M, S>,
+    roots: Roots<Q, M, S>,
     ctx: C,
     request: RequestParts<'_>,
     options: ExecuteOptions,
@@ -116,6 +116,7 @@ where
     C: Send + Sync + 'static,
     Q: Outputs<I::Query, C> + Send + Sync + 'static,
     M: Outputs<I::Mutation, C> + Send + Sync + 'static,
+    S: Outputs<I::Subscription, C> + Send + Sync + 'static,
 {
     let method = match request.method() {
         Ok(method) => method,
@@ -147,6 +148,13 @@ where
             return Response::rejected(422, None, "mutations need a POST request");
         }
         _ => {}
+    }
+    if operation.is_subscription() {
+        return Response::rejected(
+            422,
+            None,
+            "subscriptions need a streaming transport, which this endpoint does not serve",
+        );
     }
     let options = ExecuteOptions {
         incremental: if negotiated.multipart {

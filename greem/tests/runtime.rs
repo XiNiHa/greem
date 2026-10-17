@@ -23,10 +23,7 @@ fn run(
     let schema = build_schema();
     let document = schema.parse(query).unwrap_or_else(|e| panic!("{e:?}"));
     let output = block_on(schema.execute(
-        Roots {
-            query: QueryRoot,
-            mutation: MutationRoot,
-        },
+        Roots::query(QueryRoot).with_mutation(MutationRoot),
         app,
         Operation::new(document.clone()).with_variables(match variables {
             Value::Null => Default::default(),
@@ -71,10 +68,7 @@ fn set_based_calls_once_per_generation() {
         .parse("{ users { posts { title author { name } } } }")
         .unwrap();
     let output = block_on(schema.execute(
-        Roots {
-            query: QueryRoot,
-            mutation: MutationRoot,
-        },
+        Roots::query(QueryRoot).with_mutation(MutationRoot),
         App {
             log: Mutex::new(Vec::new()),
             ..Default::default()
@@ -208,10 +202,7 @@ fn the_error_behavior_comes_from_the_request_then_the_directive_then_the_default
 fn run_operation(app: App, op: Operation, options: ExecuteOptions) -> (Vec<Value>, Vec<String>) {
     let schema = build_schema();
     let output = block_on(schema.execute(
-        Roots {
-            query: QueryRoot,
-            mutation: MutationRoot,
-        },
+        Roots::query(QueryRoot).with_mutation(MutationRoot),
         app,
         op,
         options,
@@ -325,10 +316,7 @@ fn depth_limit() {
         .parse("{ users { posts { author { name } } } }")
         .unwrap();
     let output = block_on(schema.execute(
-        Roots {
-            query: QueryRoot,
-            mutation: MutationRoot,
-        },
+        Roots::query(QueryRoot).with_mutation(MutationRoot),
         App::default(),
         Operation::new(document.clone()),
         ExecuteOptions::default(),
@@ -356,10 +344,7 @@ fn a_plan_executes_like_the_operation_it_was_made_from() {
     let planned: Vec<Value> = block_on(
         schema
             .execute_plan_stream(
-                Roots {
-                    query: QueryRoot,
-                    mutation: MutationRoot,
-                },
+                Roots::query(QueryRoot).with_mutation(MutationRoot),
                 App::default(),
                 plan,
                 |payload| serde_json::to_value(payload).unwrap(),
@@ -367,10 +352,7 @@ fn a_plan_executes_like_the_operation_it_was_made_from() {
             .collect(),
     );
     let direct = block_on(schema.execute(
-        Roots {
-            query: QueryRoot,
-            mutation: MutationRoot,
-        },
+        Roots::query(QueryRoot).with_mutation(MutationRoot),
         App::default(),
         op,
         ExecuteOptions::default(),
@@ -404,10 +386,7 @@ fn a_plan_runs_only_on_the_schema_that_made_it() {
         )
         .unwrap();
     let _ = strict.execute_plan_stream(
-        Roots {
-            query: QueryRoot,
-            mutation: MutationRoot,
-        },
+        Roots::query(QueryRoot).with_mutation(MutationRoot),
         App::default(),
         plan,
         |payload| serde_json::to_value(payload).unwrap(),
@@ -637,10 +616,7 @@ fn stream_lazy() {
         .parse("{ users @stream(initialCount: 0) { name posts(first: 1) { title } } }")
         .unwrap();
     let output = block_on(schema.execute(
-        Roots {
-            query: StreamRoot::default(),
-            mutation: MutationRoot,
-        },
+        Roots::query(StreamRoot::default()).with_mutation(MutationRoot),
         App::default(),
         Operation::new(document.clone()),
         ExecuteOptions {
@@ -663,10 +639,7 @@ fn stream_lazy() {
     assert_eq!(p.last().unwrap()["hasNext"], json!(false));
     // Disabled: the same stream drains in place.
     let output = block_on(schema.execute(
-        Roots {
-            query: StreamRoot::default(),
-            mutation: MutationRoot,
-        },
+        Roots::query(StreamRoot::default()).with_mutation(MutationRoot),
         App::default(),
         Operation::new(document.clone()),
         ExecuteOptions::default(),
@@ -683,10 +656,7 @@ fn execution_waits_for_the_consumer_to_pull() {
         .parse("{ users { id ... @defer { name } } }")
         .unwrap();
     let mut payloads = Box::pin(schema.execute_stream(
-        Roots {
-            query: QueryRoot,
-            mutation: MutationRoot,
-        },
+        Roots::query(QueryRoot).with_mutation(MutationRoot),
         App {
             calls: Some(calls.clone()),
             ..Default::default()
@@ -718,21 +688,21 @@ fn dropping_the_stream_cancels_execution() {
     let document = schema
         .parse("{ users @stream(initialCount: 1) { name } }")
         .unwrap();
-    let mut payloads = Box::pin(schema.execute_stream(
-        Roots {
-            query: StreamRoot {
+    let mut payloads = Box::pin(
+        schema.execute_stream(
+            Roots::query(StreamRoot {
                 stall: Some(dropped.clone()),
+            })
+            .with_mutation(MutationRoot),
+            App::default(),
+            Operation::new(document),
+            ExecuteOptions {
+                incremental: IncrementalDelivery::Enabled,
+                ..Default::default()
             },
-            mutation: MutationRoot,
-        },
-        App::default(),
-        Operation::new(document),
-        ExecuteOptions {
-            incremental: IncrementalDelivery::Enabled,
-            ..Default::default()
-        },
-        |payload| serde_json::to_value(&payload).unwrap(),
-    ));
+            |payload| serde_json::to_value(&payload).unwrap(),
+        ),
+    );
     let first = block_on(payloads.next()).unwrap();
     assert_eq!(first["data"], json!({"users": [{"name": "Ann"}]}));
     assert!(!dropped.load(Ordering::SeqCst));
@@ -809,10 +779,7 @@ fn owned_output_shapes() {
     let run = |fail_users: bool, query: &str, options: ExecuteOptions| -> Vec<Value> {
         let document = schema.parse(query).unwrap();
         let output = block_on(schema.execute(
-            Roots {
-                query: OwnedShapes { fail_users },
-                mutation: MutationRoot,
-            },
+            Roots::query(OwnedShapes { fail_users }).with_mutation(MutationRoot),
             App::default(),
             Operation::new(document.clone()),
             options,
@@ -904,18 +871,18 @@ fn borrowed_output_shapes() {
     let document = schema
         .parse("{ users { name posts(first: 1) { title } } ints }")
         .unwrap();
-    let output = block_on(schema.execute(
-        Roots {
-            query: BorrowedShapes {
+    let output = block_on(
+        schema.execute(
+            Roots::query(BorrowedShapes {
                 users: users().into(),
                 ints: vec![vec![Some(1), None].into(), Box::default()].into(),
-            },
-            mutation: MutationRoot,
-        },
-        App::default(),
-        Operation::new(document.clone()),
-        ExecuteOptions::default(),
-    ));
+            })
+            .with_mutation(MutationRoot),
+            App::default(),
+            Operation::new(document.clone()),
+            ExecuteOptions::default(),
+        ),
+    );
     let v: Value = serde_json::from_slice(&output.payloads[0].json).unwrap();
     assert_eq!(
         v["data"],
@@ -1035,10 +1002,7 @@ fn borrowed_wrappers_complete_like_owned_ones() {
                 )
                 .unwrap();
             let output = block_on(schema.execute(
-                Roots {
-                    query: $value,
-                    mutation: MutationRoot,
-                },
+                Roots::query($value).with_mutation(MutationRoot),
                 App::default(),
                 Operation::new(document),
                 ExecuteOptions::default(),
@@ -1138,10 +1102,7 @@ fn owned_slices_complete_without_cloning() {
         .unwrap();
     let run = |query: &str, options: ExecuteOptions| -> Vec<Value> {
         let output = block_on(schema.execute(
-            Roots {
-                query: KeptShapes,
-                mutation: MutationRoot,
-            },
+            Roots::query(KeptShapes).with_mutation(MutationRoot),
             App::default(),
             Operation::new(schema.parse(query).unwrap()),
             options,
@@ -1230,21 +1191,21 @@ fn kept_rows_retire_with_their_stream_turn() {
         .build()
         .unwrap();
     let dropped = Arc::new(AtomicUsize::new(0));
-    let mut payloads = Box::pin(schema.execute_stream(
-        Roots {
-            query: KeptRows {
+    let mut payloads = Box::pin(
+        schema.execute_stream(
+            Roots::query(KeptRows {
                 dropped: dropped.clone(),
+            })
+            .with_mutation(MutationRoot),
+            App::default(),
+            Operation::new(schema.parse("{ ints @stream }").unwrap()),
+            ExecuteOptions {
+                incremental: IncrementalDelivery::Enabled,
+                ..Default::default()
             },
-            mutation: MutationRoot,
-        },
-        App::default(),
-        Operation::new(schema.parse("{ ints @stream }").unwrap()),
-        ExecuteOptions {
-            incremental: IncrementalDelivery::Enabled,
-            ..Default::default()
-        },
-        |payload| serde_json::to_value(&payload).unwrap(),
-    ));
+            |payload| serde_json::to_value(&payload).unwrap(),
+        ),
+    );
     let mut items = Vec::new();
     let mut freed_while_streaming = 0;
     while let Some(payload) = block_on(payloads.next()) {
@@ -1309,10 +1270,7 @@ fn failed_root_is_reported_once_at_its_position() {
         .unwrap();
     let document = schema.parse("{ a: users { id } b: users { id } }").unwrap();
     let output = block_on(schema.execute(
-        Roots {
-            query: Err(Error::new("root failed")),
-            mutation: MutationRoot,
-        },
+        Roots::query(Err(Error::new("root failed"))).with_mutation(MutationRoot),
         App::default(),
         Operation::new(document.clone()),
         ExecuteOptions::default(),
@@ -1338,6 +1296,7 @@ fn a_module_generated_by_another_version_is_rejected() {
         const BUILD_VERSION: &'static str = "0.0.0-stale";
         type Query = schema::types::Query;
         type Mutation = schema::types::Mutation;
+        type Subscription = greem::NoSubscriptionType;
     }
     let Err(error) = greem::Schema::<Stale, App>::builder()
         .query::<QueryRoot>()

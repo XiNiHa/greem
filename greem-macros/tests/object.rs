@@ -195,10 +195,7 @@ fn run(query: &str) -> (Value, Vec<String>) {
     let document = schema.parse(query).unwrap();
     let app = App::default();
     let output = block_on(schema.execute(
-        Roots {
-            query: Query,
-            mutation: Mutation,
-        },
+        Roots::query(Query).with_mutation(Mutation),
         app,
         Operation::new(document.clone()),
         ExecuteOptions::default(),
@@ -235,10 +232,7 @@ fn set_based_and_hints() {
     block_on(
         schema
             .execute_stream(
-                Roots {
-                    query: Query,
-                    mutation: Mutation,
-                },
+                Roots::query(Query).with_mutation(Mutation),
                 App::default(),
                 Operation::new(document.clone()),
                 ExecuteOptions::default(),

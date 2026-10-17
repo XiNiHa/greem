@@ -211,6 +211,26 @@ pub trait Outputs<Ty, C = ()>: Sized + sealed::Sealed<Ty, C> {
         C: 'a;
 
     #[doc(hidden)]
+    fn __subscribe<'a>(
+        cx: &crate::exec::complete::FieldsCx<'a, C>,
+        root: &'a Self,
+    ) -> crate::exec::subscription::SubscribeFuture<'a, C>
+    where
+        Self: 'a,
+        C: 'a;
+
+    #[doc(hidden)]
+    fn __events<'a>(
+        self,
+        field: u32,
+        shape: Shape,
+        objects: bool,
+    ) -> Result<Box<dyn crate::exec::subscription::Events<'a, C> + 'a>, Error>
+    where
+        Self: 'a,
+        C: 'a;
+
+    #[doc(hidden)]
     const __TYPENAME: &'static str;
 }
 
@@ -278,6 +298,30 @@ impl<T, Ty: Completes<T, C>, C> Outputs<Ty, C> for T {
         Ty::start_fields(cx, parents, set)
     }
 
+    fn __subscribe<'a>(
+        cx: &crate::exec::complete::FieldsCx<'a, C>,
+        root: &'a Self,
+    ) -> crate::exec::subscription::SubscribeFuture<'a, C>
+    where
+        Self: 'a,
+        C: 'a,
+    {
+        Ty::subscribe(cx, root)
+    }
+
+    fn __events<'a>(
+        self,
+        field: u32,
+        shape: Shape,
+        objects: bool,
+    ) -> Result<Box<dyn crate::exec::subscription::Events<'a, C> + 'a>, Error>
+    where
+        Self: 'a,
+        C: 'a,
+    {
+        Ty::events(self, field, shape, objects)
+    }
+
     const __TYPENAME: &'static str = Ty::TYPENAME;
 }
 impl<T, Ty: Completes<T, C>, C> sealed::Sealed<Ty, C> for T {}
@@ -335,9 +379,21 @@ pub struct Nullable<Ty>(PhantomData<Ty>);
 /// Tag for a list position wrapping the tag of its item type.
 pub struct List<Ty>(PhantomData<Ty>);
 
+/// Tag of a subscription root field, wrapping the tag of the field's type:
+/// the resolver returns an event source, a `Stream<Item = Result<T, Error>>`
+/// whose every item outputs the field's type and is executed as one response.
+pub struct EventSource<Ty>(PhantomData<Ty>);
+
 /// The root value for a schema without a mutation type.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoMutation;
 
 /// The `Mutation` tag of a schema that declares no mutation type.
 pub struct NoMutationType;
+
+/// The root value for a schema without a subscription type.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoSubscription;
+
+/// The `Subscription` tag of a schema that declares no subscription type.
+pub struct NoSubscriptionType;

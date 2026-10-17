@@ -34,10 +34,7 @@ fn run(query: &str, users: u32, items_per_user: u32) -> Work {
     block_on(
         schema
             .execute_stream(
-                Roots {
-                    query: QueryRoot,
-                    mutation: MutationRoot,
-                },
+                Roots::query(QueryRoot).with_mutation(MutationRoot),
                 World::seeded(users, 3),
                 Operation::new(document),
                 ExecuteOptions {

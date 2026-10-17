@@ -936,15 +936,15 @@ fn streamed_items_ship_in_list_order_per_parent() {
         "{ users(first: 1) { drafts @stream(initialCount: 0) { id owner { friends { name } } } } }";
     let document = schema.parse(query).unwrap();
     let run = |options| -> Vec<Value> {
-        futures::executor::block_on(schema.execute(
-            greem::Roots {
-                query: greem_compliance::world::QueryRoot,
-                mutation: greem_compliance::world::MutationRoot,
-            },
-            World::seeded(2, 4),
-            greem::Operation::new(document.clone()),
-            options,
-        ))
+        futures::executor::block_on(
+            schema.execute(
+                greem::Roots::query(greem_compliance::world::QueryRoot)
+                    .with_mutation(greem_compliance::world::MutationRoot),
+                World::seeded(2, 4),
+                greem::Operation::new(document.clone()),
+                options,
+            ),
+        )
         .payloads
         .iter()
         .map(|p| serde_json::from_slice(&p.json).unwrap())
@@ -1020,15 +1020,15 @@ fn reused_turn_slots_register_progress() {
         .unwrap();
     let query = r#"{ node(id: "post:0:2") { ... on Post { tags @stream(initialCount: 0) } } }"#;
     let document = schema.parse(query).unwrap();
-    let output = futures::executor::block_on(schema.execute(
-        greem::Roots {
-            query: greem_compliance::world::QueryRoot,
-            mutation: greem_compliance::world::MutationRoot,
-        },
-        World::seeded(1, 3),
-        greem::Operation::new(document.clone()),
-        incremental(),
-    ));
+    let output = futures::executor::block_on(
+        schema.execute(
+            greem::Roots::query(greem_compliance::world::QueryRoot)
+                .with_mutation(greem_compliance::world::MutationRoot),
+            World::seeded(1, 3),
+            greem::Operation::new(document.clone()),
+            incremental(),
+        ),
+    );
     let payloads: Vec<Value> = output
         .payloads
         .iter()
@@ -1879,15 +1879,15 @@ fn depth_counts_composites_defer_and_stream() {
                 .build()
                 .unwrap();
             let document = schema.parse(query).unwrap();
-            let output = futures::executor::block_on(schema.execute(
-                greem::Roots {
-                    query: greem_compliance::world::QueryRoot,
-                    mutation: greem_compliance::world::MutationRoot,
-                },
-                World::seeded(1, 1),
-                greem::Operation::new(document.clone()),
-                incremental(),
-            ));
+            let output = futures::executor::block_on(
+                schema.execute(
+                    greem::Roots::query(greem_compliance::world::QueryRoot)
+                        .with_mutation(greem_compliance::world::MutationRoot),
+                    World::seeded(1, 1),
+                    greem::Operation::new(document.clone()),
+                    incremental(),
+                ),
+            );
             let v: Value = serde_json::from_slice(&output.payloads[0].json).unwrap();
             assert_eq!(
                 v.get("data").is_none(),

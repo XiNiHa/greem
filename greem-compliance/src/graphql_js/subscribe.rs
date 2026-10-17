@@ -1,15 +1,15 @@
 //! The area for graphql-js `src/execution/__tests__/subscribe-test.ts`:
 //! its schema, world and resolvers.
 //!
-//! greem executes no subscription yet (#40): `Schema::execute` rejects the
-//! operation at prepare and `Roots` has no subscription root. The world
-//! therefore holds the source as a pre-seeded list of events, and
-//! [`SubscriptionRoot`] is the root value one event is executed with, the way
-//! upstream maps each source item to the root value of
-//! `executeSubscriptionEvent`. The cases that subscribe are written against
-//! that shape and ignored until #40 lands.
+//! Upstream splits a subscription field into `subscribe`, which returns the
+//! source, and `resolve`, which maps each event; greem's root field resolver
+//! returns the event source itself (ADR-0013). The world pre-seeds the
+//! source: every event upstream emits or its generator yields, in order, so
+//! each resolver returns that list as a stream, or fails before any event
+//! when the world says the source cannot be created.
 
 use crate::harness::{Area, Harness, HasHarness, pending_once};
+use futures::{Stream, StreamExt, stream};
 use greem::{Args, Context, Error, NoMutation, Roots, SchemaBuilder};
 use std::sync::{Arc, Mutex};
 
@@ -80,12 +80,12 @@ impl World {
         }
     }
 
-    /// Upstream's `subscribe` step: the root value of every event the
-    /// subscription executes, or the error creating the source raises.
-    pub fn source(&self) -> Result<Vec<SubscriptionRoot>, Error> {
+    /// Upstream's `subscribe` step: the events in order, or the error
+    /// creating the source raises.
+    pub fn source(&self) -> Result<Vec<Event>, Error> {
         match self.source_error {
             Some(message) => Err(Error::new(message)),
-            None => Ok(self.events.iter().cloned().map(SubscriptionRoot).collect()),
+            None => Ok(self.events.clone()),
         }
     }
 }
@@ -100,21 +100,26 @@ impl Area for World {
     type Info = schema::__private::Info;
     type Query = QueryRoot;
     type Mutation = NoMutation;
+    type Subscription = SubscriptionRoot;
 
-    fn builder() -> SchemaBuilder<Self::Info, Self, Self::Query, Self::Mutation> {
-        schema::Schema::<World>::builder().query::<QueryRoot>()
+    fn builder() -> SchemaBuilder<Self::Info, Self, Self::Query, Self::Mutation, Self::Subscription>
+    {
+        schema::Schema::<World>::builder()
+            .query::<QueryRoot>()
+            .subscription::<SubscriptionRoot>()
     }
 
-    fn roots() -> Roots<QueryRoot, NoMutation> {
-        Roots::query(QueryRoot)
+    fn roots() -> Roots<QueryRoot, NoMutation, SubscriptionRoot> {
+        Roots::query(QueryRoot).with_subscription(SubscriptionRoot)
     }
 }
 
-pub type Schema = schema::Schema<World, QueryRoot, NoMutation>;
+pub type Schema = schema::Schema<World, QueryRoot, NoMutation, SubscriptionRoot>;
 
 pub struct QueryRoot;
-/// The root value one source event is executed with.
-pub struct SubscriptionRoot(pub Event);
+/// The subscription root: each field's resolver returns the world's events
+/// as its event source.
+pub struct SubscriptionRoot;
 pub struct Inbox(Arc<Mutex<Vec<Email>>>);
 pub struct EmailEvent {
     email: Email,
@@ -147,51 +152,55 @@ impl SubscriptionRoot {
         &self,
         _args: &Args<schema::Subscription::importantEmail>,
         ctx: &Context<World>,
-    ) -> Option<EmailEvent> {
-        ctx.app()
-            .harness
-            .trace("Subscription.importantEmail", 1)
-            .await;
-        let Event::ImportantEmail(email) = &self.0 else {
-            return None;
-        };
-        let inbox = ctx.app().inbox.clone();
-        inbox.lock().unwrap().push(email.clone());
-        Some(EmailEvent {
-            email: email.clone(),
-            inbox,
-        })
+    ) -> Result<impl Stream<Item = Result<Option<EmailEvent>, Error>> + Send, Error> {
+        let app = ctx.app();
+        app.harness.trace("Subscription.importantEmail", 1).await;
+        let events = app.source()?;
+        Ok(stream::iter(events).map(move |event| {
+            let Event::ImportantEmail(email) = event else {
+                return Ok(None);
+            };
+            let inbox = app.inbox.clone();
+            inbox.lock().unwrap().push(email.clone());
+            Ok(Some(EmailEvent { email, inbox }))
+        }))
     }
     async fn foo(
         &self,
         _args: &Args<schema::Subscription::foo>,
         ctx: &Context<World>,
-    ) -> Option<&str> {
-        ctx.app().harness.trace("Subscription.foo", 1).await;
-        match self.0 {
-            Event::Foo(value) => Some(value),
-            _ => None,
-        }
+    ) -> Result<impl Stream<Item = Result<Option<&str>, Error>> + Send, Error> {
+        let app = ctx.app();
+        app.harness.trace("Subscription.foo", 1).await;
+        let events = app.source()?;
+        Ok(stream::iter(events).map(|event| match event {
+            Event::Foo(value) => Ok(Some(value)),
+            _ => Ok(None),
+        }))
     }
     async fn bar(
         &self,
         _args: &Args<schema::Subscription::bar>,
         ctx: &Context<World>,
-    ) -> Option<String> {
-        ctx.app().harness.trace("Subscription.bar", 1).await;
-        None
+    ) -> Result<impl Stream<Item = Result<Option<String>, Error>> + Send, Error> {
+        let app = ctx.app();
+        app.harness.trace("Subscription.bar", 1).await;
+        let events = app.source()?;
+        Ok(stream::iter(events).map(|_| Ok(None)))
     }
     async fn new_message(
         &self,
         _args: &Args<schema::Subscription::newMessage>,
         ctx: &Context<World>,
-    ) -> Result<Option<&str>, Error> {
-        ctx.app().harness.trace("Subscription.newMessage", 1).await;
-        match self.0 {
+    ) -> Result<impl Stream<Item = Result<Option<&str>, Error>> + Send, Error> {
+        let app = ctx.app();
+        app.harness.trace("Subscription.newMessage", 1).await;
+        let events = app.source()?;
+        Ok(stream::iter(events).map(|event| match event {
             Event::NewMessage("Goodbye") => Err(Error::new("Never leave.")),
             Event::NewMessage(message) => Ok(Some(message)),
             _ => Ok(None),
-        }
+        }))
     }
 }
 

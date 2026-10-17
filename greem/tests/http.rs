@@ -34,10 +34,7 @@ fn send(app: App, request: RequestParts<'_>) -> Sent {
 
 fn send_with(app: App, request: RequestParts<'_>, options: ExecuteOptions) -> Sent {
     let schema = build_schema();
-    let roots = Roots {
-        query: QueryRoot,
-        mutation: MutationRoot,
-    };
+    let roots = Roots::query(QueryRoot).with_mutation(MutationRoot);
     let response = block_on(greem::http::handle(&schema, roots, app, request, options));
     let body = match response.body {
         Body::Full(bytes) => bytes,
@@ -431,10 +428,7 @@ fn the_http_feature_converts_both_ways() {
     let schema = build_schema();
     let response = block_on(greem::http::handle(
         &schema,
-        Roots {
-            query: QueryRoot,
-            mutation: MutationRoot,
-        },
+        Roots::query(QueryRoot).with_mutation(MutationRoot),
         App::default(),
         RequestParts::from_http(&parts, b""),
         ExecuteOptions::default(),
@@ -456,10 +450,7 @@ fn the_http_feature_converts_both_ways() {
     let (parts, ()) = request.into_parts();
     let response = http::Response::from(block_on(greem::http::handle(
         &schema,
-        Roots {
-            query: QueryRoot,
-            mutation: MutationRoot,
-        },
+        Roots::query(QueryRoot).with_mutation(MutationRoot),
         App::default(),
         RequestParts::from_http(&parts, b""),
         ExecuteOptions::default(),

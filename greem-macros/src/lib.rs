@@ -183,6 +183,9 @@ struct Method {
     output: Type,
     /// Whether the method returns a `Result` whose error is passed through.
     fallible: bool,
+    /// The method returns `impl Stream`, an event source: it is boxed, and a
+    /// fallible method's error fails the subscribe step itself.
+    stream: bool,
     /// The method's `#[cfg]` and `#[cfg_attr]` attributes, repeated on its generated impl.
     cfgs: Vec<Attribute>,
     span: Span,
@@ -206,6 +209,29 @@ fn result_inner(ty: &Type) -> Option<&Type> {
         GenericArgument::Type(inner) => Some(inner),
         _ => None,
     }
+}
+
+/// The `Item` of an `impl Stream<Item = ..>` return type.
+fn stream_item(ty: &Type) -> Option<Type> {
+    let Type::ImplTrait(impl_trait) = ty else {
+        return None;
+    };
+    impl_trait.bounds.iter().find_map(|bound| {
+        let syn::TypeParamBound::Trait(bound) = bound else {
+            return None;
+        };
+        let last = bound.path.segments.last()?;
+        if last.ident != "Stream" {
+            return None;
+        }
+        let PathArguments::AngleBracketed(args) = &last.arguments else {
+            return None;
+        };
+        args.args.iter().find_map(|arg| match arg {
+            GenericArgument::AssocType(assoc) if assoc.ident == "Item" => Some(assoc.ty.clone()),
+            _ => None,
+        })
+    })
 }
 
 fn vec_inner(ty: &Type) -> Option<&Type> {
@@ -309,6 +335,19 @@ fn analyze(method: &ImplItemFn, attrs: &GreemAttrs) -> Result<Method> {
         Some(inner) => (inner.clone(), true),
         None => (returned.clone(), false),
     };
+    let stream = match stream_item(&output) {
+        Some(item) => {
+            if matches!(receiver, Receiver::Set) {
+                return Err(Error::new(
+                    returned.span(),
+                    "set-based resolver methods return a nameable stream type, such as `Vec<BoxStream<..>>`",
+                ));
+            }
+            output = syn::parse_quote!(::greem::__private::futures::stream::BoxStream<'obj, #item>);
+            true
+        }
+        None => false,
+    };
     if matches!(receiver, Receiver::Set) {
         output = match vec_inner(&output) {
             Some(inner) => inner.clone(),
@@ -338,6 +377,7 @@ fn analyze(method: &ImplItemFn, attrs: &GreemAttrs) -> Result<Method> {
         is_async: sig.asyncness.is_some(),
         output,
         fallible,
+        stream,
         cfgs: Vec::new(),
         span,
     })
@@ -424,6 +464,23 @@ fn expand_object(args: ObjectArgs, mut item: ItemImpl) -> Result<TokenStream2> {
         let body = match method.receiver {
             Receiver::Object => {
                 let call = quote!(<Self>::#name(parent, #(#call_args),*) #await_);
+                let call = match (method.stream, method.fallible) {
+                    (true, true) => {
+                        quote!(#call.map(::greem::__private::futures::StreamExt::boxed))
+                    }
+                    (true, false) => quote!(::greem::__private::futures::StreamExt::boxed(#call)),
+                    (false, _) => call,
+                };
+                let outputs = if method.stream && method.fallible {
+                    quote!(
+                        outputs
+                            .into_iter()
+                            .collect::<::core::result::Result<::std::vec::Vec<_>, ::greem::Error>>(
+                            )
+                    )
+                } else {
+                    quote!(::core::result::Result::Ok(outputs))
+                };
                 quote! {
                     let outputs = ::greem::__private::futures::future::join_all(
                         parents.iter().map(|parent| {
@@ -432,7 +489,7 @@ fn expand_object(args: ObjectArgs, mut item: ItemImpl) -> Result<TokenStream2> {
                         }),
                     )
                     .await;
-                    ::core::result::Result::Ok(outputs)
+                    #outputs
                 }
             }
             Receiver::Set => {
@@ -445,9 +502,11 @@ fn expand_object(args: ObjectArgs, mut item: ItemImpl) -> Result<TokenStream2> {
             }
         };
         // Only a fallible per-object method wraps its output: infallible ones
-        // keep their type, so slices and `Streamed` complete as they would set-based.
+        // keep their type, so slices and `Streamed` complete as they would
+        // set-based. A fallible event source is not wrapped: its error fails
+        // the subscribe step, the one call there is.
         let output_ty = match method.receiver {
-            Receiver::Object if method.fallible => {
+            Receiver::Object if method.fallible && !method.stream => {
                 quote!(::core::result::Result<#output, ::greem::Error>)
             }
             _ => quote!(#output),

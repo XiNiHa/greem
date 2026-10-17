@@ -24,6 +24,9 @@ pub struct RefShared<C> {
     pub calls: Mutex<u64>,
     /// Mutation roots: stop after a root field nulls `data` (ticket 09).
     pub serial_root: bool,
+    /// A subscription's responses, one per event, as its event source is
+    /// drained.
+    pub responses: Mutex<Vec<serde_json::Value>>,
 }
 
 /// The reference completion context for one position. Cheap to clone; every
@@ -37,6 +40,9 @@ pub struct RefCompletion<'s, C> {
     pub level: usize,
     pub spans: Vec<Location>,
     pub next_index: usize,
+    /// The field's `refused` error, raised before its resolver runs, or at
+    /// every event when the field is a subscription root.
+    pub refused: Option<Error>,
 }
 
 impl<C> Clone for RefCompletion<'_, C> {
@@ -50,6 +56,7 @@ impl<C> Clone for RefCompletion<'_, C> {
             level: self.level,
             spans: self.spans.clone(),
             next_index: self.next_index,
+            refused: self.refused.clone(),
         }
     }
 }
@@ -71,6 +78,7 @@ impl<'s, C> RefCompletion<'s, C> {
             level: 0,
             spans,
             next_index: 0,
+            refused: None,
         }
     }
 
@@ -181,8 +189,53 @@ impl<'s, C> RefCompletion<'s, C> {
             level: 0,
             spans: f.spans.clone(),
             next_index: 0,
+            refused: f.refused.clone(),
         }
     }
+
+    /// Records one event's response: this field's `value` under its key,
+    /// nulled by the field's nullability, with the errors recorded since the
+    /// previous event, under the request's error behavior.
+    pub fn push_event(&self, value: RefValue) {
+        let key = match self.path.last() {
+            Some(PathSegment::Key(key)) => key.clone(),
+            _ => unreachable!("an event completes at the root field"),
+        };
+        let data = match value {
+            Ok(value) => serde_json::json!({ key: value }),
+            Err(()) if self.shape.nullable_at(0) => serde_json::json!({ key: null }),
+            Err(()) => serde_json::Value::Null,
+        };
+        let errors = std::mem::take(&mut *self.shared.errors.lock().unwrap());
+        self.shared
+            .responses
+            .lock()
+            .unwrap()
+            .push(response(data, errors, self.shared.behavior));
+    }
+}
+
+/// One response from its data and errors; under `Halt` an error empties the
+/// data and only the first error ships.
+pub fn response(
+    data: serde_json::Value,
+    mut errors: Vec<GraphQLError>,
+    behavior: ErrorBehavior,
+) -> serde_json::Value {
+    let mut data = data;
+    if behavior == ErrorBehavior::Halt && !errors.is_empty() {
+        data = serde_json::Value::Null;
+        errors.truncate(1);
+    }
+    let mut response = serde_json::Map::new();
+    response.insert("data".into(), data);
+    if !errors.is_empty() {
+        response.insert(
+            "errors".into(),
+            serde_json::to_value(errors).expect("errors serialize"),
+        );
+    }
+    serde_json::Value::Object(response)
 }
 
 #[allow(clippy::result_unit_err)]
@@ -215,6 +268,7 @@ pub fn reference_field<'o, 's: 'o, T, F, C>(
 where
     T: Resolver<F, C>,
     F: Field,
+    F::Type: crate::exec::complete::InnerKind,
     C: Send + Sync + 'o,
 {
     let child = rc.child(entry, index, F::SHAPE);
@@ -222,9 +276,15 @@ where
     Box::pin(async move {
         let ctx = ctx;
         let nullable = F::SHAPE.nullable_at(0);
-        let result = match args {
-            Err(error) => child.error(error.clone()).await,
-            Ok(args) => {
+        // A refused field errors before its resolver runs, unless its output
+        // is an event source: then every event raises it.
+        let refused = child
+            .refused
+            .as_ref()
+            .filter(|_| !<F::Type as crate::exec::complete::InnerKind>::EVENTS);
+        let result = match (args, refused) {
+            (Err(error), _) | (_, Some(error)) => child.error(error.clone()).await,
+            (Ok(args), None) => {
                 *child.shared.calls.lock().unwrap() += 1;
                 match T::resolve(&[value], args, &ctx).await {
                     Err(error) => child.error(error).await,

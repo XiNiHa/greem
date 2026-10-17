@@ -564,11 +564,7 @@ mod handles_basic_execution_tasks {
     }
 
     /// it('uses the subscription schema for subscriptions')
-    ///
-    /// greem has no subscriptions yet: the request is rejected at execute
-    /// with "subscriptions are not supported".
     #[test]
-    #[ignore = "#40"]
     fn uses_the_subscription_schema_for_subscriptions() {
         let v = single_named(
             World {

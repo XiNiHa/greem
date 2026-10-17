@@ -293,10 +293,7 @@ fn run<Q: Outputs<schema::types::Query, App> + Send + Sync>(
     let document = schema.parse(document).unwrap();
     let app = App::default();
     let output = block_on(schema.execute(
-        Roots {
-            query,
-            mutation: Mutation,
-        },
+        Roots::query(query).with_mutation(Mutation),
         app.clone(),
         Operation::new(document),
         ExecuteOptions::default(),

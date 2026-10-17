@@ -345,10 +345,7 @@ pub fn router(schema: Schema) -> Router {
 }
 
 async fn graphql(State(schema): State<Schema>, parts: Parts, body: Bytes) -> Response {
-    let roots = Roots {
-        query: QueryRoot,
-        mutation: MutationRoot,
-    };
+    let roots = Roots::query(QueryRoot).with_mutation(MutationRoot);
     let options = ExecuteOptions {
         default_error_behavior: ErrorBehavior::Propagate,
         incremental: IncrementalDelivery::Enabled,
@@ -554,16 +551,14 @@ mod tests {
         let app = App::seeded();
         let output = schema
             .execute(
-                Roots {
-                    query: QueryRoot,
-                    mutation: MutationRoot,
-                },
+                Roots::query(QueryRoot).with_mutation(MutationRoot),
                 app,
                 greem::Operation::new(document),
                 ExecuteOptions::default(),
             )
             .await;
-        let v: serde_json::Value = serde_json::from_slice(&output.first().json).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_slice(&output.first().expect("one payload").json).unwrap();
         assert_eq!(v["data"]["posts"][2]["author"]["name"], "Bob");
     }
 

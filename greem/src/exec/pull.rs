@@ -10,7 +10,7 @@ use std::task::Poll;
 /// Where the executor ships payloads. After each one, `run_loop` waits on
 /// `poll_taken`, which registers no waker: `pull` takes the payload in the
 /// same poll that shipped it, and the consumer's next poll resumes.
-pub(crate) trait Ship: Send {
+pub trait Ship: Send {
     fn ship(&mut self, payload: Payload<'_>);
     fn poll_taken(&mut self) -> Poll<()>;
 }
