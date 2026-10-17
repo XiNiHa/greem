@@ -45,6 +45,14 @@ pub fn operation(document: &Arc<Document>, workload: &Workload, size: u32) -> Op
     }
 }
 
+/// Plans one run: variable coercion, tree build and lookbehind planning, the
+/// per-request work before any resolver runs.
+pub fn plan(schema: &Schema, workload: &Workload, app: &App, op: &Operation) -> greem::Plan {
+    schema
+        .plan(op, app, options(workload))
+        .unwrap_or_else(|e| panic!("{}: {}", workload.name, e.into_payload().as_str()))
+}
+
 /// Executes one run, handing every payload to `encode` while it is borrowed.
 pub fn execute<T: Send, E: for<'p> FnMut(Payload<'p>) -> T + Send>(
     schema: &Schema,

@@ -30,7 +30,7 @@ pub use resolver::{
     Shape, Streamed,
 };
 pub use schema::{
-    ExecutionOutput, Operation, OwnedPayload, RequestErrors, Roots, Schema, SchemaBuilder,
+    ExecutionOutput, Operation, OwnedPayload, Plan, RequestErrors, Roots, Schema, SchemaBuilder,
 };
 pub use tree::Document;
 pub use value::{Enum, FromInput, InputValue, Maybe, Scalar, Value, scalars};

@@ -5,7 +5,9 @@
 
 use greem::__private::SchemaInfo;
 use greem::__private::{RefCompletion, RefShared};
-use greem::{ErrorBehavior, ExecuteOptions, Operation, Outputs, Roots, Schema, Shape};
+use greem::{
+    ErrorBehavior, ExecuteOptions, IncrementalDelivery, Operation, Outputs, Roots, Schema, Shape,
+};
 use std::sync::{Arc, Mutex};
 
 /// A non-incremental response plus the number of resolver invocations.
@@ -31,16 +33,23 @@ where
     M: Outputs<I::Mutation, C> + Send + Sync,
 {
     let app = Arc::new(ctx);
-    let (table, introspection, is_mutation) =
-        match schema.__prepare_reference(&op, app.clone(), options) {
-            Ok(prepared) => prepared,
-            Err(errors) => {
-                return ReferenceOutput {
-                    response: serde_json::json!({ "errors": errors.errors }),
-                    calls: 0,
-                };
-            }
-        };
+    let planned = schema.plan(
+        &op,
+        &app,
+        ExecuteOptions {
+            incremental: IncrementalDelivery::Disabled,
+            ..options
+        },
+    );
+    let (table, introspection, is_mutation) = match planned {
+        Ok(plan) => plan.__parts(),
+        Err(errors) => {
+            return ReferenceOutput {
+                response: serde_json::json!({ "errors": errors.errors }),
+                calls: 0,
+            };
+        }
+    };
     let shared = RefShared {
         table,
         app,

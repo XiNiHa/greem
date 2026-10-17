@@ -186,7 +186,9 @@ absent; apollo-compiler validates documents against them.
 `greem/src/tree.rs`, `plan.rs`, `exec/*`.
 
 1. **Tree build** (per request): `Schema::parse` validates once and returns an
-   `Arc<Document>`; `execute*` coerces variables (apollo, then each custom scalar's codec), runs apollo's
+   `Arc<Document>`; `Schema::plan` (which `execute*` calls, and which a caller
+   may run itself and hand to `execute_plan_stream`) coerces variables (apollo,
+   then each custom scalar's codec), runs apollo's
    introspection for `__schema`/`__type`, then builds the execution tree lazily
    as the plan walk descends: one node per response key, fields collected per
    concrete type, whose own field definitions supply argument defaults
@@ -199,7 +201,11 @@ absent; apollo-compiler validates documents against them.
    root Rust type can produce, creating one plan entry each (headers: keys,
    spans, child nodes, field sets by defer-usage set, hint slots; typed payload:
    the generated `Plan` enum with `Result<Args<F>, Error>` per field). `hints`
-   runs on entry, `plan` on exit. The table is frozen behind an `Arc`.
+   runs on entry, `plan` on exit. The table is frozen behind an `Arc` inside
+   the returned `Plan`, which also carries the introspection result, the
+   operation kind and the options it was planned under. Hints read the
+   request context, so a `Plan` belongs to its request and is not reused,
+   and nothing of tree build or planning is cached across requests.
 3. **Generations**: a `Scope` (`exec/scope.rs`) is one object set at one plan
    entry for one field set. Its field futures are joined; completion writes
    columns and creates child scopes as `Frame`s (`self_cell`: owner = the
