@@ -21,7 +21,7 @@ use crate::exec::payload::{Payload, PayloadKind};
 use crate::exec::state::{ErrorBehavior, ExecuteOptions, IncrementalDelivery};
 use crate::resolver::Outputs;
 use crate::schema::{Roots, Schema, SchemaInfo};
-use futures::{StreamExt, future, stream};
+use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -97,13 +97,39 @@ pub fn multipart_part(payload: &Payload<'_>) -> Vec<u8> {
     out
 }
 
+/// The `Content-Type` header value for a server-sent events response, the
+/// framing of graphql-sse's distinct connections mode
+/// (<https://github.com/enisdenjo/graphql-sse/blob/master/PROTOCOL.md>).
+pub const SSE_CONTENT_TYPE: &str = "text/event-stream; charset=utf-8";
+
+/// Encodes one payload as graphql-sse's `next` event, serializing it
+/// straight into the `data` line.
+pub fn sse_event(payload: &Payload<'_>) -> Vec<u8> {
+    let mut out = Vec::from(b"event: next\ndata: ");
+    serde_json::to_writer(&mut out, payload).expect("serialize payload");
+    out.extend_from_slice(b"\n\n");
+    out
+}
+
+/// graphql-sse's `complete` event, which ends every event stream. It carries
+/// an empty `data` line because a browser `EventSource` does not fire an
+/// event without one.
+pub fn sse_complete() -> Vec<u8> {
+    b"event: complete\ndata:\n\n".to_vec()
+}
+
 /// Serves one GraphQL-over-HTTP request: GET, POST or QUERY, negotiated from
 /// its `Accept` header, answered as one JSON response or, when the operation
-/// defers or streams and the client prefers `multipart/mixed` at least as
-/// much, as a stream of parts; a client that reads only `multipart/mixed`
-/// gets any successful result as parts. `options.incremental` is whether this
-/// endpoint allows incremental delivery at all; a request also has to accept
-/// it.
+/// defers or streams and the client prefers `multipart/mixed` or
+/// `text/event-stream` at least as much, as a stream of parts or events.
+/// A client that reads only `multipart/mixed` gets any successful result as
+/// parts; one that reads only `text/event-stream` gets every response as
+/// events, request errors included (ADR-0014). `options.incremental` is
+/// whether this endpoint allows incremental delivery at all; a request also
+/// has to accept it.
+///
+/// Adapters serving `text/event-stream` should add `Cache-Control: no-cache`,
+/// and may merge keepalive comment lines into [`Body::Stream`] on a timer.
 pub async fn handle<I, C, Q, M, S>(
     schema: &Schema<I, C, Q, M, S>,
     roots: Roots<Q, M, S>,
@@ -129,14 +155,14 @@ where
             "send an Accept header that includes application/graphql-response+json",
         );
     };
-    let media = negotiated.media;
     let operation = match request
         .request(method)
         .map(|request| schema.operation(request))
     {
         Ok(Ok(operation)) => operation,
         Ok(Err(errors)) => {
-            return Response::single(media, response::encode(errors.payload(), media));
+            let encoded = response::encode(errors.payload(), negotiated);
+            return Response::from_encoded(negotiated.media, encoded, stream::empty().boxed());
         }
         Err(rejected) => return rejected,
     };
@@ -149,38 +175,52 @@ where
         }
         _ => {}
     }
-    if operation.is_subscription() {
-        return Response::rejected(
-            422,
-            None,
-            "subscriptions need a streaming transport, which this endpoint does not serve",
-        );
-    }
+    // A subscription's response stream can only ride SSE here, so once the
+    // client reads it at all, everything after this point is events.
+    let negotiated = if operation.is_subscription() {
+        if !negotiated.event_stream {
+            return Response::rejected(
+                406,
+                None,
+                "a subscription needs an Accept header that includes text/event-stream",
+            );
+        }
+        accept::Negotiated {
+            media: accept::Media::Streaming(accept::Framing::EventStream),
+            ..negotiated
+        }
+    } else {
+        negotiated
+    };
     let options = ExecuteOptions {
-        incremental: if negotiated.multipart {
+        incremental: if negotiated.incremental.is_some() {
             options.incremental
         } else {
             IncrementalDelivery::Disabled
         },
         ..options
     };
-    let mut payloads =
-        Box::pin(
-            schema.execute_stream(roots, ctx, operation, options, move |payload| {
-                response::encode(payload, media)
-            }),
+    let payloads = schema.execute_stream(roots, ctx, operation, options, move |payload| {
+        response::encode(payload, negotiated)
+    });
+    // Every payload of an event stream is an event, so its response needs no
+    // first payload: the headers go out before the event source is polled,
+    // and an event source without events is just `complete`. Any other
+    // framing is decided by the first payload.
+    if negotiated.media == accept::Media::Streaming(accept::Framing::EventStream) {
+        return Response::streamed(
+            accept::Framing::EventStream,
+            payloads.map(|payload| payload.bytes).boxed(),
         );
+    }
+    let mut payloads = Box::pin(payloads);
     let first = payloads
         .next()
         .await
         .expect("an execution ships at least one payload");
-    if first.multipart {
-        Response::multipart(
-            stream::once(future::ready(first.bytes))
-                .chain(payloads.map(|payload| payload.bytes))
-                .boxed(),
-        )
-    } else {
-        Response::single(media, first)
-    }
+    Response::from_encoded(
+        negotiated.media,
+        first,
+        payloads.map(|payload| payload.bytes).boxed(),
+    )
 }

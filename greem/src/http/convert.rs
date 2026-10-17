@@ -68,10 +68,10 @@ impl http_body::Body for Body {
             Body::Full(bytes) => {
                 Poll::Ready(Some(Ok(Frame::data(Bytes::from(std::mem::take(bytes))))))
             }
-            Body::Parts(parts) => parts
+            Body::Stream(chunks) => chunks
                 .as_mut()
                 .poll_next(cx)
-                .map(|part| part.map(|part| Ok(Frame::data(Bytes::from(part))))),
+                .map(|chunk| chunk.map(|chunk| Ok(Frame::data(Bytes::from(chunk))))),
         }
     }
 
@@ -82,7 +82,7 @@ impl http_body::Body for Body {
     fn size_hint(&self) -> SizeHint {
         match self {
             Body::Full(bytes) => SizeHint::with_exact(bytes.len() as u64),
-            Body::Parts(_) => SizeHint::default(),
+            Body::Stream(_) => SizeHint::default(),
         }
     }
 }

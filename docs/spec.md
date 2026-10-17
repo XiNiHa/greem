@@ -16,7 +16,7 @@ what codegen emits: build any consumer and open `target/debug/build/<crate>-*/ou
 - `cargo test -p greem-compliance`
   - Generated code compiled from `schemas/property.graphql` and one area schema per ported graphql-js suite through `build.rs`; property-based BFS≡DFS over generated documents, worlds and interleavings; the incremental fold property; breadth-first call counts; determinism; hand-written spec cases; the graphql-js execution suites one-to-one under `tests/graphql_js`; depth, cancellation and panic evidence on a 2 MiB stack; 1,000 stream turns and 1,000 mutation roots.
 - `cargo test -p greem --all-features --test http`
-  - `greem::http::handle` over `greem-test-app`: GET, POST and QUERY, `Accept` negotiation, and the status codes and media types of the GraphQL-over-HTTP draft, through the `http` feature too.
+  - `greem::http::handle` over `greem-test-app`: GET, POST and QUERY, `Accept` negotiation across JSON, `multipart/mixed` and `text/event-stream`, the status codes and media types of the GraphQL-over-HTTP draft and ADR-0014's SSE-only exception, subscriptions as event streams and the 406 without one, through the `http` feature too.
 - `cargo test -p greem-example-axum`
   - The axum example: `build.rs` codegen, hand-written and sugared resolvers, a member enum, a lookbehind hint, JSON and `multipart/mixed` responses through `greem::http::handle`.
 - `cargo run -p greem-example-axum`

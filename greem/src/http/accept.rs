@@ -1,6 +1,6 @@
-//! `Accept` negotiation: the media type of a single response, and whether a
-//! response may be incremental. Its media type parsing also reads a request's
-//! `Content-Type`.
+//! `Accept` negotiation: the media type of a single response, and which
+//! streaming framing a response may take. Its media type parsing also reads a
+//! request's `Content-Type`.
 
 /// The media type of a single (non-incremental) response.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -9,18 +9,34 @@ pub(super) enum Media {
     /// For legacy clients: only `2xx` responses use it, the rest are sent as
     /// `application/graphql-response+json`.
     Json,
-    /// For clients that read only `multipart/mixed`: a `2xx` response goes
-    /// out as one part, the rest as `application/graphql-response+json`.
+    /// For clients that read no JSON type, only a streaming framing. Reading
+    /// only `multipart/mixed`, a `2xx` response goes out as one part and the
+    /// rest as `application/graphql-response+json`; reading only
+    /// `text/event-stream`, every response, a request error included, is an
+    /// event stream at 200, as graphql-sse requires (ADR-0014). A client that
+    /// reads both and no JSON is a multipart one, since multipart wins the tie.
+    Streaming(Framing),
+}
+
+/// A framing that carries several payloads in one response.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Framing {
     Multipart,
+    EventStream,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Negotiated {
     pub media: Media,
-    /// Whether the client reads `multipart/mixed` in the format greem
-    /// serializes, and prefers it at least as much as `media`, so an
-    /// operation with `@defer` or `@stream` may stream.
-    pub multipart: bool,
+    /// The framing for an operation with `@defer` or `@stream`: of the
+    /// streaming framings the client reads and prefers at least as much as
+    /// `media`, the more preferred, then the more specifically named, then
+    /// multipart. `None` disables incremental delivery.
+    pub incremental: Option<Framing>,
+    /// Whether the client reads `text/event-stream` at all, so a
+    /// subscription can stream; its rank does not matter, since nothing
+    /// else can carry one.
+    pub event_stream: bool,
 }
 
 /// How specifically an `Accept` entry names a media type; a more specific
@@ -50,13 +66,14 @@ pub(super) struct Entry<'a> {
 
 /// `None` when the client accepts nothing greem can send. A missing or empty
 /// `Accept` is `application/json`, as is `*/*`; between equally preferred
-/// named types, `application/graphql-response+json` wins, and multipart wins
-/// over both.
+/// named types, `application/graphql-response+json` wins, and a streaming
+/// framing wins over both.
 pub(super) fn negotiate(accept: Option<&str>) -> Option<Negotiated> {
     let Some(accept) = accept.filter(|accept| !accept.trim().is_empty()) else {
         return Some(Negotiated {
             media: Media::Json,
-            multipart: false,
+            incremental: None,
+            event_stream: false,
         });
     };
     let entries: Vec<Entry> = accept.split(',').filter_map(entry).collect();
@@ -84,18 +101,42 @@ pub(super) fn negotiate(accept: Option<&str>) -> Option<Negotiated> {
             },
         ),
     };
-    let multipart = preference(&entries, incremental_multipart).is_some_and(|multipart| {
-        [graphql, json]
-            .into_iter()
-            .flatten()
-            .all(|single| multipart.q >= single.q)
-    });
-    let media = match media {
-        Some(media) => media,
-        None if multipart => Media::Multipart,
-        None => return None,
+    let sse = preference(&entries, event_stream);
+    let streams = |streaming: Option<Preference>| {
+        streaming.filter(|streaming| {
+            [graphql, json]
+                .into_iter()
+                .flatten()
+                .all(|single| streaming.q >= single.q)
+        })
     };
-    Some(Negotiated { media, multipart })
+    let incremental = match (
+        streams(preference(&entries, incremental_multipart)),
+        streams(sse),
+    ) {
+        (None, None) => None,
+        (Some(_), None) => Some(Framing::Multipart),
+        (None, Some(_)) => Some(Framing::EventStream),
+        (Some(multipart), Some(sse)) => Some(
+            if sse.q > multipart.q
+                || (sse.q == multipart.q && sse.specificity > multipart.specificity)
+            {
+                Framing::EventStream
+            } else {
+                Framing::Multipart
+            },
+        ),
+    };
+    let media = match (media, incremental) {
+        (Some(media), _) => media,
+        (None, Some(framing)) => Media::Streaming(framing),
+        (None, None) => return None,
+    };
+    Some(Negotiated {
+        media,
+        incremental,
+        event_stream: sse.is_some(),
+    })
 }
 
 pub(super) fn entry(text: &str) -> Option<Entry<'_>> {
@@ -189,6 +230,18 @@ fn incremental_multipart(entry: &Entry) -> Option<Specificity> {
     Some(specificity)
 }
 
+/// How specifically `entry` names `text/event-stream` in UTF-8: by name
+/// only, never from a wildcard. graphql-sse defines no parameter naming the
+/// incremental format, so any other parameter is ignored.
+fn event_stream(entry: &Entry) -> Option<Specificity> {
+    (entry.ty.eq_ignore_ascii_case("text")
+        && entry.subtype.eq_ignore_ascii_case("event-stream")
+        && entry.params.iter().all(|&(name, value)| {
+            !name.eq_ignore_ascii_case("charset") || value.eq_ignore_ascii_case("utf-8")
+        }))
+    .then_some(Specificity::Exact)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,12 +277,13 @@ mod tests {
         ];
         for (accept, expected) in cases {
             assert_eq!(
-                negotiate(Some(accept)).is_some_and(|negotiated| negotiated.multipart),
+                negotiate(Some(accept))
+                    .is_some_and(|negotiated| negotiated.incremental == Some(Framing::Multipart)),
                 expected,
                 "{accept}"
             );
         }
-        assert!(!negotiate(None).unwrap().multipart);
+        assert_eq!(negotiate(None).unwrap().incremental, None);
     }
 
     #[test]
@@ -254,7 +308,8 @@ mod tests {
         ];
         for (accept, expected) in cases {
             assert_eq!(
-                negotiate(Some(accept)).is_some_and(|negotiated| negotiated.multipart),
+                negotiate(Some(accept))
+                    .is_some_and(|negotiated| negotiated.incremental == Some(Framing::Multipart)),
                 expected,
                 "{accept}"
             );
@@ -262,8 +317,9 @@ mod tests {
         assert_eq!(
             negotiate(Some("multipart/mixed")),
             Some(Negotiated {
-                media: Media::Multipart,
-                multipart: true
+                media: Media::Streaming(Framing::Multipart),
+                incremental: Some(Framing::Multipart),
+                event_stream: false,
             })
         );
     }
@@ -314,6 +370,97 @@ mod tests {
             "multipart/mixed;incrementalSpec=v0.2;q=0, multipart/mixed",
         ] {
             assert_eq!(negotiate(Some(accept)), None, "{accept}");
+        }
+    }
+
+    #[test]
+    fn event_stream_is_accepted_only_by_name() {
+        let cases = [
+            ("text/event-stream", true),
+            ("Text/Event-Stream; charset=\"UTF-8\"", true),
+            ("application/json, text/event-stream;q=0.1", true),
+            ("text/event-stream;q=0, application/json", false),
+            ("text/event-stream; charset=latin1, application/json", false),
+            ("text/*, application/json", false),
+            ("*/*", false),
+            ("application/json", false),
+        ];
+        for (accept, expected) in cases {
+            assert_eq!(
+                negotiate(Some(accept)).is_some_and(|negotiated| negotiated.event_stream),
+                expected,
+                "{accept}"
+            );
+        }
+        assert!(!negotiate(None).unwrap().event_stream);
+    }
+
+    #[test]
+    fn an_sse_only_client_gets_everything_as_events() {
+        assert_eq!(
+            negotiate(Some("text/event-stream")),
+            Some(Negotiated {
+                media: Media::Streaming(Framing::EventStream),
+                incremental: Some(Framing::EventStream),
+                event_stream: true,
+            })
+        );
+        // Between the two streaming framings alone, multipart wins a tie.
+        assert_eq!(
+            negotiate(Some("text/event-stream, multipart/mixed")),
+            Some(Negotiated {
+                media: Media::Streaming(Framing::Multipart),
+                incremental: Some(Framing::Multipart),
+                event_stream: true,
+            })
+        );
+        assert_eq!(
+            negotiate(Some("text/event-stream, multipart/mixed;q=0.9")),
+            Some(Negotiated {
+                media: Media::Streaming(Framing::EventStream),
+                incremental: Some(Framing::EventStream),
+                event_stream: true,
+            })
+        );
+    }
+
+    #[test]
+    fn incremental_delivery_picks_between_multipart_and_sse() {
+        use Framing::*;
+        let cases = [
+            (
+                "text/event-stream, application/json;q=0.9",
+                Some(EventStream),
+            ),
+            ("application/json, text/event-stream", Some(EventStream)),
+            ("text/event-stream;q=0.5, application/json", None),
+            (
+                "multipart/mixed, text/event-stream, application/json;q=0.9",
+                Some(Multipart),
+            ),
+            (
+                "text/event-stream, multipart/mixed;q=0.9, application/json;q=0.9",
+                Some(EventStream),
+            ),
+            (
+                "multipart/mixed;q=0.9, text/event-stream, application/json",
+                Some(EventStream),
+            ),
+            (
+                "text/event-stream;q=0.5, multipart/mixed, application/json",
+                Some(Multipart),
+            ),
+            (
+                "multipart/mixed;incrementalSpec=v0.2, text/event-stream, application/json",
+                Some(Multipart),
+            ),
+        ];
+        for (accept, expected) in cases {
+            assert_eq!(
+                negotiate(Some(accept)).unwrap().incremental,
+                expected,
+                "{accept}"
+            );
         }
     }
 }
