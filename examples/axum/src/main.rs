@@ -1,16 +1,18 @@
 //! The walking skeleton's example server: schema compilation from `build.rs`,
 //! per-field resolvers (set-based and per-object sugar), a member enum at an
-//! interface position, lookbehind hints, and an axum handler that hands each
-//! request to `greem::http::handle`, which streams `@defer`/`@stream`
-//! payloads as the execution ships them.
+//! interface position, lookbehind hints, a subscription, and an axum handler
+//! that hands each request to `greem::http::handle`, which streams
+//! `@defer`/`@stream` payloads and subscription events as the execution
+//! ships them, as `multipart/mixed` parts or server-sent events.
 
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::request::Parts;
+use axum::http::{HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
-use futures::{StreamExt, stream};
+use futures::{Stream, StreamExt, stream};
 use greem::{
     Args, Context, Error, ErrorBehavior, ExecuteOptions, IncrementalDelivery, Planning, Resolver,
     Roots, Streamed,
@@ -102,6 +104,7 @@ pub struct PostsHint {
 
 pub struct QueryRoot;
 pub struct MutationRoot;
+pub struct SubscriptionRoot;
 
 // ---- Query: hand-written set-based resolvers -------------------------------
 
@@ -326,14 +329,31 @@ impl Resolver<schema::Mutation::rename, App> for MutationRoot {
     }
 }
 
+// ---- Subscription: a root field's resolver returns an event source ------------
+
+#[greem::object(type = "Subscription", context = App)]
+impl SubscriptionRoot {
+    /// Every seeded post as its own event; a real application would return
+    /// a broadcast receiver here, with the field's arguments and hints in hand.
+    async fn post_added(
+        &self,
+        _args: &Args<schema::Subscription::postAdded>,
+        ctx: &Context<App>,
+    ) -> impl Stream<Item = Result<Arc<Post>, Error>> + Send {
+        ctx.app().log("Subscription.postAdded");
+        stream::iter(ctx.app().posts.clone()).map(Ok)
+    }
+}
+
 // ---- HTTP ----------------------------------------------------------------------
 
-type Schema = schema::Schema<App, QueryRoot, MutationRoot>;
+type Schema = schema::Schema<App, QueryRoot, MutationRoot, SubscriptionRoot>;
 
 pub fn build_schema() -> Schema {
     schema::Schema::<App>::builder()
         .query::<QueryRoot>()
         .mutation::<MutationRoot>()
+        .subscription::<SubscriptionRoot>()
         .build()
         .expect("schema builds")
 }
@@ -345,14 +365,24 @@ pub fn router(schema: Schema) -> Router {
 }
 
 async fn graphql(State(schema): State<Schema>, parts: Parts, body: Bytes) -> Response {
-    let roots = Roots::query(QueryRoot).with_mutation(MutationRoot);
+    let roots = Roots::query(QueryRoot)
+        .with_mutation(MutationRoot)
+        .with_subscription(SubscriptionRoot);
     let options = ExecuteOptions {
         default_error_behavior: ErrorBehavior::Propagate,
         incremental: IncrementalDelivery::Enabled,
     };
     let request = greem::http::RequestParts::from_http(&parts, &body);
     let response = greem::http::handle(&schema, roots, App::seeded(), request, options).await;
-    axum::http::Response::from(response).into_response()
+    let sse = response.content_type == greem::http::SSE_CONTENT_TYPE;
+    let mut response = axum::http::Response::from(response);
+    if sse {
+        // Proxies and browsers buffer or cache an event stream unless told not to.
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    }
+    response.into_response()
 }
 
 #[tokio::main]
@@ -551,7 +581,9 @@ mod tests {
         let app = App::seeded();
         let output = schema
             .execute(
-                Roots::query(QueryRoot).with_mutation(MutationRoot),
+                Roots::query(QueryRoot)
+                    .with_mutation(MutationRoot)
+                    .with_subscription(SubscriptionRoot),
                 app,
                 greem::Operation::new(document),
                 ExecuteOptions::default(),
@@ -609,5 +641,41 @@ mod tests {
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v, serde_json::json!({"data": {"user": {"name": "Bob"}}}));
+    }
+
+    #[tokio::test]
+    async fn a_subscription_streams_events_over_sse() {
+        // A browser EventSource: GET, Accept: text/event-stream, nothing else.
+        let router = router(build_schema());
+        let request = axum::http::Request::builder()
+            .method("GET")
+            .uri("/graphql?query=subscription+%7B+postAdded+%7B+title+author+%7B+name+%7D+%7D+%7D")
+            .header(header::ACCEPT, "text/event-stream")
+            .body(Body::empty())
+            .unwrap();
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/event-stream; charset=utf-8"
+        );
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-cache");
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        let events: Vec<&str> = body.split_terminator("\n\n").collect();
+        assert_eq!(events.len(), 4, "{body:?}");
+        for (event, (title, author)) in
+            events
+                .iter()
+                .zip([("Hello", "Ann"), ("Again", "Ann"), ("Hi", "Bob")])
+        {
+            let data = event.strip_prefix("event: next\ndata: ").unwrap();
+            let v: serde_json::Value = serde_json::from_str(data).unwrap();
+            assert_eq!(
+                v,
+                serde_json::json!({"data": {"postAdded": {"title": title, "author": {"name": author}}}})
+            );
+        }
+        assert_eq!(events[3], "event: complete\ndata:");
     }
 }

@@ -31,3 +31,10 @@ type Post implements Node {
 type Mutation {
   rename(id: ID!, name: String!): User
 }
+
+type Subscription {
+  """
+  Every seeded post, one per event; the event source ends after the last.
+  """
+  postAdded: Post!
+}
