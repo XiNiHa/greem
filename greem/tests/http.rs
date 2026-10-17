@@ -5,7 +5,7 @@ use futures::StreamExt;
 use futures::executor::block_on;
 use greem::http::{Body, RequestParts};
 use greem::{ExecuteOptions, IncrementalDelivery, Roots};
-use greem_test_app::app::{App, MutationRoot, QueryRoot, build_schema};
+use greem_test_app::app::{App, MutationRoot, QueryRoot, SubscriptionRoot, build_schema};
 use serde_json::{Value, json};
 
 const GRAPHQL_RESPONSE_JSON: &str = "application/graphql-response+json; charset=utf-8";
@@ -34,7 +34,9 @@ fn send(app: App, request: RequestParts<'_>) -> Sent {
 
 fn send_with(app: App, request: RequestParts<'_>, options: ExecuteOptions) -> Sent {
     let schema = build_schema();
-    let roots = Roots::query(QueryRoot).with_mutation(MutationRoot);
+    let roots = Roots::query(QueryRoot)
+        .with_mutation(MutationRoot)
+        .with_subscription(SubscriptionRoot);
     let response = block_on(greem::http::handle(&schema, roots, app, request, options));
     let body = match response.body {
         Body::Full(bytes) => bytes,
@@ -428,7 +430,9 @@ fn the_http_feature_converts_both_ways() {
     let schema = build_schema();
     let response = block_on(greem::http::handle(
         &schema,
-        Roots::query(QueryRoot).with_mutation(MutationRoot),
+        Roots::query(QueryRoot)
+            .with_mutation(MutationRoot)
+            .with_subscription(SubscriptionRoot),
         App::default(),
         RequestParts::from_http(&parts, b""),
         ExecuteOptions::default(),
@@ -450,11 +454,28 @@ fn the_http_feature_converts_both_ways() {
     let (parts, ()) = request.into_parts();
     let response = http::Response::from(block_on(greem::http::handle(
         &schema,
-        Roots::query(QueryRoot).with_mutation(MutationRoot),
+        Roots::query(QueryRoot)
+            .with_mutation(MutationRoot)
+            .with_subscription(SubscriptionRoot),
         App::default(),
         RequestParts::from_http(&parts, b""),
         ExecuteOptions::default(),
     )));
     assert_eq!(response.status(), 405);
     assert_eq!(response.headers()[http::header::ALLOW], "GET, POST, QUERY");
+}
+
+#[test]
+fn a_subscription_needs_a_streaming_transport() {
+    let sent = send(
+        App::default(),
+        post(GRAPHQL, r#"{"query": "subscription { ticks(count: 1) }"}"#),
+    );
+    assert_eq!(sent.status, 422);
+    assert_eq!(sent.content_type, JSON);
+    let message = sent.json()["errors"][0]["message"].clone();
+    assert!(
+        message.as_str().unwrap().contains("streaming transport"),
+        "{message}"
+    );
 }

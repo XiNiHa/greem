@@ -1,8 +1,11 @@
 //! Hand-written resolvers over the generated schema, and its constructor.
 
 use crate::schema;
+use futures::Stream;
 use greem::{Args, As, Context, Either, Error, Resolver};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{self, Poll};
 
 #[derive(Default)]
 pub struct App {
@@ -24,6 +27,7 @@ impl App {
 
 pub struct QueryRoot;
 pub struct MutationRoot;
+pub struct SubscriptionRoot;
 pub struct User {
     id: u32,
     name: String,
@@ -389,10 +393,85 @@ impl Resolver<schema::Mutation::fail, App> for MutationRoot {
     }
 }
 
-pub fn build_schema() -> schema::Schema<App, QueryRoot, MutationRoot> {
+/// `Subscription.ticks`: a hand-written stream, logging every poll and its
+/// drop so a test can see when the executor pulls it.
+pub struct Ticks<'a> {
+    app: &'a App,
+    next: i32,
+    count: i32,
+    fail: Option<i32>,
+}
+
+impl Stream for Ticks<'_> {
+    type Item = Result<i32, Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, _: &mut task::Context<'_>) -> Poll<Option<Self::Item>> {
+        self.app.log("Subscription.ticks.poll");
+        if self.next >= self.count {
+            return Poll::Ready(None);
+        }
+        let tick = self.next;
+        self.next += 1;
+        Poll::Ready(Some(if self.fail == Some(tick) {
+            Err(Error::new(format!("tick {tick} failed")))
+        } else {
+            Ok(tick)
+        }))
+    }
+}
+
+impl Drop for Ticks<'_> {
+    fn drop(&mut self) {
+        self.app.log("Subscription.ticks.drop");
+    }
+}
+
+impl Resolver<schema::Subscription::ticks, App> for SubscriptionRoot {
+    type Output<'obj>
+        = Ticks<'obj>
+    where
+        Self: 'obj;
+    async fn resolve<'obj, 'call>(
+        parents: &'call [&'obj Self],
+        args: &'obj Args<schema::Subscription::ticks>,
+        ctx: &'obj Context<'obj, App>,
+    ) -> Result<Vec<Self::Output<'obj>>, Error>
+    where
+        'obj: 'call,
+    {
+        ctx.app().log("Subscription.ticks");
+        if args.count < 0 {
+            return Err(Error::new("count must not be negative"));
+        }
+        Ok(parents
+            .iter()
+            .map(|_| Ticks {
+                app: ctx.app(),
+                next: 0,
+                count: args.count,
+                fail: args.fail,
+            })
+            .collect())
+    }
+}
+
+#[greem::object(type = "Subscription", context = App)]
+impl SubscriptionRoot {
+    async fn user_added(
+        &self,
+        _args: &Args<schema::Subscription::userAdded>,
+        ctx: &Context<App>,
+    ) -> impl Stream<Item = Result<Option<User>, Error>> + Send {
+        ctx.app().log("Subscription.userAdded");
+        futures::stream::iter(users().into_iter().map(|user| Ok(Some(user))))
+    }
+}
+
+pub fn build_schema() -> schema::Schema<App, QueryRoot, MutationRoot, SubscriptionRoot> {
     schema::Schema::<App>::builder()
         .query::<QueryRoot>()
         .mutation::<MutationRoot>()
+        .subscription::<SubscriptionRoot>()
         .build()
         .unwrap()
 }

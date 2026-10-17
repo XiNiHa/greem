@@ -2,7 +2,7 @@
 
 use futures::executor::block_on;
 use greem::{ErrorBehavior, ExecuteOptions, Operation, Roots};
-use greem_test_app::app::{App, MutationRoot, QueryRoot, build_schema};
+use greem_test_app::app::{App, MutationRoot, QueryRoot, SubscriptionRoot, build_schema};
 use serde_json::{Value, json};
 use std::sync::Mutex;
 
@@ -27,16 +27,22 @@ fn both(
     };
     let schema = build_schema();
     let document = schema.parse(query).unwrap_or_else(|e| panic!("{e:?}"));
-    let output = block_on(schema.execute(
-        Roots::query(QueryRoot).with_mutation(MutationRoot),
-        make_app(),
-        Operation::new(document.clone()).with_variables(variables.clone()),
-        options(behavior),
-    ));
+    let output = block_on(
+        schema.execute(
+            Roots::query(QueryRoot)
+                .with_mutation(MutationRoot)
+                .with_subscription(SubscriptionRoot),
+            make_app(),
+            Operation::new(document.clone()).with_variables(variables.clone()),
+            options(behavior),
+        ),
+    );
     let bfs: Value = serde_json::from_slice(&output.payloads[0].json).unwrap();
     let reference = block_on(greem_reference::execute(
         &schema,
-        Roots::query(QueryRoot).with_mutation(MutationRoot),
+        Roots::query(QueryRoot)
+            .with_mutation(MutationRoot)
+            .with_subscription(SubscriptionRoot),
         make_app(),
         Operation::new(document.clone()).with_variables(variables),
         options(behavior),
@@ -247,18 +253,24 @@ fn reference_calls_once_per_object() {
     let query = "{ users { posts { title author { name } } } }";
     let document = schema.parse(query).unwrap();
     let bfs_calls = std::sync::Arc::new(Mutex::new(0usize));
-    block_on(schema.execute(
-        Roots::query(QueryRoot).with_mutation(MutationRoot),
-        App {
-            calls: Some(bfs_calls.clone()),
-            ..Default::default()
-        },
-        Operation::new(document.clone()),
-        ExecuteOptions::default(),
-    ));
+    block_on(
+        schema.execute(
+            Roots::query(QueryRoot)
+                .with_mutation(MutationRoot)
+                .with_subscription(SubscriptionRoot),
+            App {
+                calls: Some(bfs_calls.clone()),
+                ..Default::default()
+            },
+            Operation::new(document.clone()),
+            ExecuteOptions::default(),
+        ),
+    );
     let reference = block_on(greem_reference::execute(
         &schema,
-        Roots::query(QueryRoot).with_mutation(MutationRoot),
+        Roots::query(QueryRoot)
+            .with_mutation(MutationRoot)
+            .with_subscription(SubscriptionRoot),
         App::default(),
         Operation::new(document.clone()),
         ExecuteOptions::default(),
@@ -269,4 +281,43 @@ fn reference_calls_once_per_object() {
     assert_eq!(bfs_calls, 5);
     assert_eq!(reference.calls, 15);
     assert!(reference.calls > bfs_calls as u64);
+}
+
+/// A subscription root that failed as a whole (`Result<S, Error>` as the
+/// root value) is `data: null` with the error at the root in both executors.
+#[test]
+fn a_failed_subscription_root_is_data_null_in_both() {
+    let schema = greem_test_app::schema::Schema::<App>::builder()
+        .query::<QueryRoot>()
+        .mutation::<MutationRoot>()
+        .subscription::<Result<SubscriptionRoot, greem::Error>>()
+        .build()
+        .unwrap();
+    let document = schema.parse("subscription { numbers(count: 2) }").unwrap();
+    let roots = || {
+        Roots::query(QueryRoot)
+            .with_mutation(MutationRoot)
+            .with_subscription(Err::<SubscriptionRoot, _>(greem::Error::new("no root")))
+    };
+    let output = block_on(schema.execute(
+        roots(),
+        App::default(),
+        Operation::new(document.clone()),
+        ExecuteOptions::default(),
+    ));
+    let bfs: Vec<Value> = output
+        .payloads
+        .iter()
+        .map(|p| serde_json::from_slice(&p.json).unwrap())
+        .collect();
+    let reference = block_on(greem_reference::execute(
+        &schema,
+        roots(),
+        App::default(),
+        Operation::new(document),
+        ExecuteOptions::default(),
+    ));
+    let expected = vec![json!({"data": null, "errors": [{"message": "no root", "path": []}]})];
+    assert_eq!(bfs, expected);
+    assert_eq!(reference.responses, expected);
 }

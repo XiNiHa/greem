@@ -1,6 +1,8 @@
 //! `#[derive(greem::Abstract)]` against `greem-test-app`'s generated schema module.
 
+use futures::StreamExt;
 use futures::executor::block_on;
+use futures::stream::BoxStream;
 use greem::{
     Args, Context, Error, ExecuteOptions, HintRegistry, Operation, Outputs, Planning, Roots,
 };
@@ -270,6 +272,20 @@ impl Shelf {
 }
 
 struct Mutation;
+struct Subscription;
+
+#[greem::object(schema = schema, type = "Subscription", context = App)]
+impl Subscription {
+    fn ticks(
+        &self,
+        args: &Args<schema::Subscription::ticks>,
+    ) -> BoxStream<'static, Result<i32, Error>> {
+        futures::stream::iter((0..args.count).map(Ok)).boxed()
+    }
+    fn user_added(&self) -> BoxStream<'static, Result<Option<User>, Error>> {
+        futures::stream::empty().boxed()
+    }
+}
 
 #[greem::object(schema = crate::schema, context = App)]
 impl Mutation {
@@ -288,16 +304,21 @@ fn run<Q: Outputs<schema::types::Query, App> + Send + Sync>(
     let schema = schema::Schema::<App>::builder()
         .query::<Q>()
         .mutation::<Mutation>()
+        .subscription::<Subscription>()
         .build()
         .unwrap();
     let document = schema.parse(document).unwrap();
     let app = App::default();
-    let output = block_on(schema.execute(
-        Roots::query(query).with_mutation(Mutation),
-        app.clone(),
-        Operation::new(document),
-        ExecuteOptions::default(),
-    ));
+    let output = block_on(
+        schema.execute(
+            Roots::query(query)
+                .with_mutation(Mutation)
+                .with_subscription(Subscription),
+            app.clone(),
+            Operation::new(document),
+            ExecuteOptions::default(),
+        ),
+    );
     let value: Value = serde_json::from_slice(&output.payloads[0].json).unwrap();
     let log = app.0.lock().unwrap().clone();
     (value, log)

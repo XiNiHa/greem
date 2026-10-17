@@ -112,15 +112,21 @@ impl Resolver<schema::User::posts, App> for User {
   `ctx: &'obj Context<'obj, C>`. Inside an `async fn` Rust requires the
   lifetime spelled out (`&Context<'_, App>`); `#[greem::object]` inserts it, so
   sugared methods keep writing `&Context<App>`.
-- Root values are supplied per request: `Roots { query, mutation }`. A schema
-  with a `Mutation` type requires a mutation root that resolves every mutation
-  field; `NoMutation` only satisfies schemas without one. This is the
-  "missing resolvers are compile errors at the schema boundary" rule applied
-  to roots.
+- Root values are supplied per request: `Roots::query(q)`, with
+  `.with_mutation(m)` and `.with_subscription(s)`. A schema with a `Mutation`
+  or `Subscription` type requires a root that resolves every field of it;
+  `NoMutation` and `NoSubscription` only satisfy schemas without one. This is
+  the "missing resolvers are compile errors at the schema boundary" rule
+  applied to roots.
+- A subscription root field's `Type` is `EventSource<Ty>`: its resolver
+  returns any `Stream<Item = Result<T, Error>>` with `T: Outputs<Ty, C>`, the
+  event source, and fails the subscribe step by returning `Err` (ADR-0013).
 
 `#[greem::object(schema = crate::schema, type = "User", context = App)]` emits
 one `Resolver` impl per method, under the method's own `#[cfg]`/`#[cfg_attr]`
-(`&self` methods join per object; a leading `parents` parameter is set-based); `#[greem(name)]`, `#[greem(hints = "field")]`
+(`&self` methods join per object; a leading `parents` parameter is set-based;
+a method returning `impl Stream` is boxed, and a fallible one fails the
+subscribe step); `#[greem(name)]`, `#[greem(hints = "field")]`
 and `#[greem(plan = "field")]`, each generated hook under its
 hook method's own `#[cfg]`/`#[cfg_attr]`. See `examples/axum/src/main.rs`.
 
@@ -337,6 +343,16 @@ support advertisement, and the RFC's contested `pathNonNull` is not emitted.
   a list), as it is when the parent object was nulled. A `Vec` at
   a streamed field enters the same driver as a ready stream; a `Streamed` at a
   field that is not streamed drains in place.
+- A subscription (`exec/subscription.rs`) resolves its one root field once,
+  through the generated `subscribe` dispatch, and runs each event as the
+  single object of a fresh root scope under the same plan table, one complete
+  payload per event with incremental delivery off; the source is polled only
+  after the consumer took the previous payload, so a slow client slows the
+  subscription and dropping the stream drops the source. An `Err` item is an
+  error response at the root field; `HALT` ends that event's response only.
+  `@defer`/`@stream` taking effect in a subscription are a validation error
+  when written with a literal `if` and, bound to a variable, a `refused`
+  execution error at the enclosing field, raised per event.
 - Ids are assigned at announcement in tree order, so output never depends on
   internal allocation order. One update result per barrier, with its
   incremental entries ordered so the entries that create positions come first

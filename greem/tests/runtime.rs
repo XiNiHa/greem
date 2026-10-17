@@ -8,7 +8,9 @@ use greem::{
     Args, As, Context, Either, Error, ErrorBehavior, ExecuteOptions, IncrementalDelivery, Items,
     Operation, Resolver, Roots, Streamed,
 };
-use greem_test_app::app::{App, MutationRoot, QueryRoot, User, build_schema, users};
+use greem_test_app::app::{
+    App, MutationRoot, QueryRoot, SubscriptionRoot, User, build_schema, users,
+};
 use greem_test_app::schema;
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -22,16 +24,20 @@ fn run(
 ) -> (Vec<Value>, Vec<String>) {
     let schema = build_schema();
     let document = schema.parse(query).unwrap_or_else(|e| panic!("{e:?}"));
-    let output = block_on(schema.execute(
-        Roots::query(QueryRoot).with_mutation(MutationRoot),
-        app,
-        Operation::new(document.clone()).with_variables(match variables {
-            Value::Null => Default::default(),
-            Value::Object(map) => map,
-            other => panic!("variables must be a map: {other}"),
-        }),
-        options,
-    ));
+    let output = block_on(
+        schema.execute(
+            Roots::query(QueryRoot)
+                .with_mutation(MutationRoot)
+                .with_subscription(SubscriptionRoot),
+            app,
+            Operation::new(document.clone()).with_variables(match variables {
+                Value::Null => Default::default(),
+                Value::Object(map) => map,
+                other => panic!("variables must be a map: {other}"),
+            }),
+            options,
+        ),
+    );
     let payloads = output
         .payloads
         .iter()
@@ -67,15 +73,19 @@ fn set_based_calls_once_per_generation() {
     let document = schema
         .parse("{ users { posts { title author { name } } } }")
         .unwrap();
-    let output = block_on(schema.execute(
-        Roots::query(QueryRoot).with_mutation(MutationRoot),
-        App {
-            log: Mutex::new(Vec::new()),
-            ..Default::default()
-        },
-        Operation::new(document.clone()),
-        ExecuteOptions::default(),
-    ));
+    let output = block_on(
+        schema.execute(
+            Roots::query(QueryRoot)
+                .with_mutation(MutationRoot)
+                .with_subscription(SubscriptionRoot),
+            App {
+                log: Mutex::new(Vec::new()),
+                ..Default::default()
+            },
+            Operation::new(document.clone()),
+            ExecuteOptions::default(),
+        ),
+    );
     let v: Value = serde_json::from_slice(&output.payloads[0].json).unwrap();
     assert_eq!(
         v["data"]["users"][1]["posts"][1]["author"]["name"],
@@ -201,12 +211,16 @@ fn the_error_behavior_comes_from_the_request_then_the_directive_then_the_default
 
 fn run_operation(app: App, op: Operation, options: ExecuteOptions) -> (Vec<Value>, Vec<String>) {
     let schema = build_schema();
-    let output = block_on(schema.execute(
-        Roots::query(QueryRoot).with_mutation(MutationRoot),
-        app,
-        op,
-        options,
-    ));
+    let output = block_on(
+        schema.execute(
+            Roots::query(QueryRoot)
+                .with_mutation(MutationRoot)
+                .with_subscription(SubscriptionRoot),
+            app,
+            op,
+            options,
+        ),
+    );
     let payloads = output
         .payloads
         .iter()
@@ -309,18 +323,23 @@ fn depth_limit() {
     let schema = schema::Schema::<App>::builder()
         .query::<QueryRoot>()
         .mutation::<MutationRoot>()
+        .subscription::<SubscriptionRoot>()
         .max_depth(2)
         .build()
         .unwrap();
     let document = schema
         .parse("{ users { posts { author { name } } } }")
         .unwrap();
-    let output = block_on(schema.execute(
-        Roots::query(QueryRoot).with_mutation(MutationRoot),
-        App::default(),
-        Operation::new(document.clone()),
-        ExecuteOptions::default(),
-    ));
+    let output = block_on(
+        schema.execute(
+            Roots::query(QueryRoot)
+                .with_mutation(MutationRoot)
+                .with_subscription(SubscriptionRoot),
+            App::default(),
+            Operation::new(document.clone()),
+            ExecuteOptions::default(),
+        ),
+    );
     let v: Value = serde_json::from_slice(&output.payloads[0].json).unwrap();
     assert!(v.get("data").is_none());
     assert!(
@@ -344,19 +363,25 @@ fn a_plan_executes_like_the_operation_it_was_made_from() {
     let planned: Vec<Value> = block_on(
         schema
             .execute_plan_stream(
-                Roots::query(QueryRoot).with_mutation(MutationRoot),
+                Roots::query(QueryRoot)
+                    .with_mutation(MutationRoot)
+                    .with_subscription(SubscriptionRoot),
                 App::default(),
                 plan,
                 |payload| serde_json::to_value(payload).unwrap(),
             )
             .collect(),
     );
-    let direct = block_on(schema.execute(
-        Roots::query(QueryRoot).with_mutation(MutationRoot),
-        App::default(),
-        op,
-        ExecuteOptions::default(),
-    ));
+    let direct = block_on(
+        schema.execute(
+            Roots::query(QueryRoot)
+                .with_mutation(MutationRoot)
+                .with_subscription(SubscriptionRoot),
+            App::default(),
+            op,
+            ExecuteOptions::default(),
+        ),
+    );
     let direct: Vec<Value> = direct
         .payloads
         .iter()
@@ -372,6 +397,7 @@ fn a_plan_runs_only_on_the_schema_that_made_it() {
     let strict = schema::Schema::<App>::builder()
         .query::<QueryRoot>()
         .mutation::<MutationRoot>()
+        .subscription::<SubscriptionRoot>()
         .max_depth(2)
         .build()
         .unwrap();
@@ -386,7 +412,9 @@ fn a_plan_runs_only_on_the_schema_that_made_it() {
         )
         .unwrap();
     let _ = strict.execute_plan_stream(
-        Roots::query(QueryRoot).with_mutation(MutationRoot),
+        Roots::query(QueryRoot)
+            .with_mutation(MutationRoot)
+            .with_subscription(SubscriptionRoot),
         App::default(),
         plan,
         |payload| serde_json::to_value(payload).unwrap(),
@@ -610,20 +638,25 @@ fn stream_lazy() {
     let schema = schema::Schema::<App>::builder()
         .query::<StreamRoot>()
         .mutation::<MutationRoot>()
+        .subscription::<SubscriptionRoot>()
         .build()
         .unwrap();
     let document = schema
         .parse("{ users @stream(initialCount: 0) { name posts(first: 1) { title } } }")
         .unwrap();
-    let output = block_on(schema.execute(
-        Roots::query(StreamRoot::default()).with_mutation(MutationRoot),
-        App::default(),
-        Operation::new(document.clone()),
-        ExecuteOptions {
-            incremental: IncrementalDelivery::Enabled,
-            ..Default::default()
-        },
-    ));
+    let output = block_on(
+        schema.execute(
+            Roots::query(StreamRoot::default())
+                .with_mutation(MutationRoot)
+                .with_subscription(SubscriptionRoot),
+            App::default(),
+            Operation::new(document.clone()),
+            ExecuteOptions {
+                incremental: IncrementalDelivery::Enabled,
+                ..Default::default()
+            },
+        ),
+    );
     let p: Vec<Value> = output
         .payloads
         .iter()
@@ -638,12 +671,16 @@ fn stream_lazy() {
     assert_eq!(items, json!([{"name": "Ann", "posts": [{"title": "Ann post 0"}]}, {"name": "Bob", "posts": [{"title": "Bob post 0"}]}]).as_array().unwrap().clone());
     assert_eq!(p.last().unwrap()["hasNext"], json!(false));
     // Disabled: the same stream drains in place.
-    let output = block_on(schema.execute(
-        Roots::query(StreamRoot::default()).with_mutation(MutationRoot),
-        App::default(),
-        Operation::new(document.clone()),
-        ExecuteOptions::default(),
-    ));
+    let output = block_on(
+        schema.execute(
+            Roots::query(StreamRoot::default())
+                .with_mutation(MutationRoot)
+                .with_subscription(SubscriptionRoot),
+            App::default(),
+            Operation::new(document.clone()),
+            ExecuteOptions::default(),
+        ),
+    );
     let v: Value = serde_json::from_slice(&output.payloads[0].json).unwrap();
     assert_eq!(v["data"]["users"][1]["name"], json!("Bob"));
 }
@@ -655,19 +692,23 @@ fn execution_waits_for_the_consumer_to_pull() {
     let document = schema
         .parse("{ users { id ... @defer { name } } }")
         .unwrap();
-    let mut payloads = Box::pin(schema.execute_stream(
-        Roots::query(QueryRoot).with_mutation(MutationRoot),
-        App {
-            calls: Some(calls.clone()),
-            ..Default::default()
-        },
-        Operation::new(document),
-        ExecuteOptions {
-            incremental: IncrementalDelivery::Enabled,
-            ..Default::default()
-        },
-        |payload| serde_json::to_value(&payload).unwrap(),
-    ));
+    let mut payloads = Box::pin(
+        schema.execute_stream(
+            Roots::query(QueryRoot)
+                .with_mutation(MutationRoot)
+                .with_subscription(SubscriptionRoot),
+            App {
+                calls: Some(calls.clone()),
+                ..Default::default()
+            },
+            Operation::new(document),
+            ExecuteOptions {
+                incremental: IncrementalDelivery::Enabled,
+                ..Default::default()
+            },
+            |payload| serde_json::to_value(&payload).unwrap(),
+        ),
+    );
     let first = block_on(payloads.next()).unwrap();
     assert_eq!(first["data"], json!({"users": [{"id": "1"}, {"id": "2"}]}));
     // Query.users and User.id ran; the deferred User.name waits for a pull.
@@ -682,6 +723,7 @@ fn dropping_the_stream_cancels_execution() {
     let schema = schema::Schema::<App>::builder()
         .query::<StreamRoot>()
         .mutation::<MutationRoot>()
+        .subscription::<SubscriptionRoot>()
         .build()
         .unwrap();
     let dropped = Arc::new(AtomicBool::new(false));
@@ -693,7 +735,8 @@ fn dropping_the_stream_cancels_execution() {
             Roots::query(StreamRoot {
                 stall: Some(dropped.clone()),
             })
-            .with_mutation(MutationRoot),
+            .with_mutation(MutationRoot)
+            .with_subscription(SubscriptionRoot),
             App::default(),
             Operation::new(document),
             ExecuteOptions {
@@ -774,16 +817,21 @@ fn owned_output_shapes() {
     let schema = schema::Schema::<App>::builder()
         .query::<OwnedShapes>()
         .mutation::<MutationRoot>()
+        .subscription::<SubscriptionRoot>()
         .build()
         .unwrap();
     let run = |fail_users: bool, query: &str, options: ExecuteOptions| -> Vec<Value> {
         let document = schema.parse(query).unwrap();
-        let output = block_on(schema.execute(
-            Roots::query(OwnedShapes { fail_users }).with_mutation(MutationRoot),
-            App::default(),
-            Operation::new(document.clone()),
-            options,
-        ));
+        let output = block_on(
+            schema.execute(
+                Roots::query(OwnedShapes { fail_users })
+                    .with_mutation(MutationRoot)
+                    .with_subscription(SubscriptionRoot),
+                App::default(),
+                Operation::new(document.clone()),
+                options,
+            ),
+        );
         output
             .payloads
             .iter()
@@ -866,6 +914,7 @@ fn borrowed_output_shapes() {
     let schema = schema::Schema::<App>::builder()
         .query::<BorrowedShapes>()
         .mutation::<MutationRoot>()
+        .subscription::<SubscriptionRoot>()
         .build()
         .unwrap();
     let document = schema
@@ -877,7 +926,8 @@ fn borrowed_output_shapes() {
                 users: users().into(),
                 ints: vec![vec![Some(1), None].into(), Box::default()].into(),
             })
-            .with_mutation(MutationRoot),
+            .with_mutation(MutationRoot)
+            .with_subscription(SubscriptionRoot),
             App::default(),
             Operation::new(document.clone()),
             ExecuteOptions::default(),
@@ -992,7 +1042,7 @@ fn borrowed_wrappers_complete_like_owned_ones() {
         ($root:ty, $value:expr) => {{
             let schema = schema::Schema::<App>::builder()
                 .query::<$root>()
-                .mutation::<MutationRoot>()
+                .mutation::<MutationRoot>().subscription::<SubscriptionRoot>()
                 .build()
                 .unwrap();
             let document = schema
@@ -1002,7 +1052,7 @@ fn borrowed_wrappers_complete_like_owned_ones() {
                 )
                 .unwrap();
             let output = block_on(schema.execute(
-                Roots::query($value).with_mutation(MutationRoot),
+                Roots::query($value).with_mutation(MutationRoot).with_subscription(SubscriptionRoot),
                 App::default(),
                 Operation::new(document),
                 ExecuteOptions::default(),
@@ -1098,15 +1148,20 @@ fn owned_slices_complete_without_cloning() {
     let schema = schema::Schema::<App>::builder()
         .query::<KeptShapes>()
         .mutation::<MutationRoot>()
+        .subscription::<SubscriptionRoot>()
         .build()
         .unwrap();
     let run = |query: &str, options: ExecuteOptions| -> Vec<Value> {
-        let output = block_on(schema.execute(
-            Roots::query(KeptShapes).with_mutation(MutationRoot),
-            App::default(),
-            Operation::new(schema.parse(query).unwrap()),
-            options,
-        ));
+        let output = block_on(
+            schema.execute(
+                Roots::query(KeptShapes)
+                    .with_mutation(MutationRoot)
+                    .with_subscription(SubscriptionRoot),
+                App::default(),
+                Operation::new(schema.parse(query).unwrap()),
+                options,
+            ),
+        );
         output
             .payloads
             .iter()
@@ -1187,6 +1242,7 @@ fn kept_rows_retire_with_their_stream_turn() {
     let schema = schema::Schema::<App>::builder()
         .query::<KeptRows>()
         .mutation::<MutationRoot>()
+        .subscription::<SubscriptionRoot>()
         .stream_capacity(1)
         .build()
         .unwrap();
@@ -1196,7 +1252,8 @@ fn kept_rows_retire_with_their_stream_turn() {
             Roots::query(KeptRows {
                 dropped: dropped.clone(),
             })
-            .with_mutation(MutationRoot),
+            .with_mutation(MutationRoot)
+            .with_subscription(SubscriptionRoot),
             App::default(),
             Operation::new(schema.parse("{ ints @stream }").unwrap()),
             ExecuteOptions {
@@ -1266,15 +1323,20 @@ fn failed_root_is_reported_once_at_its_position() {
     let schema = schema::Schema::<App>::builder()
         .query::<Result<QueryRoot, Error>>()
         .mutation::<MutationRoot>()
+        .subscription::<SubscriptionRoot>()
         .build()
         .unwrap();
     let document = schema.parse("{ a: users { id } b: users { id } }").unwrap();
-    let output = block_on(schema.execute(
-        Roots::query(Err(Error::new("root failed"))).with_mutation(MutationRoot),
-        App::default(),
-        Operation::new(document.clone()),
-        ExecuteOptions::default(),
-    ));
+    let output = block_on(
+        schema.execute(
+            Roots::query(Err(Error::new("root failed")))
+                .with_mutation(MutationRoot)
+                .with_subscription(SubscriptionRoot),
+            App::default(),
+            Operation::new(document.clone()),
+            ExecuteOptions::default(),
+        ),
+    );
     assert_eq!(output.payloads.len(), 1);
     let v: Value = serde_json::from_slice(&output.payloads[0].json).unwrap();
     assert_eq!(v["data"], Value::Null);
@@ -1506,4 +1568,170 @@ fn an_empty_fragment_completing_late_still_announces_its_children() {
             }),
         ]
     );
+}
+
+fn subscription_roots() -> Roots<QueryRoot, MutationRoot, SubscriptionRoot> {
+    Roots::query(QueryRoot)
+        .with_mutation(MutationRoot)
+        .with_subscription(SubscriptionRoot)
+}
+
+/// A subscription's response stream over `ticks`, whose source logs every
+/// poll and its drop into `calls`.
+fn ticks(
+    calls: &Arc<Mutex<usize>>,
+    query: &str,
+) -> std::pin::Pin<Box<dyn futures::Stream<Item = Value> + Send>> {
+    let app = App {
+        calls: Some(calls.clone()),
+        ..Default::default()
+    };
+    let schema = build_schema();
+    let document = schema.parse(query).unwrap();
+    Box::pin(schema.execute_stream(
+        subscription_roots(),
+        app,
+        Operation::new(document),
+        ExecuteOptions::default(),
+        |payload| serde_json::to_value(&payload).unwrap(),
+    ))
+}
+
+#[test]
+fn a_subscription_polls_its_source_once_per_pull() {
+    use std::task::{Context as TaskContext, Poll};
+    let calls = Arc::new(Mutex::new(0));
+    let mut stream = ticks(&calls, "subscription { ticks(count: 3, fail: 1) }");
+    let waker = futures::task::noop_waker();
+    let mut cx = TaskContext::from_waker(&waker);
+    let count = || *calls.lock().unwrap();
+    // Nothing runs before the first pull: not even the subscribe step.
+    assert_eq!(count(), 0);
+    // Each pull is the subscribe step at most once, one poll of the source
+    // and one complete response.
+    assert_eq!(
+        stream.as_mut().poll_next(&mut cx),
+        Poll::Ready(Some(json!({"data": {"ticks": 0}})))
+    );
+    assert_eq!(count(), 2);
+    // An error item is that event's response, at the root field, nulling
+    // `data` since the field is non-null; the subscription goes on.
+    assert_eq!(
+        stream.as_mut().poll_next(&mut cx),
+        Poll::Ready(Some(json!({
+            "data": null,
+            "errors": [{
+                "message": "tick 1 failed",
+                "locations": [{"line": 1, "column": 16}],
+                "path": ["ticks"],
+            }],
+        })))
+    );
+    assert_eq!(count(), 3);
+    assert_eq!(
+        stream.as_mut().poll_next(&mut cx),
+        Poll::Ready(Some(json!({"data": {"ticks": 2}})))
+    );
+    assert_eq!(count(), 4);
+    // The source ends: one last poll, then it is dropped with the execution.
+    assert_eq!(stream.as_mut().poll_next(&mut cx), Poll::Ready(None));
+    assert_eq!(count(), 6);
+}
+
+#[test]
+fn dropping_a_subscription_drops_its_source() {
+    let calls = Arc::new(Mutex::new(0));
+    let mut stream = ticks(&calls, "subscription { ticks(count: 100) }");
+    assert_eq!(block_on(stream.next()), Some(json!({"data": {"ticks": 0}})));
+    assert_eq!(*calls.lock().unwrap(), 2);
+    drop(stream);
+    // The subscribe step, one poll, and the drop.
+    assert_eq!(*calls.lock().unwrap(), 3);
+}
+
+#[test]
+fn an_event_source_that_ends_without_an_event_ships_nothing() {
+    let calls = Arc::new(Mutex::new(0));
+    let payloads: Vec<Value> =
+        block_on(ticks(&calls, "subscription { ticks(count: 0) }").collect());
+    assert_eq!(payloads, Vec::<Value>::new());
+}
+
+#[test]
+fn a_failed_subscribe_step_is_the_one_response() {
+    let calls = Arc::new(Mutex::new(0));
+    let payloads: Vec<Value> =
+        block_on(ticks(&calls, "subscription { ticks(count: -1) }").collect());
+    assert_eq!(
+        payloads,
+        vec![json!({
+            "errors": [{
+                "message": "count must not be negative",
+                "locations": [{"line": 1, "column": 16}],
+                "path": ["ticks"],
+            }],
+        })]
+    );
+}
+
+#[test]
+fn the_object_sugar_boxes_an_event_source() {
+    let (payloads, _) = run(
+        App::default(),
+        "subscription { userAdded { name } }",
+        Value::Null,
+        ExecuteOptions::default(),
+    );
+    assert_eq!(
+        payloads,
+        vec![
+            json!({"data": {"userAdded": {"name": "Ann"}}}),
+            json!({"data": {"userAdded": {"name": "Bob"}}}),
+        ]
+    );
+}
+
+#[test]
+fn a_plan_knows_its_operation_kind() {
+    let schema = build_schema();
+    let app = App::default();
+    let kind = |query: &str| {
+        let document = schema.parse(query).unwrap();
+        schema
+            .plan(&Operation::new(document), &app, ExecuteOptions::default())
+            .unwrap()
+            .kind()
+    };
+    assert_eq!(kind("{ users { id } }"), greem::OperationKind::Query);
+    assert_eq!(
+        kind("mutation { rename(id: \"1\", name: \"Z\") { id } }"),
+        greem::OperationKind::Mutation
+    );
+    assert_eq!(
+        kind("subscription { ticks(count: 1) }"),
+        greem::OperationKind::Subscription
+    );
+}
+
+#[test]
+fn a_subscription_root_field_cannot_be_excluded_or_deferred() {
+    // The subscribe step indexes the one root field, which validation
+    // guarantees: `@skip`/`@include` cannot reach a subscription root field,
+    // and `@defer` cannot sit on a root selection, whatever its `if`, not
+    // even through a fragment.
+    let schema = build_schema();
+    for query in [
+        "subscription ($s: Boolean!) { numbers(count: 1) @skip(if: $s) }",
+        "subscription ($s: Boolean!) { ... @skip(if: $s) { numbers(count: 1) } }",
+        "subscription ($s: Boolean!) { ...F @include(if: $s) } fragment F on Subscription { numbers(count: 1) }",
+        "subscription ($d: Boolean!) { ... @defer(if: $d) { numbers(count: 1) } }",
+        "subscription ($d: Boolean!) { ...F @defer(if: $d) } fragment F on Subscription { numbers(count: 1) }",
+        "subscription { ... @defer(if: false) { numbers(count: 1) } }",
+    ] {
+        let errors = schema
+            .parse(query)
+            .err()
+            .unwrap_or_else(|| panic!("{query}"));
+        assert_eq!(errors.kind, greem::RequestErrorKind::Validation, "{query}");
+    }
 }

@@ -10,6 +10,7 @@ test = false
 doctest = false
 
 [dependencies]
+futures = { workspace = true }
 greem = { workspace = true }
 
 [build-dependencies]

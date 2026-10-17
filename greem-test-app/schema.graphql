@@ -27,3 +27,13 @@ type Mutation {
   rename(id: ID!, name: String!): User
   fail: String!
 }
+type Subscription {
+  """
+  `count` events, the numbers from 0; event `fail` is an error item.
+  """
+  ticks(count: Int!, fail: Int): Int!
+  """
+  Every user, one per event.
+  """
+  userAdded: User
+}

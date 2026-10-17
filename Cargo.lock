@@ -702,6 +702,7 @@ dependencies = [
 name = "greem-test-app"
 version = "0.0.1"
 dependencies = [
+ "futures",
  "greem",
  "greem-build",
 ]

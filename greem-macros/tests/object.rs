@@ -1,7 +1,7 @@
 //! `#[greem::object]` against `greem-test-app`'s generated schema module.
 
-use futures::StreamExt;
 use futures::executor::block_on;
+use futures::{Stream, StreamExt};
 use greem::{
     Args, Context, Error, ExecuteOptions, HintRegistry, Operation, Planning, Roots, Streamed,
 };
@@ -186,20 +186,50 @@ impl Mutation {
     }
 }
 
+struct Subscription;
+
+#[greem::object(schema = schema, type = "Subscription", context = App)]
+impl Subscription {
+    fn ticks(
+        &self,
+        args: &Args<schema::Subscription::ticks>,
+    ) -> Result<impl Stream<Item = Result<i32, Error>> + ::core::marker::Send, Error> {
+        if args.count < 0 {
+            return Err(Error::new("count must not be negative"));
+        }
+        let fail = args.fail;
+        Ok(futures::stream::iter((0..args.count).map(move |tick| {
+            if fail == Some(tick) {
+                Err(Error::new(format!("tick {tick} failed")))
+            } else {
+                Ok(tick)
+            }
+        })))
+    }
+    fn user_added(&self) -> impl Stream<Item = Result<Option<User>, Error>> + ::core::marker::Send {
+        futures::stream::iter(users().into_iter().map(|user| Ok(Some(user))))
+    }
+}
+
 fn run(query: &str) -> (Value, Vec<String>) {
     let schema = schema::Schema::<App>::builder()
         .query::<Query>()
         .mutation::<Mutation>()
+        .subscription::<Subscription>()
         .build()
         .unwrap();
     let document = schema.parse(query).unwrap();
     let app = App::default();
-    let output = block_on(schema.execute(
-        Roots::query(Query).with_mutation(Mutation),
-        app,
-        Operation::new(document.clone()),
-        ExecuteOptions::default(),
-    ));
+    let output = block_on(
+        schema.execute(
+            Roots::query(Query)
+                .with_mutation(Mutation)
+                .with_subscription(Subscription),
+            app,
+            Operation::new(document.clone()),
+            ExecuteOptions::default(),
+        ),
+    );
     let value: Value = serde_json::from_slice(&output.payloads[0].json).unwrap();
     (value, Vec::new())
 }
@@ -223,6 +253,7 @@ fn set_based_and_hints() {
     let schema = schema::Schema::<App>::builder()
         .query::<Query>()
         .mutation::<Mutation>()
+        .subscription::<Subscription>()
         .build()
         .unwrap();
     let document = schema
@@ -232,7 +263,9 @@ fn set_based_and_hints() {
     block_on(
         schema
             .execute_stream(
-                Roots::query(Query).with_mutation(Mutation),
+                Roots::query(Query)
+                    .with_mutation(Mutation)
+                    .with_subscription(Subscription),
                 App::default(),
                 Operation::new(document.clone()),
                 ExecuteOptions::default(),
