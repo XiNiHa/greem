@@ -469,7 +469,10 @@ fn the_http_feature_converts_both_ways() {
 fn a_subscription_needs_a_streaming_transport() {
     let sent = send(
         App::default(),
-        post(GRAPHQL, r#"{"query": "subscription { ticks(count: 1) }"}"#),
+        post(
+            GRAPHQL,
+            r#"{"query": "subscription { numbers(count: 1) }"}"#,
+        ),
     );
     assert_eq!(sent.status, 422);
     assert_eq!(sent.content_type, JSON);

@@ -497,8 +497,6 @@ impl Gen<'_> {
                 let name = field.name.as_str();
                 let fdoc = Self::doc(&field.description);
                 let ty = self.type_tag(&field.ty, 1);
-                // A subscription root field's resolver returns the event
-                // source of the field's type, not a value of it.
                 let ty = if subscription {
                     quote!(::greem::EventSource<#ty>)
                 } else {

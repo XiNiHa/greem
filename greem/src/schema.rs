@@ -12,6 +12,7 @@ use crate::exec::state::{ErrorBehavior, ExecuteOptions, IncrementalDelivery, Sha
 use crate::exec::subscription::EventEnv;
 use crate::plan::{Leaf, PlanTable, Walker};
 use crate::resolver::{NoMutation, NoSubscription, Outputs};
+pub use crate::tree::OperationKind;
 use crate::tree::{Abort, Document, Tree, json_to_input, span_location};
 use crate::value::InputValue;
 use apollo_compiler::validation::Valid;
@@ -68,14 +69,6 @@ impl<Q, M, S> Roots<Q, M, S> {
             subscription,
         }
     }
-}
-
-/// The kind of the operation a request executes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OperationKind {
-    Query,
-    Mutation,
-    Subscription,
 }
 
 /// A handle to a built schema; clones share it.

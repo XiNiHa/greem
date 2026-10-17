@@ -190,24 +190,27 @@ struct Subscription;
 
 #[greem::object(schema = schema, type = "Subscription", context = App)]
 impl Subscription {
-    fn ticks(
+    fn numbers(
         &self,
-        args: &Args<schema::Subscription::ticks>,
+        args: &Args<schema::Subscription::numbers>,
     ) -> Result<impl Stream<Item = Result<i32, Error>> + ::core::marker::Send, Error> {
         if args.count < 0 {
             return Err(Error::new("count must not be negative"));
         }
         let fail = args.fail;
-        Ok(futures::stream::iter((0..args.count).map(move |tick| {
-            if fail == Some(tick) {
-                Err(Error::new(format!("tick {tick} failed")))
+        Ok(futures::stream::iter((0..args.count).map(move |number| {
+            if fail == Some(number) {
+                Err(Error::new(format!("number {number} failed")))
             } else {
-                Ok(tick)
+                Ok(number)
             }
         })))
     }
     fn user_added(&self) -> impl Stream<Item = Result<Option<User>, Error>> + ::core::marker::Send {
         futures::stream::iter(users().into_iter().map(|user| Ok(Some(user))))
+    }
+    fn batches(&self) -> impl Stream<Item = Result<Vec<i32>, Error>> + ::core::marker::Send {
+        futures::stream::empty()
     }
 }
 

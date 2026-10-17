@@ -27,8 +27,7 @@ use {
 /// it from being created, which is the subscription's one response.
 pub type SubscribeFuture<'a, C> = BoxFuture<'a, Result<Box<dyn Events<'a, C> + 'a>, Error>>;
 
-/// What one event's execution borrows: a fresh per-event `Shared`, the
-/// application value and the plan table.
+/// What one event's execution borrows; `shared` is fresh per event.
 pub struct EventEnv<'e, C> {
     pub shared: &'e Shared,
     pub app: &'e C,

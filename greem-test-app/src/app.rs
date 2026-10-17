@@ -393,59 +393,59 @@ impl Resolver<schema::Mutation::fail, App> for MutationRoot {
     }
 }
 
-/// `Subscription.ticks`: a hand-written stream, logging every poll and its
+/// `Subscription.numbers`: a hand-written stream, logging every poll and its
 /// drop so a test can see when the executor pulls it.
-pub struct Ticks<'a> {
+pub struct Numbers<'a> {
     app: &'a App,
     next: i32,
     count: i32,
     fail: Option<i32>,
 }
 
-impl Stream for Ticks<'_> {
+impl Stream for Numbers<'_> {
     type Item = Result<i32, Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, _: &mut task::Context<'_>) -> Poll<Option<Self::Item>> {
-        self.app.log("Subscription.ticks.poll");
+        self.app.log("Subscription.numbers.poll");
         if self.next >= self.count {
             return Poll::Ready(None);
         }
-        let tick = self.next;
+        let number = self.next;
         self.next += 1;
-        Poll::Ready(Some(if self.fail == Some(tick) {
-            Err(Error::new(format!("tick {tick} failed")))
+        Poll::Ready(Some(if self.fail == Some(number) {
+            Err(Error::new(format!("number {number} failed")))
         } else {
-            Ok(tick)
+            Ok(number)
         }))
     }
 }
 
-impl Drop for Ticks<'_> {
+impl Drop for Numbers<'_> {
     fn drop(&mut self) {
-        self.app.log("Subscription.ticks.drop");
+        self.app.log("Subscription.numbers.drop");
     }
 }
 
-impl Resolver<schema::Subscription::ticks, App> for SubscriptionRoot {
+impl Resolver<schema::Subscription::numbers, App> for SubscriptionRoot {
     type Output<'obj>
-        = Ticks<'obj>
+        = Numbers<'obj>
     where
         Self: 'obj;
     async fn resolve<'obj, 'call>(
         parents: &'call [&'obj Self],
-        args: &'obj Args<schema::Subscription::ticks>,
+        args: &'obj Args<schema::Subscription::numbers>,
         ctx: &'obj Context<'obj, App>,
     ) -> Result<Vec<Self::Output<'obj>>, Error>
     where
         'obj: 'call,
     {
-        ctx.app().log("Subscription.ticks");
+        ctx.app().log("Subscription.numbers");
         if args.count < 0 {
             return Err(Error::new("count must not be negative"));
         }
         Ok(parents
             .iter()
-            .map(|_| Ticks {
+            .map(|_| Numbers {
                 app: ctx.app(),
                 next: 0,
                 count: args.count,
@@ -464,6 +464,14 @@ impl SubscriptionRoot {
     ) -> impl Stream<Item = Result<Option<User>, Error>> + Send {
         ctx.app().log("Subscription.userAdded");
         futures::stream::iter(users().into_iter().map(|user| Ok(Some(user))))
+    }
+    async fn batches(
+        &self,
+        _args: &Args<schema::Subscription::batches>,
+        ctx: &Context<App>,
+    ) -> impl Stream<Item = Result<Vec<i32>, Error>> + Send {
+        ctx.app().log("Subscription.batches");
+        futures::stream::iter([Ok(vec![0]), Ok(vec![1, 2])])
     }
 }
 

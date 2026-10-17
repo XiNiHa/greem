@@ -29,11 +29,15 @@ type Mutation {
 }
 type Subscription {
   """
-  `count` events, the numbers from 0; event `fail` is an error item.
+  `count` events, the numbers from 0; number `fail` is an error item.
   """
-  ticks(count: Int!, fail: Int): Int!
+  numbers(count: Int!, fail: Int): Int!
   """
   Every user, one per event.
   """
   userAdded: User
+  """
+  `[0]`, then `[1, 2]`: a list at the root field.
+  """
+  batches: [Int!]!
 }

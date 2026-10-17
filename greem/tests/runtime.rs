@@ -1576,9 +1576,9 @@ fn subscription_roots() -> Roots<QueryRoot, MutationRoot, SubscriptionRoot> {
         .with_subscription(SubscriptionRoot)
 }
 
-/// A subscription's response stream over `ticks`, whose source logs every
+/// A subscription's response stream over `numbers`, whose source logs every
 /// poll and its drop into `calls`.
-fn ticks(
+fn numbers(
     calls: &Arc<Mutex<usize>>,
     query: &str,
 ) -> std::pin::Pin<Box<dyn futures::Stream<Item = Value> + Send>> {
@@ -1601,7 +1601,7 @@ fn ticks(
 fn a_subscription_polls_its_source_once_per_pull() {
     use std::task::{Context as TaskContext, Poll};
     let calls = Arc::new(Mutex::new(0));
-    let mut stream = ticks(&calls, "subscription { ticks(count: 3, fail: 1) }");
+    let mut stream = numbers(&calls, "subscription { numbers(count: 3, fail: 1) }");
     let waker = futures::task::noop_waker();
     let mut cx = TaskContext::from_waker(&waker);
     let count = || *calls.lock().unwrap();
@@ -1611,7 +1611,7 @@ fn a_subscription_polls_its_source_once_per_pull() {
     // and one complete response.
     assert_eq!(
         stream.as_mut().poll_next(&mut cx),
-        Poll::Ready(Some(json!({"data": {"ticks": 0}})))
+        Poll::Ready(Some(json!({"data": {"numbers": 0}})))
     );
     assert_eq!(count(), 2);
     // An error item is that event's response, at the root field, nulling
@@ -1621,16 +1621,16 @@ fn a_subscription_polls_its_source_once_per_pull() {
         Poll::Ready(Some(json!({
             "data": null,
             "errors": [{
-                "message": "tick 1 failed",
+                "message": "number 1 failed",
                 "locations": [{"line": 1, "column": 16}],
-                "path": ["ticks"],
+                "path": ["numbers"],
             }],
         })))
     );
     assert_eq!(count(), 3);
     assert_eq!(
         stream.as_mut().poll_next(&mut cx),
-        Poll::Ready(Some(json!({"data": {"ticks": 2}})))
+        Poll::Ready(Some(json!({"data": {"numbers": 2}})))
     );
     assert_eq!(count(), 4);
     // The source ends: one last poll, then it is dropped with the execution.
@@ -1641,8 +1641,11 @@ fn a_subscription_polls_its_source_once_per_pull() {
 #[test]
 fn dropping_a_subscription_drops_its_source() {
     let calls = Arc::new(Mutex::new(0));
-    let mut stream = ticks(&calls, "subscription { ticks(count: 100) }");
-    assert_eq!(block_on(stream.next()), Some(json!({"data": {"ticks": 0}})));
+    let mut stream = numbers(&calls, "subscription { numbers(count: 100) }");
+    assert_eq!(
+        block_on(stream.next()),
+        Some(json!({"data": {"numbers": 0}}))
+    );
     assert_eq!(*calls.lock().unwrap(), 2);
     drop(stream);
     // The subscribe step, one poll, and the drop.
@@ -1653,7 +1656,7 @@ fn dropping_a_subscription_drops_its_source() {
 fn an_event_source_that_ends_without_an_event_ships_nothing() {
     let calls = Arc::new(Mutex::new(0));
     let payloads: Vec<Value> =
-        block_on(ticks(&calls, "subscription { ticks(count: 0) }").collect());
+        block_on(numbers(&calls, "subscription { numbers(count: 0) }").collect());
     assert_eq!(payloads, Vec::<Value>::new());
 }
 
@@ -1661,14 +1664,14 @@ fn an_event_source_that_ends_without_an_event_ships_nothing() {
 fn a_failed_subscribe_step_is_the_one_response() {
     let calls = Arc::new(Mutex::new(0));
     let payloads: Vec<Value> =
-        block_on(ticks(&calls, "subscription { ticks(count: -1) }").collect());
+        block_on(numbers(&calls, "subscription { numbers(count: -1) }").collect());
     assert_eq!(
         payloads,
         vec![json!({
             "errors": [{
                 "message": "count must not be negative",
                 "locations": [{"line": 1, "column": 16}],
-                "path": ["ticks"],
+                "path": ["numbers"],
             }],
         })]
     );
@@ -1708,9 +1711,61 @@ fn a_plan_knows_its_operation_kind() {
         greem::OperationKind::Mutation
     );
     assert_eq!(
-        kind("subscription { ticks(count: 1) }"),
+        kind("subscription { numbers(count: 1) }"),
         greem::OperationKind::Subscription
     );
+}
+
+#[test]
+fn stream_at_the_subscription_root_field_is_refused() {
+    // Written with a literal `if`, it fails validation: a request error.
+    let (payloads, _) = run(
+        App::default(),
+        "subscription { batches @stream }",
+        Value::Null,
+        ExecuteOptions {
+            incremental: IncrementalDelivery::Enabled,
+            ..Default::default()
+        },
+    );
+    assert_eq!(payloads.len(), 1, "{payloads:?}");
+    assert!(payloads[0].get("data").is_none(), "{payloads:?}");
+    assert_eq!(
+        payloads[0]["errors"][0]["message"],
+        json!(
+            "`@stream` is not supported in a subscription; disable it by setting its `if` argument to false"
+        )
+    );
+    // Bound to a variable it passes validation; true is an execution error
+    // at the field, once per event, nulling `data` since the list is non-null.
+    let refused = |enabled: bool| {
+        run(
+            App::default(),
+            "subscription ($s: Boolean!) { batches @stream(if: $s) }",
+            json!({"s": enabled}),
+            ExecuteOptions {
+                incremental: IncrementalDelivery::Enabled,
+                ..Default::default()
+            },
+        )
+        .0
+    };
+    assert_eq!(
+        refused(false),
+        vec![
+            json!({"data": {"batches": [0]}}),
+            json!({"data": {"batches": [1, 2]}}),
+        ]
+    );
+    let error = json!({
+        "data": null,
+        "errors": [{
+            "message": "`@stream` is not supported in a subscription; disable it by setting its `if` argument to false",
+            "locations": [{"line": 1, "column": 31}],
+            "path": ["batches"],
+        }],
+    });
+    assert_eq!(refused(true), vec![error.clone(), error]);
 }
 
 #[test]

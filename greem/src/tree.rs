@@ -3,7 +3,6 @@
 //! any resolver runs.
 
 use crate::error::{Error, GraphQLError, Location, RequestErrorKind};
-use crate::schema::OperationKind;
 use crate::value::InputValue;
 use apollo_compiler::Node;
 use apollo_compiler::ast::{self, Type};
@@ -28,6 +27,14 @@ impl std::fmt::Debug for Document {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("Document")
     }
+}
+
+/// The kind of the operation a request executes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OperationKind {
+    Query,
+    Mutation,
+    Subscription,
 }
 
 /// A request-level failure that aborts before execution.

@@ -141,6 +141,10 @@ _Avoid_: Chunk, page, tick
 The stream a subscription root field's resolver returns, created with the field's arguments, context and hints in hand: one item per event, and its end ends the subscription. Not a streamed list, which is a `@stream` position's output.
 _Avoid_: Source stream, source event stream, streamed list, pubsub, topic
 
+**Subscribe step**:
+The one call of a subscription root field's resolver, which creates the event source; its failure is the subscription's only response.
+_Avoid_: Subscribe function, source creation, setup
+
 **Event**:
 One item of an event source, completed as the root field's value and executed as one response of its own; an execution error in an event belongs to that event's response, and the next event still runs.
 _Avoid_: Message, stream turn (that is `@stream`), payload, tick

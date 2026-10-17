@@ -276,13 +276,16 @@ struct Subscription;
 
 #[greem::object(schema = schema, type = "Subscription", context = App)]
 impl Subscription {
-    fn ticks(
+    fn numbers(
         &self,
-        args: &Args<schema::Subscription::ticks>,
+        args: &Args<schema::Subscription::numbers>,
     ) -> BoxStream<'static, Result<i32, Error>> {
         futures::stream::iter((0..args.count).map(Ok)).boxed()
     }
     fn user_added(&self) -> BoxStream<'static, Result<Option<User>, Error>> {
+        futures::stream::empty().boxed()
+    }
+    fn batches(&self) -> BoxStream<'static, Result<Vec<i32>, Error>> {
         futures::stream::empty().boxed()
     }
 }
