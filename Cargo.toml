@@ -27,7 +27,9 @@ greem-macros = { path = "greem-macros", version = "0.0.1" }
 greem-core = { path = "greem-core", version = "0.0.1" }
 greem-reference = { path = "greem-reference" }
 greem-test-app = { path = "greem-test-app" }
-apollo-compiler = "1.33"
+# Exact: beta.2 makes `Field::selection_set` an `Option`, which breaks
+# `greem/src/tree.rs`. Relax to a caret at 2.0.0 stable.
+apollo-compiler = "=2.0.0-beta.1"
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

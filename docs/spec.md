@@ -187,7 +187,11 @@ completion goes inside `greem::__private::reference!`, as codegen's does.
   `pub type Schema<C, Q, M> = greem::Schema<Info, C, Q, M>`.
 
 The `@defer` and `@stream` directive definitions are appended to the SDL when
-absent; apollo-compiler validates documents against them.
+absent; apollo-compiler validates documents against them. `@oneOf` is built
+into apollo-compiler, which also enforces the exactly-one rule on literals at
+validation and on variables at coercion; an SDL may still declare
+`directive @oneOf on INPUT_OBJECT`, redundantly, and the declaration shadows
+the built-in one.
 
 ## Execution model
 

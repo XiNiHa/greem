@@ -628,7 +628,7 @@ impl Gen<'_> {
             .chain(self.unions().iter().map(|u| {
                 self.abstract_impl(
                     &u.name,
-                    &u.members.iter().map(|m| m.name.clone()).collect::<Vec<_>>(),
+                    &u.members.iter().map(|m| (**m).clone()).collect::<Vec<_>>(),
                 )
             }))
             .collect();

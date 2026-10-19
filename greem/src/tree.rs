@@ -232,7 +232,7 @@ impl<'d> OverlapCheck<'d> {
         for selection in &set.selections {
             match selection {
                 Selection::Field(field) => fields
-                    .entry(field.response_key().as_str())
+                    .entry(field.response_name().as_str())
                     .or_default()
                     .push((field, parent)),
                 Selection::InlineFragment(fragment) => {
@@ -496,7 +496,7 @@ impl Tree {
             // Arguments coerce against the concrete object's definition: its
             // defaults may differ from the interface's.
             let definition = match self.schema.type_field(typename, &name) {
-                Ok(definition) => definition.node.clone(),
+                Ok(definition) => definition.clone(),
                 Err(_) => first.definition.clone(),
             };
             fields.push(SelectedField {
@@ -568,7 +568,7 @@ impl Tree {
             match selection {
                 Selection::Field(field) => {
                     groups
-                        .entry(field.response_key().to_string())
+                        .entry(field.response_name().to_string())
                         .or_default()
                         .push(Occurrence {
                             field: field.clone(),

@@ -1,13 +1,12 @@
 //! graphql-js `src/execution/__tests__/oneof-test.ts`, case by case
 //! in upstream order.
 //!
-//! greem does not enforce `@oneOf` yet (#42). Every case is written against
-//! the spec's OneOf Input Objects coercion rule: exactly one field must be
-//! provided, and its value must be non-null. The rejecting cases are ignored
-//! until #42 lands; their error messages are greem's provisional wording
-//! (the request-error / field-error shape, `locations`, `path` and `data`
-//! are the claim, in greem's conventions: a variable error locates the
-//! variable definition, a execution error locates the field).
+//! apollo-compiler enforces the spec's OneOf Input Objects coercion rule
+//! (exactly one field, and its value non-null) for literals at validation
+//! and for variables at coercion, so every rejecting case already rejects.
+//! They stay ignored until #42 adopts apollo's wording and error shape: the
+//! expected JSON below is still greem's provisional claim (a variable error
+//! locates the variable definition, an execution error locates the field).
 
 use crate::common::*;
 use greem::ExecuteOptions;
@@ -323,7 +322,7 @@ mod handles_oneof_input_objects {
         /// it('errors with nulled fragment variable for field')
         ///
         /// Also needs fragment arguments (`experimentalFragmentArguments`),
-        /// which apollo-compiler 1.33 does not parse.
+        /// which apollo-compiler does not parse.
         #[test]
         #[ignore = "#42"]
         fn errors_with_nulled_fragment_variable_for_field() {
@@ -361,7 +360,7 @@ mod handles_oneof_input_objects {
         /// it('errors with missing fragment variable for field')
         ///
         /// Also needs fragment arguments (`experimentalFragmentArguments`),
-        /// which apollo-compiler 1.33 does not parse.
+        /// which apollo-compiler does not parse.
         #[test]
         #[ignore = "#42"]
         fn errors_with_missing_fragment_variable_for_field() {
