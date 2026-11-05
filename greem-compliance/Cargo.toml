@@ -22,4 +22,4 @@ greem-build = { workspace = true }
 pretty_assertions = "1"
 
 [package.metadata.graphql_js]
-tag = "v17.0.2"
+tag = "v17.1.0"

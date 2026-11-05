@@ -28,7 +28,7 @@
 use crate::common::*;
 use greem_compliance::graphql_js::defer::{
     A, AnotherNestedObject, B, C, DeeperObject, E, Friend, G, Hero, LateParent, LateSide,
-    NestedObject, World,
+    NestedObject, World, shared,
 };
 use greem_compliance::harness::Area;
 use serde_json::{Value, json};
@@ -39,6 +39,8 @@ const A_NON_NULL_ERROR_FIELD: &str =
     "Cannot return null for non-nullable field a.nonNullErrorField.";
 const C_NON_NULL_ERROR_FIELD: &str =
     "Cannot return null for non-nullable field c.nonNullErrorField.";
+const QUERY_BAD: &str = "Cannot return null for non-nullable field Query.bad.";
+const USER_BAD: &str = "Cannot return null for non-nullable field User.bad.";
 /// A non-null leaf the case never selects.
 const UNSET: &str = "unset";
 
@@ -389,6 +391,85 @@ mod execute_defer_directive {
         assert_payloads(&payloads, &[json!({"data": {"hero": {"name": "Luke"}}})]);
     }
 
+    /// it('Can defer same fragment with different labels')
+    ///
+    /// `name` is selected by both fragments, so it is a shared set: it ships
+    /// once, under the first member to complete, and both complete with it.
+    #[test]
+    fn can_defer_same_fragment_with_different_labels() {
+        let (payloads, _) = World::with_hero(Hero::luke()).run(
+            r#"
+      query HeroNameQuery {
+        hero {
+          ...TopFragment @defer(label: "DeferTop1")
+          ...TopFragment @defer(label: "DeferTop2")
+        }
+      }
+      fragment TopFragment on Hero {
+        name
+      }
+    "#,
+            Value::Null,
+            incremental(),
+        );
+        assert_payloads(
+            &payloads,
+            &[
+                json!({
+                    "data": {"hero": {}},
+                    "pending": [
+                        {"id": "0", "path": ["hero"], "label": "DeferTop1"},
+                        {"id": "1", "path": ["hero"], "label": "DeferTop2"},
+                    ],
+                    "hasNext": true,
+                }),
+                json!({
+                    "incremental": [{"id": "0", "data": {"name": "Luke"}}],
+                    "completed": [{"id": "0"}, {"id": "1"}],
+                    "hasNext": false,
+                }),
+            ],
+        );
+    }
+
+    /// it('Can defer same fragment with unlabeled sibling defers')
+    #[test]
+    fn can_defer_same_fragment_with_unlabeled_sibling_defers() {
+        let (payloads, _) = World::with_hero(Hero::luke()).run(
+            r#"
+      query HeroNameQuery {
+        hero {
+          ...TopFragment @defer
+          ...TopFragment @defer
+        }
+      }
+      fragment TopFragment on Hero {
+        name
+      }
+    "#,
+            Value::Null,
+            incremental(),
+        );
+        assert_payloads(
+            &payloads,
+            &[
+                json!({
+                    "data": {"hero": {}},
+                    "pending": [
+                        {"id": "0", "path": ["hero"]},
+                        {"id": "1", "path": ["hero"]},
+                    ],
+                    "hasNext": true,
+                }),
+                json!({
+                    "incremental": [{"id": "0", "data": {"name": "Luke"}}],
+                    "completed": [{"id": "0"}, {"id": "1"}],
+                    "hasNext": false,
+                }),
+            ],
+        );
+    }
+
     /// it('Can defer an inline fragment')
     #[test]
     fn can_defer_an_inline_fragment() {
@@ -674,6 +755,32 @@ mod execute_defer_directive {
                 }),
             ],
         );
+    }
+
+    /// it('Does not skip non-deferred fragments when a fragment is deferred by parent defer')
+    ///
+    /// `name` is also selected outside any defer, so it is immediate, and the
+    /// fragment, with nothing of its own left, is never announced.
+    #[test]
+    fn does_not_skip_non_deferred_fragments_when_a_fragment_is_deferred_by_parent_defer() {
+        let (payloads, _) = World::with_hero(Hero::luke()).run(
+            r#"
+      query HeroNameQuery {
+        hero {
+          ... @defer(label: "DeferID") {
+            ...F
+          }
+          ...F
+        }
+      }
+      fragment F on Hero {
+        name
+      }
+    "#,
+            Value::Null,
+            incremental(),
+        );
+        assert_payloads(&payloads, &[json!({"data": {"hero": {"name": "Luke"}}})]);
     }
 
     /// it('Separately emits nested defer fragments with varying subfields of same priorities but different level of defers')
@@ -1615,6 +1722,739 @@ mod execute_defer_directive {
                         },
                         {"id": "1"},
                     ],
+                    "hasNext": false,
+                }),
+            ],
+        );
+    }
+
+    /// it('Announces a nested fragment before completing its shared failure')
+    ///
+    /// `nonNullName` is selected by R and by C (nested in P), so it is a set
+    /// shared by both; its failure fails every member, and R fails with it.
+    /// When P completes, C has no set of its own and its one shared set has
+    /// already settled, so it has nothing left to deliver and is never
+    /// announced (`docs/spec.md`, Incremental delivery).
+    #[test]
+    fn announces_a_nested_fragment_before_completing_its_shared_failure() {
+        let (payloads, _) = World::with_hero(Hero {
+            non_null_name: Err(HERO_NON_NULL_NAME),
+            ..Hero::luke()
+        })
+        .run(
+            r#"
+      {
+        hero {
+          ... @defer(label: "R") {
+            nonNullName
+          }
+          ... @defer(label: "P") {
+            name
+            ... @defer(label: "C") {
+              nonNullName
+            }
+          }
+        }
+      }
+    "#,
+            Value::Null,
+            incremental(),
+        );
+        let error = json!({
+            "message": HERO_NON_NULL_NAME,
+            "locations": [{"line": 5, "column": 13}, {"line": 10, "column": 15}],
+            "path": ["hero", "nonNullName"],
+        });
+        // upstream: the second payload also announces C as id 2 and
+        // completes it with the same error.
+        assert_payloads(
+            &payloads,
+            &[
+                json!({
+                    "data": {"hero": {}},
+                    "pending": [
+                        {"id": "0", "path": ["hero"], "label": "R"},
+                        {"id": "1", "path": ["hero"], "label": "P"},
+                    ],
+                    "hasNext": true,
+                }),
+                json!({
+                    "incremental": [{"id": "1", "data": {"name": "Luke"}}],
+                    "completed": [{"id": "0", "errors": [error]}, {"id": "1"}],
+                    "hasNext": false,
+                }),
+            ],
+        );
+    }
+
+    /// it('Reports one cached shared failure when a nested fragment is announced')
+    ///
+    /// `first` is shared by R1 and C, `second` by R2 and C; both fail, and
+    /// so do R1 and R2. As in the case above, C has nothing left to deliver
+    /// when P completes and is never announced.
+    #[test]
+    fn reports_one_cached_shared_failure_when_a_nested_fragment_is_announced() {
+        let (payloads, _) = World::with_hero(Hero {
+            non_null_name: Err(HERO_NON_NULL_NAME),
+            ..Hero::luke()
+        })
+        .run(
+            r#"
+      {
+        hero {
+          ... @defer(label: "R1") {
+            first: nonNullName
+          }
+          ... @defer(label: "R2") {
+            second: nonNullName
+          }
+          ... @defer(label: "P") {
+            name
+            ... @defer(label: "C") {
+              first: nonNullName
+              second: nonNullName
+            }
+          }
+        }
+      }
+    "#,
+            Value::Null,
+            incremental(),
+        );
+        let first = json!({
+            "message": HERO_NON_NULL_NAME,
+            "locations": [{"line": 5, "column": 13}, {"line": 13, "column": 15}],
+            "path": ["hero", "first"],
+        });
+        let second = json!({
+            "message": HERO_NON_NULL_NAME,
+            "locations": [{"line": 8, "column": 13}, {"line": 14, "column": 15}],
+            "path": ["hero", "second"],
+        });
+        // upstream: the second payload also announces C as id 3 and
+        // completes it with `first`'s error alone.
+        assert_payloads(
+            &payloads,
+            &[
+                json!({
+                    "data": {"hero": {}},
+                    "pending": [
+                        {"id": "0", "path": ["hero"], "label": "R1"},
+                        {"id": "1", "path": ["hero"], "label": "R2"},
+                        {"id": "2", "path": ["hero"], "label": "P"},
+                    ],
+                    "hasNext": true,
+                }),
+                json!({
+                    "incremental": [{"id": "2", "data": {"name": "Luke"}}],
+                    "completed": [
+                        {"id": "0", "errors": [first]},
+                        {"id": "1", "errors": [second]},
+                        {"id": "2"},
+                    ],
+                    "hasNext": false,
+                }),
+            ],
+        );
+    }
+
+    /// it('Replays cached failures in field order after independent child work succeeds')
+    ///
+    /// Upstream settles `second` at once, then `first` and `name` on promises
+    /// it resolves by hand one payload apart. Here `name` is slow by a yield,
+    /// but resolvers settle in lockstep generations, so R1, R2 and P all
+    /// settle at one barrier. C has its own `id` and is announced; once
+    /// released it reports `first`, its first error in field order, though
+    /// `id` succeeded. The spies' call counts are per-object claims and are
+    /// not asserted.
+    #[test]
+    fn replays_cached_failures_in_field_order_after_independent_child_work_succeeds() {
+        let (payloads, _) = World {
+            slow: vec!["Hero.name"],
+            ..World::with_hero(Hero {
+                non_null_name: Err(HERO_NON_NULL_NAME),
+                ..Hero::luke()
+            })
+        }
+        .run(
+            r#"
+      {
+        hero {
+          ... @defer(label: "P") {
+            name
+            ... @defer(label: "C") {
+              id
+              first: nonNullName
+              second: nonNullName
+            }
+          }
+          ... @defer(label: "R1") {
+            first: nonNullName
+          }
+          ... @defer(label: "R2") {
+            second: nonNullName
+          }
+        }
+      }
+    "#,
+            Value::Null,
+            incremental(),
+        );
+        let first = json!({
+            "message": HERO_NON_NULL_NAME,
+            "locations": [{"line": 8, "column": 15}, {"line": 13, "column": 13}],
+            "path": ["hero", "first"],
+        });
+        let second = json!({
+            "message": HERO_NON_NULL_NAME,
+            "locations": [{"line": 9, "column": 15}, {"line": 16, "column": 13}],
+            "path": ["hero", "second"],
+        });
+        // upstream: R2's failure, then R1's, then P with C announced and
+        // failed in one payload.
+        assert_payloads(
+            &payloads,
+            &[
+                json!({
+                    "data": {"hero": {}},
+                    "pending": [
+                        {"id": "0", "path": ["hero"], "label": "P"},
+                        {"id": "1", "path": ["hero"], "label": "R1"},
+                        {"id": "2", "path": ["hero"], "label": "R2"},
+                    ],
+                    "hasNext": true,
+                }),
+                json!({
+                    "pending": [{"id": "3", "path": ["hero"], "label": "C"}],
+                    "incremental": [{"id": "0", "data": {"name": "Luke"}}],
+                    "completed": [
+                        {"id": "0"},
+                        {"id": "1", "errors": [first]},
+                        {"id": "2", "errors": [second]},
+                    ],
+                    "hasNext": true,
+                }),
+                json!({
+                    "completed": [{"id": "3", "errors": [first]}],
+                    "hasNext": false,
+                }),
+            ],
+        );
+    }
+
+    /// it('Discards deferred descendants discovered after their parent fails while retaining a live owner')
+    ///
+    /// On upstream's own schema. `user` is shared by P, Q and R, and `x`
+    /// under it by Discarded, D and R. P fails on `bad`; `user` survives and
+    /// ships under Q, its one live owner, in Q's own entry beside `parent`.
+    /// D, with the `x` set still running, is announced with Q; `x` fails a
+    /// generation later, failing R and D. Discarded hangs off the failed P
+    /// and is never announced. Upstream's promises are yields, which settle
+    /// in the same generation as the sync `bad`.
+    #[test]
+    fn discards_deferred_descendants_discovered_after_their_parent_fails_while_retaining_a_live_owner()
+     {
+        let (payloads, _) = shared::World {
+            bad: Err(QUERY_BAD),
+            parent: Ok(Some("parent".into())),
+            user: Some(shared::User { bad: Err(USER_BAD) }),
+            slow: vec!["Query.user", "Query.parent"],
+            ..Default::default()
+        }
+        .run(
+            r#"
+      {
+        ... @defer(label: "P") {
+          bad
+          user {
+            ... @defer(label: "Empty") {
+              ... @defer(label: "Discarded") {
+                x: bad
+              }
+            }
+          }
+        }
+        ... @defer(label: "Q") {
+          parent
+          user {
+            ... @defer(label: "D") {
+              x: bad
+            }
+          }
+        }
+        ... @defer(label: "R") {
+          user {
+            x: bad
+          }
+        }
+      }
+    "#,
+            Value::Null,
+            incremental(),
+        );
+        let x = json!({
+            "message": USER_BAD,
+            "locations": [
+                {"line": 8, "column": 17},
+                {"line": 17, "column": 15},
+                {"line": 23, "column": 13},
+            ],
+            "path": ["user", "x"],
+        });
+        // upstream: P's failure, then R's, then Q (its `user` entry before
+        // its `parent` entry) with D announced and failed, one payload each.
+        assert_payloads(
+            &payloads,
+            &[
+                json!({
+                    "data": {},
+                    "pending": [
+                        {"id": "0", "path": [], "label": "P"},
+                        {"id": "1", "path": [], "label": "Q"},
+                        {"id": "2", "path": [], "label": "R"},
+                    ],
+                    "hasNext": true,
+                }),
+                json!({
+                    "pending": [{"id": "3", "path": ["user"], "label": "D"}],
+                    "incremental": [
+                        {"id": "1", "data": {"parent": "parent"}},
+                        {"id": "1", "data": {"user": {}}},
+                    ],
+                    "completed": [
+                        {
+                            "id": "0",
+                            "errors": [{
+                                "message": QUERY_BAD,
+                                "locations": [{"line": 4, "column": 11}],
+                                "path": ["bad"],
+                            }],
+                        },
+                        {"id": "1"},
+                    ],
+                    "hasNext": true,
+                }),
+                json!({
+                    "completed": [
+                        {"id": "2", "errors": [x]},
+                        {"id": "3", "errors": [x]},
+                    ],
+                    "hasNext": false,
+                }),
+            ],
+        );
+    }
+
+    /// The shared outcome of `Ignores late shared outcomes after a fragment
+    /// and its descendants fail`, for both of upstream's `rejectLate`.
+    ///
+    /// `bad` is shared by R and C and fails both members; `descendant` and
+    /// `lateBad` are shared by R and D. Upstream's promises are yields,
+    /// which settle in the same generation as the sync `bad`, so R, P and K
+    /// all settle at one barrier. R reports `bad`, its first error in
+    /// response order, whichever way `lateBad` settles. C has no set of its
+    /// own and its one shared set has settled, so it is never announced; D
+    /// hangs off C, which failed, so it is dead and is never announced either
+    /// (`docs/spec.md`: a group under a failed ancestor is dead). The spy's
+    /// call count is a per-object claim and is not asserted.
+    fn ignores_late_shared_outcomes(late_bad: Result<String, &'static str>) {
+        let (payloads, _) = shared::World {
+            bad: Err(QUERY_BAD),
+            parent: Ok(Some("parent".into())),
+            keep: Ok(Some("kept".into())),
+            value: Ok(Some("late".into())),
+            late_bad,
+            slow: vec!["Query.parent", "Query.value", "Query.lateBad", "Query.keep"],
+            ..Default::default()
+        }
+        .run(
+            r#"
+        {
+          ... @defer(label: "R") {
+            bad
+            root: value
+            descendant: value
+            lateBad
+          }
+          ... @defer(label: "P") {
+            parent
+            ... @defer(label: "C") {
+              bad
+              ... @defer(label: "D") {
+                descendant: value
+                lateBad
+              }
+            }
+          }
+          ... @defer(label: "K") {
+            keep
+          }
+        }
+      "#,
+            Value::Null,
+            incremental(),
+        );
+        let bad = json!({
+            "message": QUERY_BAD,
+            "locations": [{"line": 4, "column": 13}, {"line": 12, "column": 15}],
+            "path": ["bad"],
+        });
+        // upstream: R's failure; then P, with C announced as id 3 and failed
+        // with `bad`'s error; then K; one payload each.
+        assert_payloads(
+            &payloads,
+            &[
+                json!({
+                    "data": {},
+                    "pending": [
+                        {"id": "0", "path": [], "label": "R"},
+                        {"id": "1", "path": [], "label": "P"},
+                        {"id": "2", "path": [], "label": "K"},
+                    ],
+                    "hasNext": true,
+                }),
+                json!({
+                    "incremental": [
+                        {"id": "1", "data": {"parent": "parent"}},
+                        {"id": "2", "data": {"keep": "kept"}},
+                    ],
+                    "completed": [{"id": "0", "errors": [bad]}, {"id": "1"}, {"id": "2"}],
+                    "hasNext": false,
+                }),
+            ],
+        );
+    }
+
+    /// it(`Ignores late shared outcomes after a fragment and its descendants fail (rejectLate: false)`)
+    ///
+    /// Upstream's title is a template over `rejectLate`; see
+    /// [`ignores_late_shared_outcomes`]. greem announces D in place of the
+    /// unannounced C and delivers `descendant` and `lateBad` under it.
+    #[test]
+    #[ignore = "divergence: a fragment nested in one failed by a shared set is announced and delivered"]
+    fn ignores_late_shared_outcomes_after_a_fragment_and_its_descendants_fail_reject_late_false() {
+        ignores_late_shared_outcomes(Ok("late".into()));
+    }
+
+    /// it(`Ignores late shared outcomes after a fragment and its descendants fail (rejectLate: true)`)
+    #[test]
+    fn ignores_late_shared_outcomes_after_a_fragment_and_its_descendants_fail_reject_late_true() {
+        ignores_late_shared_outcomes(Err("late failure"));
+    }
+
+    /// it(`Delivers a buffered shared value after its other fragment fails (enableEarlyExecution: false)`)
+    ///
+    /// Upstream's title is a template over `enableEarlyExecution`. `id` is
+    /// shared by R and C; R fails on `nonNullName`, which does not touch
+    /// `id`, and `id` waits for C. `name` is slow by a yield, which settles
+    /// in the same generation, so R fails in P's payload.
+    #[test]
+    fn delivers_a_buffered_shared_value_after_its_other_fragment_fails_enable_early_execution_false()
+     {
+        let (payloads, _) = World {
+            slow: vec!["Hero.name"],
+            ..World::with_hero(Hero {
+                non_null_name: Err(HERO_NON_NULL_NAME),
+                ..Hero::luke()
+            })
+        }
+        .run(
+            r#"
+        {
+          hero {
+            ... @defer(label: "R") {
+              nonNullName
+              id
+            }
+            ... @defer(label: "P") {
+              name
+              ... @defer(label: "C") {
+                id
+              }
+            }
+          }
+        }
+      "#,
+            Value::Null,
+            incremental(),
+        );
+        // upstream: R's failure in a payload of its own, then C announced,
+        // delivered and completed in P's payload.
+        assert_payloads(
+            &payloads,
+            &[
+                json!({
+                    "data": {"hero": {}},
+                    "pending": [
+                        {"id": "0", "path": ["hero"], "label": "R"},
+                        {"id": "1", "path": ["hero"], "label": "P"},
+                    ],
+                    "hasNext": true,
+                }),
+                json!({
+                    "pending": [{"id": "2", "path": ["hero"], "label": "C"}],
+                    "incremental": [{"id": "1", "data": {"name": "Luke"}}],
+                    "completed": [
+                        {
+                            "id": "0",
+                            "errors": [{
+                                "message": HERO_NON_NULL_NAME,
+                                "locations": [{"line": 5, "column": 15}],
+                                "path": ["hero", "nonNullName"],
+                            }],
+                        },
+                        {"id": "1"},
+                    ],
+                    "hasNext": true,
+                }),
+                json!({
+                    "incremental": [{"id": "2", "data": {"id": "1"}}],
+                    "completed": [{"id": "2"}],
+                    "hasNext": false,
+                }),
+            ],
+        );
+    }
+
+    // it(`Delivers a buffered shared value after its other fragment fails (enableEarlyExecution: true)`)
+    // Not ported, reason (iii): `enableEarlyExecution`; the payload sequence is the `false` case's.
+
+    /// it('Delivers a shared value before another fragment finishes its separate field')
+    ///
+    /// `id` is shared by R and C. Upstream's promises are yields, and greem
+    /// settles them in one generation, so R cannot finish after P: R and P
+    /// complete at one barrier and `id` ships under R, the first member to
+    /// complete. C then has nothing left to deliver and is never announced.
+    #[test]
+    fn delivers_a_shared_value_before_another_fragment_finishes_its_separate_field() {
+        let (payloads, _) = World {
+            slow: vec!["Hero.name", "Hero.nonNullName"],
+            ..World::with_hero(Hero {
+                non_null_name: Ok("Luke".into()),
+                ..Hero::luke()
+            })
+        }
+        .run(
+            r#"
+      {
+        hero {
+          ... @defer(label: "R") {
+            nonNullName
+            id
+          }
+          ... @defer(label: "P") {
+            name
+            ... @defer(label: "C") {
+              id
+            }
+          }
+        }
+      }
+    "#,
+            Value::Null,
+            incremental(),
+        );
+        // upstream: `name` resolves first, so P ships with C announced and
+        // delivering `id` as id 2; R ships `nonNullName` alone afterwards.
+        assert_payloads(
+            &payloads,
+            &[
+                json!({
+                    "data": {"hero": {}},
+                    "pending": [
+                        {"id": "0", "path": ["hero"], "label": "R"},
+                        {"id": "1", "path": ["hero"], "label": "P"},
+                    ],
+                    "hasNext": true,
+                }),
+                json!({
+                    "incremental": [
+                        {"id": "0", "data": {"nonNullName": "Luke"}},
+                        {"id": "0", "data": {"id": "1"}},
+                        {"id": "1", "data": {"name": "Luke"}},
+                    ],
+                    "completed": [{"id": "0"}, {"id": "1"}],
+                    "hasNext": false,
+                }),
+            ],
+        );
+    }
+
+    /// it('Delivers shared child data when the second parent finishes before the first child')
+    ///
+    /// `id` is shared by C1 and C2. Upstream's `nonNullName` promise is a
+    /// yield that settles in the same generation as `name`, so P1 and P2
+    /// complete at one barrier and announce C1 and C2 together. `friends`
+    /// adds a generation (its items' `name`), so C1 finishes after C2: `id`
+    /// ships under C2 and C1 later completes with `friends` alone.
+    #[test]
+    fn delivers_shared_child_data_when_the_second_parent_finishes_before_the_first_child() {
+        let (payloads, _) = World {
+            slow: vec!["Hero.nonNullName", "Hero.friends"],
+            ..World::with_hero(Hero {
+                non_null_name: Ok("Luke".into()),
+                ..Hero::luke()
+            })
+        }
+        .run(
+            r#"
+      {
+        hero {
+          ... @defer(label: "P1") {
+            name
+            ... @defer(label: "C1") {
+              id
+              friends { name }
+            }
+          }
+          ... @defer(label: "P2") {
+            nonNullName
+            ... @defer(label: "C2") {
+              id
+            }
+          }
+        }
+      }
+    "#,
+            Value::Null,
+            incremental(),
+        );
+        // upstream: P1 with C1 announced; then P2 with C2 announced,
+        // delivering `id` and completed; then C1.
+        assert_payloads(
+            &payloads,
+            &[
+                json!({
+                    "data": {"hero": {}},
+                    "pending": [
+                        {"id": "0", "path": ["hero"], "label": "P1"},
+                        {"id": "1", "path": ["hero"], "label": "P2"},
+                    ],
+                    "hasNext": true,
+                }),
+                json!({
+                    "pending": [
+                        {"id": "2", "path": ["hero"], "label": "C1"},
+                        {"id": "3", "path": ["hero"], "label": "C2"},
+                    ],
+                    "incremental": [
+                        {"id": "0", "data": {"name": "Luke"}},
+                        {"id": "1", "data": {"nonNullName": "Luke"}},
+                    ],
+                    "completed": [{"id": "0"}, {"id": "1"}],
+                    "hasNext": true,
+                }),
+                json!({
+                    "incremental": [{"id": "3", "data": {"id": "1"}}],
+                    "completed": [{"id": "3"}],
+                    "hasNext": true,
+                }),
+                json!({
+                    "incremental": [{
+                        "id": "2",
+                        "data": {"friends": [{"name": "Han"}, {"name": "Leia"}, {"name": "C-3PO"}]},
+                    }],
+                    "completed": [{"id": "2"}],
+                    "hasNext": false,
+                }),
+            ],
+        );
+    }
+
+    /// it('Finishes a later shared owner without repeating data delivered after another owner failed')
+    ///
+    /// `id` is shared by R, C1 and C2. R fails on `nonNullName` in P1's
+    /// payload (`name`'s promise is a yield, settled in the same
+    /// generation). `nestedObject { name }` adds a generation, so P2
+    /// completes a barrier later, beside C1: `id` ships once, under C1, and
+    /// C2 later completes with `friends` alone. The spy's call count is a
+    /// per-object claim and is not asserted.
+    #[test]
+    fn finishes_a_later_shared_owner_without_repeating_data_delivered_after_another_owner_failed() {
+        let (payloads, _) = World {
+            slow: vec!["Hero.name", "Hero.nestedObject"],
+            ..World::with_hero(Hero {
+                non_null_name: Err(HERO_NON_NULL_NAME),
+                nested_object: Some(NestedObject {
+                    name: Ok(Some("parent".into())),
+                    ..Default::default()
+                }),
+                ..Hero::luke()
+            })
+        }
+        .run(
+            r#"
+      {
+        hero {
+          ... @defer(label: "R") {
+            nonNullName
+            id
+          }
+          ... @defer(label: "P1") {
+            name
+            ... @defer(label: "C1") {
+              id
+            }
+          }
+          ... @defer(label: "P2") {
+            nestedObject { name }
+            ... @defer(label: "C2") {
+              id
+              friends { name }
+            }
+          }
+        }
+      }
+    "#,
+            Value::Null,
+            incremental(),
+        );
+        // upstream: R's failure; then P1 with C1 announced, delivering `id`
+        // and completed; then P2 with C2 announced, delivering `friends` and
+        // completed; one payload each.
+        assert_payloads(
+            &payloads,
+            &[
+                json!({
+                    "data": {"hero": {}},
+                    "pending": [
+                        {"id": "0", "path": ["hero"], "label": "R"},
+                        {"id": "1", "path": ["hero"], "label": "P1"},
+                        {"id": "2", "path": ["hero"], "label": "P2"},
+                    ],
+                    "hasNext": true,
+                }),
+                json!({
+                    "pending": [{"id": "3", "path": ["hero"], "label": "C1"}],
+                    "incremental": [{"id": "1", "data": {"name": "Luke"}}],
+                    "completed": [
+                        {
+                            "id": "0",
+                            "errors": [{
+                                "message": HERO_NON_NULL_NAME,
+                                "locations": [{"line": 5, "column": 13}],
+                                "path": ["hero", "nonNullName"],
+                            }],
+                        },
+                        {"id": "1"},
+                    ],
+                    "hasNext": true,
+                }),
+                json!({
+                    "pending": [{"id": "4", "path": ["hero"], "label": "C2"}],
+                    "incremental": [
+                        {"id": "2", "data": {"nestedObject": {"name": "parent"}}},
+                        {"id": "3", "data": {"id": "1"}},
+                    ],
+                    "completed": [{"id": "2"}, {"id": "3"}],
+                    "hasNext": true,
+                }),
+                json!({
+                    "incremental": [{
+                        "id": "4",
+                        "data": {"friends": [{"name": "Han"}, {"name": "Leia"}, {"name": "C-3PO"}]},
+                    }],
+                    "completed": [{"id": "4"}],
                     "hasNext": false,
                 }),
             ],

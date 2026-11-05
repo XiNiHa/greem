@@ -133,6 +133,10 @@ pub struct NestedObject {
     pub deeper_nested_object: Option<DeeperNestedObject>,
     /// Yields before each scalar field resolves.
     pub yields: u32,
+    /// Further yields before `scalarField` alone resolves.
+    pub scalar_field_yields: u32,
+    /// Further yields before `nonNullScalarField` alone resolves.
+    pub non_null_scalar_field_yields: u32,
 }
 
 impl Default for NestedObject {
@@ -143,6 +147,8 @@ impl Default for NestedObject {
             nested_friend_list: Source::default(),
             deeper_nested_object: None,
             yields: 0,
+            scalar_field_yields: 0,
+            non_null_scalar_field_yields: 0,
         }
     }
 }
@@ -234,7 +240,7 @@ impl NestedObject {
         ctx: &Context<World>,
     ) -> Result<Option<String>, Error> {
         ctx.app().harness.trace("NestedObject.scalarField", 1).await;
-        yields(self.yields).await;
+        yields(self.yields + self.scalar_field_yields).await;
         self.scalar_field.clone()
     }
     async fn non_null_scalar_field(
@@ -246,7 +252,7 @@ impl NestedObject {
             .harness
             .trace("NestedObject.nonNullScalarField", 1)
             .await;
-        yields(self.yields).await;
+        yields(self.yields + self.non_null_scalar_field_yields).await;
         self.non_null_scalar_field.clone()
     }
     async fn nested_friend_list(

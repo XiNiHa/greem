@@ -1,7 +1,8 @@
 //! The area for graphql-js `src/execution/incremental/__tests__/defer-test.ts`:
 //! its schema, world and resolvers. The world is upstream's `rootValue`,
 //! written out per case: each object's data, which leaves error, and which
-//! resolvers are slow.
+//! resolvers are slow. [`shared`] is the world of the cases that build their
+//! own schema.
 
 use crate::harness::{Area, Harness, HasHarness, pending_once};
 use futures::StreamExt;
@@ -531,5 +532,148 @@ impl LateSide {
     ) -> Result<Option<String>, Error> {
         ctx.app().trace("LateSide.value").await;
         leaf(&self.value)
+    }
+}
+
+/// The world of the cases that build their own `testSchema`
+/// (`schemas/graphql_js/defer_shared.graphql`): upstream's root fields at the
+/// root, with the same leaf encoding and `slow` pacing as the defer world.
+pub mod shared {
+    use super::{Leaf, NonNull, leaf, non_null};
+    use crate::harness::{Area, Harness, HasHarness, pending_once};
+    use greem::{Args, Context, Error, NoMutation, Roots, SchemaBuilder};
+
+    pub mod schema {
+        greem::include_schema!("graphql_js_defer_shared.rs");
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct World {
+        pub harness: Harness,
+        pub bad: NonNull<String>,
+        pub parent: Leaf<String>,
+        pub user: Option<User>,
+        pub keep: Leaf<String>,
+        pub value: Leaf<String>,
+        pub late_bad: NonNull<String>,
+        /// `Type.field` names whose resolver yields once before answering,
+        /// once per listing: upstream's promises, resolved by hand in order.
+        pub slow: Vec<&'static str>,
+    }
+
+    impl Default for World {
+        fn default() -> Self {
+            World {
+                harness: Harness::default(),
+                bad: Err("Query.bad is unset"),
+                parent: Ok(None),
+                user: None,
+                keep: Ok(None),
+                value: Ok(None),
+                late_bad: Err("Query.lateBad is unset"),
+                slow: Vec::new(),
+            }
+        }
+    }
+
+    impl World {
+        async fn trace(&self, name: &'static str) {
+            self.harness.trace(name, 1).await;
+            for _ in self.slow.iter().filter(|slow| **slow == name) {
+                pending_once().await;
+            }
+        }
+    }
+
+    impl HasHarness for World {
+        fn harness(&self) -> &Harness {
+            &self.harness
+        }
+    }
+
+    impl Area for World {
+        type Info = schema::__private::Info;
+        type Query = QueryRoot;
+        type Mutation = NoMutation;
+        type Subscription = greem::NoSubscription;
+
+        fn builder() -> SchemaBuilder<Self::Info, Self, Self::Query, Self::Mutation> {
+            schema::Schema::<World>::builder().query::<QueryRoot>()
+        }
+
+        fn roots() -> Roots<QueryRoot> {
+            Roots::query(QueryRoot).with_mutation(NoMutation)
+        }
+    }
+
+    pub struct QueryRoot;
+
+    #[derive(Clone, Debug)]
+    pub struct User {
+        pub bad: NonNull<String>,
+    }
+
+    #[greem::object(schema = crate::graphql_js::defer::shared::schema, type = "Query", context = World)]
+    impl QueryRoot {
+        async fn bad(
+            &self,
+            _args: &Args<schema::Query::bad>,
+            ctx: &Context<World>,
+        ) -> Result<String, Error> {
+            ctx.app().trace("Query.bad").await;
+            non_null(&ctx.app().bad)
+        }
+        async fn parent(
+            &self,
+            _args: &Args<schema::Query::parent>,
+            ctx: &Context<World>,
+        ) -> Result<Option<String>, Error> {
+            ctx.app().trace("Query.parent").await;
+            leaf(&ctx.app().parent)
+        }
+        async fn user(
+            &self,
+            _args: &Args<schema::Query::user>,
+            ctx: &Context<World>,
+        ) -> Option<User> {
+            ctx.app().trace("Query.user").await;
+            ctx.app().user.clone()
+        }
+        async fn keep(
+            &self,
+            _args: &Args<schema::Query::keep>,
+            ctx: &Context<World>,
+        ) -> Result<Option<String>, Error> {
+            ctx.app().trace("Query.keep").await;
+            leaf(&ctx.app().keep)
+        }
+        async fn value(
+            &self,
+            _args: &Args<schema::Query::value>,
+            ctx: &Context<World>,
+        ) -> Result<Option<String>, Error> {
+            ctx.app().trace("Query.value").await;
+            leaf(&ctx.app().value)
+        }
+        async fn late_bad(
+            &self,
+            _args: &Args<schema::Query::lateBad>,
+            ctx: &Context<World>,
+        ) -> Result<String, Error> {
+            ctx.app().trace("Query.lateBad").await;
+            non_null(&ctx.app().late_bad)
+        }
+    }
+
+    #[greem::object(schema = crate::graphql_js::defer::shared::schema, type = "User", context = World)]
+    impl User {
+        async fn bad(
+            &self,
+            _args: &Args<schema::User::bad>,
+            ctx: &Context<World>,
+        ) -> Result<String, Error> {
+            ctx.app().trace("User.bad").await;
+            non_null(&self.bad)
+        }
     }
 }

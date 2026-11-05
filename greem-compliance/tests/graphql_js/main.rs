@@ -9,7 +9,7 @@
 //! - (ii) a JS mechanism: iterator `return()`, promise timing as the subject,
 //!   abort signals, `executeSync`;
 //! - (iii) a graphql-js option greem lacks: `enableEarlyExecution`,
-//!   `experimentalFragmentArguments`, `assumeValid`;
+//!   `experimentalFragmentArguments`, `assumeValid`, `allowEmptySelectionSets`;
 //! - (iv) vacuous, rejected at compile time: a null returned at a non-null
 //!   position, a wrong runtime type, a non-list at a list position.
 
