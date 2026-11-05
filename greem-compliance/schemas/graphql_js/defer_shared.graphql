@@ -1,0 +1,20 @@
+"""
+The per-case `testSchema` of two graphql-js
+src/execution/incremental/__tests__/defer-test.ts cases, merged:
+`Discards deferred descendants discovered after their parent fails while
+retaining a live owner` and `Ignores late shared outcomes after a fragment and
+its descendants fail`. Its `parent: String` cannot share a root with the defer
+area's `parent: LateParent`.
+"""
+type Query {
+  bad: String!
+  parent: String
+  user: User
+  keep: String
+  value: String
+  lateBad: String!
+}
+
+type User {
+  bad: String!
+}

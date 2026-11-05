@@ -8,6 +8,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for suite in [
         "stream",
         "defer",
+        "defer_shared",
         "nonnull",
         "error_propagation",
         "abstract",

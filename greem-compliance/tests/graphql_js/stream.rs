@@ -1424,6 +1424,254 @@ mod stream_directive {
     // resolves by hand; the response is 'Filters payloads that are nulled by a later
     // synchronous error'.
 
+    /// it('Releases a buffered shared stream after its other fragment fails')
+    ///
+    /// `nestedFriendList` is shared by R and C (nested in P). R fails on
+    /// `nonNullScalarField`, which does not touch the shared set; the set
+    /// ships under C, announcing its stream, whose items ship a barrier
+    /// later. `scalarField` is slow by a yield, which settles in the same
+    /// generation, so R fails in P's payload.
+    #[test]
+    fn releases_a_buffered_shared_stream_after_its_other_fragment_fails() {
+        let world = World {
+            nested_object: Some(NestedObject {
+                non_null_scalar_field: Err(Error::new(
+                    "Cannot return null for non-nullable field NestedObject.nonNullScalarField.",
+                )),
+                scalar_field: Ok(Some("parent".into())),
+                scalar_field_yields: 1,
+                nested_friend_list: Source::List(friends()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let (payloads, _) = world.run(
+            r#"
+      {
+        nestedObject {
+          ... @defer(label: "R") {
+            nonNullScalarField
+            ...Friends
+          }
+          ... @defer(label: "P") {
+            scalarField
+            ... @defer(label: "C") {
+              ...Friends
+            }
+          }
+        }
+      }
+      fragment Friends on NestedObject {
+        nestedFriendList @stream(initialCount: 0) {
+          name
+        }
+      }
+    "#,
+            Value::Null,
+            incremental(),
+        );
+        // upstream: R's failure in a payload of its own; then C announced
+        // and delivered, with the stream announced, in P's payload.
+        assert_payloads(
+            &payloads,
+            &[
+                json!({
+                    "data": {"nestedObject": {}},
+                    "pending": [
+                        {"id": "0", "path": ["nestedObject"], "label": "R"},
+                        {"id": "1", "path": ["nestedObject"], "label": "P"},
+                    ],
+                    "hasNext": true,
+                }),
+                json!({
+                    "pending": [{"id": "2", "path": ["nestedObject"], "label": "C"}],
+                    "incremental": [{"id": "1", "data": {"scalarField": "parent"}}],
+                    "completed": [
+                        {
+                            "id": "0",
+                            "errors": [{
+                                "message": "Cannot return null for non-nullable field NestedObject.nonNullScalarField.",
+                                "locations": [{"line": 5, "column": 13}],
+                                "path": ["nestedObject", "nonNullScalarField"],
+                            }],
+                        },
+                        {"id": "1"},
+                    ],
+                    "hasNext": true,
+                }),
+                json!({
+                    "pending": [{"id": "3", "path": ["nestedObject", "nestedFriendList"]}],
+                    "incremental": [{"id": "2", "data": {"nestedFriendList": []}}],
+                    "completed": [{"id": "2"}],
+                    "hasNext": true,
+                }),
+                json!({
+                    "incremental": [{
+                        "id": "3",
+                        "items": [{"name": "Luke"}, {"name": "Han"}, {"name": "Leia"}],
+                    }],
+                    "completed": [{"id": "3"}],
+                    "hasNext": false,
+                }),
+            ],
+        );
+    }
+
+    /// it('Starts a shared stream before another fragment finishes its separate field')
+    ///
+    /// `nestedFriendList` is shared by R and C. Upstream's promises are
+    /// yields, and greem settles them in one generation, so R cannot finish
+    /// after P: R and P complete at one barrier and the shared set ships
+    /// under R, the first member to complete, announcing its stream. C then
+    /// has nothing left to deliver and is never announced.
+    #[test]
+    fn starts_a_shared_stream_before_another_fragment_finishes_its_separate_field() {
+        let world = World {
+            nested_object: Some(NestedObject {
+                non_null_scalar_field: Ok("root".into()),
+                non_null_scalar_field_yields: 1,
+                scalar_field: Ok(Some("parent".into())),
+                scalar_field_yields: 1,
+                nested_friend_list: Source::List(friends()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let (payloads, _) = world.run(
+            r#"
+      {
+        nestedObject {
+          ... @defer(label: "R") {
+            nonNullScalarField
+            ...Friends
+          }
+          ... @defer(label: "P") {
+            scalarField
+            ... @defer(label: "C") {
+              ...Friends
+            }
+          }
+        }
+      }
+      fragment Friends on NestedObject {
+        nestedFriendList @stream(initialCount: 0) {
+          name
+        }
+      }
+    "#,
+            Value::Null,
+            incremental(),
+        );
+        // upstream: P with C announced as id 2 and the stream as id 3, C
+        // delivering the list; then the items; then R alone.
+        assert_payloads(
+            &payloads,
+            &[
+                json!({
+                    "data": {"nestedObject": {}},
+                    "pending": [
+                        {"id": "0", "path": ["nestedObject"], "label": "R"},
+                        {"id": "1", "path": ["nestedObject"], "label": "P"},
+                    ],
+                    "hasNext": true,
+                }),
+                json!({
+                    "pending": [{"id": "2", "path": ["nestedObject", "nestedFriendList"]}],
+                    "incremental": [
+                        {"id": "0", "data": {"nonNullScalarField": "root"}},
+                        {"id": "0", "data": {"nestedFriendList": []}},
+                        {"id": "1", "data": {"scalarField": "parent"}},
+                    ],
+                    "completed": [{"id": "0"}, {"id": "1"}],
+                    "hasNext": true,
+                }),
+                json!({
+                    "incremental": [{
+                        "id": "2",
+                        "items": [{"name": "Luke"}, {"name": "Han"}, {"name": "Leia"}],
+                    }],
+                    "completed": [{"id": "2"}],
+                    "hasNext": false,
+                }),
+            ],
+        );
+    }
+
+    /// it('Does not publish a shared stream when its remaining fragment replays a failure')
+    ///
+    /// `nonNullScalarField` and `nestedFriendList` are both selected by R
+    /// and C, so they form one shared set; its failure fails both, and its
+    /// stream is never announced. Upstream's promises are yields
+    /// (`nestedFriendList` a list of promises), settled in the same
+    /// generation, so R fails in P's payload. C has no set of its own and
+    /// its one shared set has settled, so it is never announced.
+    #[test]
+    fn does_not_publish_a_shared_stream_when_its_remaining_fragment_replays_a_failure() {
+        let world = World {
+            nested_object: Some(NestedObject {
+                non_null_scalar_field: Err(Error::new(
+                    "Cannot return null for non-nullable field NestedObject.nonNullScalarField.",
+                )),
+                scalar_field: Ok(Some("parent".into())),
+                scalar_field_yields: 1,
+                nested_friend_list: Source::Promises(friends()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let (payloads, _) = world.run(
+            r#"
+      {
+        nestedObject {
+          ... @defer(label: "R") {
+            nonNullScalarField
+            ...Friends
+          }
+          ... @defer(label: "P") {
+            scalarField
+            ... @defer(label: "C") {
+              nonNullScalarField
+              ...Friends
+            }
+          }
+        }
+      }
+      fragment Friends on NestedObject {
+        nestedFriendList @stream(initialCount: 0) {
+          name
+        }
+      }
+    "#,
+            Value::Null,
+            incremental(),
+        );
+        let error = json!({
+            "message": "Cannot return null for non-nullable field NestedObject.nonNullScalarField.",
+            "locations": [{"line": 5, "column": 13}, {"line": 11, "column": 15}],
+            "path": ["nestedObject", "nonNullScalarField"],
+        });
+        // upstream: R's failure; then P, with C announced as id 2 and failed
+        // with the same error.
+        assert_payloads(
+            &payloads,
+            &[
+                json!({
+                    "data": {"nestedObject": {}},
+                    "pending": [
+                        {"id": "0", "path": ["nestedObject"], "label": "R"},
+                        {"id": "1", "path": ["nestedObject"], "label": "P"},
+                    ],
+                    "hasNext": true,
+                }),
+                json!({
+                    "incremental": [{"id": "1", "data": {"scalarField": "parent"}}],
+                    "completed": [{"id": "0", "errors": [error]}, {"id": "1"}],
+                    "hasNext": false,
+                }),
+            ],
+        );
+    }
+
     /// it('Filters stream payloads that are nulled in a deferred payload')
     #[test]
     fn filters_stream_payloads_that_are_nulled_in_a_deferred_payload() {

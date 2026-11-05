@@ -157,6 +157,10 @@ mod handles_basic_execution_tasks {
         );
     }
 
+    // it('executes empty selection sets')
+    // Not ported, reason (iii): `allowEmptySelectionSets`, a parser option; the grammar greem
+    // parses by requires a selection in every selection set, so `{ }` is a syntax error.
+
     // it('provides info about current execution state')
     // Not ported, reason (i): asserts the resolver's `info` contents.
 
